@@ -89,6 +89,7 @@ mypy-extensions==1.0.0
 newsapi-python==0.2.7
 nodeenv==1.9.1
 numpy==1.26.4
+pandas==2.2.2
 oauthlib==3.2.2
 onnxruntime==1.18.1
 openai==1.37.1
