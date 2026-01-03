@@ -6,8 +6,16 @@ import asyncio
 import logging
 from typing import List, Optional, Dict, Any
 from datetime import datetime
-from agents.polymarket.polymarket import Polymarket
+import httpx
 from agents.polymarket.orderbook_db import OrderbookDatabase
+
+# Try to import Polymarket, but make it optional
+try:
+    from agents.polymarket.polymarket import Polymarket
+    POLYMARKET_AVAILABLE = True
+except Exception:
+    POLYMARKET_AVAILABLE = False
+    Polymarket = None
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +46,27 @@ class OrderbookPoller:
         self.token_ids = token_ids
         self.poll_interval = poll_interval
         self.market_info = market_info or {}
-        self.polymarket = Polymarket()
+        # Only initialize Polymarket if available (requires wallet key)
+        self.polymarket = Polymarket() if POLYMARKET_AVAILABLE else None
         self.running = False
+    
+    def _fetch_orderbook_direct(self, token_id: str):
+        """Fetch orderbook directly from CLOB API (no auth needed)."""
+        try:
+            url = "https://clob.polymarket.com/book"
+            response = httpx.get(url, params={"token_id": token_id}, timeout=10.0)
+            
+            if response.status_code == 200:
+                data = response.json()
+                bids = [[float(b["price"]), float(b["size"])] for b in data.get("bids", [])]
+                asks = [[float(a["price"]), float(a["size"])] for a in data.get("asks", [])]
+                return bids, asks
+            else:
+                logger.warning(f"Failed to fetch orderbook for {token_id}: HTTP {response.status_code}")
+                return [], []
+        except Exception as e:
+            logger.error(f"Error fetching orderbook directly: {e}")
+            return [], []
     
     async def _fetch_and_save_orderbook(self, token_id: str):
         """Fetch orderbook for a token and save to database."""

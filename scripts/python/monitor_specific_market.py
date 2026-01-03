@@ -22,10 +22,11 @@ from typing import List
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 
 from agents.polymarket.orderbook_db import OrderbookDatabase
-from agents.polymarket.orderbook_stream import OrderbookLogger
+from agents.polymarket.orderbook_poller import OrderbookPoller
 from agents.polymarket.market_finder import get_token_ids_from_market, get_market_info_for_logging
 import httpx
 import ast
+import asyncio
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,6 +57,22 @@ def get_market_by_slug(slug: str) -> dict:
         markets = response.json()
         if markets:
             return markets[0]
+    
+    return None
+
+
+def get_orderbook_direct(token_id: str):
+    """Get orderbook directly from CLOB API without authentication."""
+    # CLOB API endpoint for orderbook (public, no auth needed)
+    url = f"https://clob.polymarket.com/book"
+    response = httpx.get(url, params={"token_id": token_id})
+    
+    if response.status_code == 200:
+        data = response.json()
+        # Parse the response into bids/asks format
+        bids = [[float(b["price"]), float(b["size"])] for b in data.get("bids", [])]
+        asks = [[float(a["price"]), float(a["size"])] for a in data.get("asks", [])]
+        return {"bids": bids, "asks": asks}
     
     return None
 
@@ -123,18 +140,36 @@ async def monitor_markets(event_slugs: List[str], market_ids: List[str]):
     logger.info(f"Starting to monitor {len(all_token_ids)} tokens")
     logger.info(f"Token IDs: {all_token_ids}")
     
-    # Start monitoring
-    logger_service = OrderbookLogger(db, all_token_ids, market_info=all_market_info)
+    # Check if we have wallet key for WebSocket, otherwise use polling
+    has_wallet_key = bool(os.getenv("POLYGON_WALLET_PRIVATE_KEY"))
     
-    try:
-        await logger_service.start()
-    except KeyboardInterrupt:
-        logger.info("Stopping monitor...")
-        await logger_service.stop()
-    except Exception as e:
-        logger.error(f"Error: {e}", exc_info=True)
-        await logger_service.stop()
-        raise
+    if has_wallet_key:
+        # Use WebSocket (more real-time)
+        from agents.polymarket.orderbook_stream import OrderbookLogger
+        logger.info("Using WebSocket mode (wallet key found)")
+        logger_service = OrderbookLogger(db, all_token_ids, market_info=all_market_info)
+        try:
+            await logger_service.start()
+        except KeyboardInterrupt:
+            logger.info("Stopping monitor...")
+            await logger_service.stop()
+        except Exception as e:
+            logger.error(f"Error: {e}", exc_info=True)
+            await logger_service.stop()
+            raise
+    else:
+        # Use polling (no wallet key needed)
+        logger.info("Using polling mode (no wallet key - using direct API calls)")
+        poller = OrderbookPoller(db, all_token_ids, poll_interval=2.0, market_info=all_market_info)
+        try:
+            await poller.poll_loop()
+        except KeyboardInterrupt:
+            logger.info("Stopping monitor...")
+            poller.stop()
+        except Exception as e:
+            logger.error(f"Error: {e}", exc_info=True)
+            poller.stop()
+            raise
 
 
 async def main():
