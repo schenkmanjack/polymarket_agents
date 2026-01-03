@@ -4,7 +4,6 @@ Utilities for finding markets by duration (15 minutes, 1 hour, etc.)
 from datetime import datetime, timedelta
 from typing import List, Optional, Set
 import ast
-from agents.polymarket.polymarket import Polymarket
 from agents.polymarket.gamma import GammaMarketClient
 
 
