@@ -66,7 +66,8 @@ class AutoMarketMonitor:
         # Check 15-minute markets
         if self.monitor_15min:
             logger.info("Checking for new 15-minute markets...")
-            markets_15min = find_15min_markets(active_only=True, limit=100)
+            markets_15min = find_15min_markets(active_only=True, limit=500, check_question_text=True)
+            logger.debug(f"Found {len(markets_15min)} potential 15-minute markets")
             for market in markets_15min:
                 market_id = str(market.get("id", ""))
                 if market_id not in self.monitored_market_ids:

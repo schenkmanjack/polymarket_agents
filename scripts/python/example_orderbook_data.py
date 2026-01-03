@@ -85,8 +85,8 @@ def show_orderbook_structure():
     print()
     
     print("METADATA:")
-    if snapshot.metadata:
-        print(f"  {json.dumps(snapshot.metadata, indent=2)}")
+    if snapshot.extra_metadata:
+        print(f"  {json.dumps(snapshot.extra_metadata, indent=2)}")
     print()
     
     print("=" * 80)

@@ -40,7 +40,7 @@ class OrderbookSnapshot(Base):
     outcome = Column(String, nullable=True)  # Which outcome this token represents
     
     # Additional metadata
-    metadata = Column(JSON, nullable=True)  # Store any additional data
+    extra_metadata = Column(JSON, nullable=True)  # Store any additional data (renamed from 'metadata' - SQLAlchemy reserved)
     
     __table_args__ = (
         Index('idx_token_timestamp', 'token_id', 'timestamp'),
@@ -154,7 +154,7 @@ class OrderbookDatabase:
                 asks=asks,
                 market_question=market_question,
                 outcome=outcome,
-                metadata=metadata,
+                extra_metadata=metadata,
             )
             
             session.add(snapshot)
