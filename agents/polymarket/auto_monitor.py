@@ -111,6 +111,14 @@ class AutoMarketMonitor:
     
     async def _start_monitoring(self, token_ids: List[str], market_info: Dict):
         """Start monitoring new tokens."""
+        # Auto-detect mode based on wallet key availability if mode is "websocket"
+        if self.mode == "websocket":
+            import os
+            has_wallet_key = bool(os.getenv("POLYGON_WALLET_PRIVATE_KEY"))
+            if not has_wallet_key:
+                logger.warning("WebSocket mode requested but no wallet key found. Falling back to polling.")
+                self.mode = "poll"
+        
         if self.mode == "websocket":
             # For WebSocket, we need to add subscriptions to existing stream
             # or create a new one if none exists

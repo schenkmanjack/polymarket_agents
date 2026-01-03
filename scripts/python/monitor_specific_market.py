@@ -140,13 +140,14 @@ async def monitor_markets(event_slugs: List[str], market_ids: List[str]):
     logger.info(f"Starting to monitor {len(all_token_ids)} tokens")
     logger.info(f"Token IDs: {all_token_ids}")
     
-    # Check if we have wallet key for WebSocket, otherwise use polling
+    # Check if we have wallet key for WebSocket (lower latency), otherwise use polling
     has_wallet_key = bool(os.getenv("POLYGON_WALLET_PRIVATE_KEY"))
     
     if has_wallet_key:
-        # Use WebSocket (more real-time)
+        # Use WebSocket (lower latency, more real-time)
         from agents.polymarket.orderbook_stream import OrderbookLogger
-        logger.info("Using WebSocket mode (wallet key found)")
+        logger.info("✓ Wallet key found - Using WebSocket mode (lower latency)")
+        logger.info("  WebSocket provides sub-second updates vs polling every 2+ seconds")
         logger_service = OrderbookLogger(db, all_token_ids, market_info=all_market_info)
         try:
             await logger_service.start()
@@ -158,8 +159,10 @@ async def monitor_markets(event_slugs: List[str], market_ids: List[str]):
             await logger_service.stop()
             raise
     else:
-        # Use polling (no wallet key needed)
-        logger.info("Using polling mode (no wallet key - using direct API calls)")
+        # Use polling (no wallet key needed, but higher latency)
+        logger.info("⚠ No wallet key found - Using polling mode (higher latency)")
+        logger.info("  Polling checks every 2 seconds vs WebSocket's sub-second updates")
+        logger.info("  Add POLYGON_WALLET_PRIVATE_KEY to use WebSocket for better performance")
         poller = OrderbookPoller(db, all_token_ids, poll_interval=2.0, market_info=all_market_info)
         try:
             await poller.poll_loop()
