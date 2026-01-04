@@ -94,6 +94,8 @@ class OrderbookStream:
                 
                 if token_id and self.on_orderbook_update:
                     await self.on_orderbook_update(token_id, orderbook_data)
+                else:
+                    logger.warning(f"Orderbook message missing token_id or callback: token_id={token_id}, has_callback={bool(self.on_orderbook_update)}")
             
             elif data.get("type") == "error":
                 error_msg = data.get('message', 'Unknown error')
