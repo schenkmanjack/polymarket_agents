@@ -103,31 +103,77 @@ def find_btc_updown_15m_events(limit: int = 100) -> List[Dict]:
     return btc_events
 
 
+def get_market_by_event_slug(slug: str) -> Optional[Dict]:
+    """
+    Fetch a specific market by event slug.
+    
+    Args:
+        slug: Event slug (e.g., 'btc-updown-15m-1767393900')
+    
+    Returns:
+        Market dict or None
+    """
+    events_url = "https://gamma-api.polymarket.com/events"
+    response = httpx.get(events_url, params={"slug": slug, "limit": 1})
+    
+    if response.status_code == 200:
+        events = response.json()
+        if events:
+            event = events[0]
+            markets = event.get("markets", [])
+            if markets:
+                market = markets[0]
+                market["_event_slug"] = event.get("slug")
+                market["_event_title"] = event.get("title")
+                return market
+    
+    return None
+
+
 def get_latest_btc_15m_market() -> Optional[Dict]:
     """
     Get the most recent BTC 15-minute market.
+    Tries multiple approaches:
+    1. Search events API
+    2. Try constructing slug from current timestamp (15-minute intervals)
     
     Returns:
         Market dict for the latest BTC updown 15-minute market, or None
     """
+    # Approach 1: Search events API
     events = find_btc_updown_15m_events(limit=200)
     
-    if not events:
-        return None
+    if events:
+        # Sort by creation date or ID to get latest
+        latest_event = max(events, key=lambda e: int(e.get("id", 0)))
+        markets = latest_event.get("markets", [])
+        if markets:
+            market = markets[0]
+            market["_event_slug"] = latest_event.get("slug")
+            market["_event_title"] = latest_event.get("title")
+            return market
     
-    # Sort by creation date or ID to get latest
-    # Events with higher IDs are usually newer
-    latest_event = max(events, key=lambda e: int(e.get("id", 0)))
+    # Approach 2: Try constructing slug from current time
+    # BTC 15-minute markets are created at 15-minute intervals
+    # Slug pattern: btc-updown-15m-{timestamp}
+    # Timestamp is usually the start time of the 15-minute window
     
-    # Get markets from the event
-    markets = latest_event.get("markets", [])
-    if markets:
-        # Return the first market (usually there's one per event)
-        market = markets[0]
-        # Add event info to market
-        market["_event_slug"] = latest_event.get("slug")
-        market["_event_title"] = latest_event.get("title")
-        return market
+    import time
+    current_time = int(time.time())
+    
+    # Try last few 15-minute intervals (markets might be created slightly before start)
+    for offset_minutes in [0, -15, -30, -45, -60]:
+        test_timestamp = current_time + (offset_minutes * 60)
+        # Round down to nearest 15-minute mark
+        test_timestamp = (test_timestamp // 900) * 900
+        
+        slug = f"btc-updown-15m-{test_timestamp}"
+        logger.debug(f"Trying constructed slug: {slug}")
+        
+        market = get_market_by_event_slug(slug)
+        if market:
+            logger.info(f"Found market using constructed slug: {slug}")
+            return market
     
     return None
 

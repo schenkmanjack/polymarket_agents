@@ -48,9 +48,18 @@ class BTC15mMonitor:
         """Check for new BTC 15-minute markets."""
         logger.info("Checking for new BTC updown 15-minute markets...")
         
-        # Get all active markets
-        markets = get_all_active_btc_15m_markets()
-        logger.info(f"Found {len(markets)} active BTC 15-minute markets")
+        # Try to get latest market (uses multiple detection approaches)
+        from agents.polymarket.btc_market_detector import get_latest_btc_15m_market
+        latest_market = get_latest_btc_15m_market()
+        
+        markets = []
+        if latest_market:
+            markets = [latest_market]
+            logger.info(f"Found latest BTC 15-minute market via detection")
+        else:
+            # Fallback: try getting all active markets
+            markets = get_all_active_btc_15m_markets()
+            logger.info(f"Found {len(markets)} active BTC 15-minute markets via search")
         
         new_token_ids = []
         new_market_info = {}
