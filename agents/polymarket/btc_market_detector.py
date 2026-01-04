@@ -167,6 +167,21 @@ def get_market_by_event_slug(slug: str) -> Optional[Dict]:
             markets = event.get("markets", [])
             if markets:
                 market = markets[0]
+                market_id = market.get("id")
+                
+                # Fetch full market details to ensure we have clobTokenIds
+                # Events API might not include all fields
+                if market_id:
+                    markets_url = "https://gamma-api.polymarket.com/markets"
+                    market_response = httpx.get(markets_url, params={"id": market_id, "limit": 1})
+                    if market_response.status_code == 200:
+                        full_markets = market_response.json()
+                        if full_markets:
+                            full_market = full_markets[0]
+                            # Merge full market data with event data
+                            market.update(full_market)
+                            logger.debug(f"Fetched full market details for ID={market_id}")
+                
                 market["_event_slug"] = event.get("slug")
                 market["_event_title"] = event.get("title")
                 logger.debug(f"Found market via slug {slug}: ID={market.get('id')}, clobTokenIds={market.get('clobTokenIds')}")
