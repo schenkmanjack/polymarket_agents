@@ -66,24 +66,37 @@ class BTC15mMonitor:
         
         for market in markets:
             event_slug = market.get("_event_slug", "")
+            market_id = market.get("id", "unknown")
+            question = market.get("question", "N/A")[:60]
+            
+            logger.info(f"Processing market: ID={market_id}, slug={event_slug}, question={question}...")
             
             # Skip if already monitoring this event
             if event_slug in self.monitored_event_slugs:
+                logger.info(f"  Already monitoring event {event_slug}, skipping")
                 continue
             
             # Check if market is still active
             if not is_market_active(market):
-                logger.debug(f"Market {event_slug} is not active, skipping")
+                logger.info(f"  Market {event_slug} is not active, skipping")
                 continue
             
             # Extract token IDs
+            logger.debug(f"  Extracting token IDs from market...")
+            logger.debug(f"  Market keys: {list(market.keys())}")
+            logger.debug(f"  clobTokenIds: {market.get('clobTokenIds')}")
+            
             token_ids = get_token_ids_from_market(market)
+            logger.info(f"  Extracted {len(token_ids)} token IDs: {token_ids}")
+            
             if not token_ids:
-                logger.warning(f"No token IDs found for market {event_slug}")
+                logger.warning(f"  No token IDs found for market {event_slug}")
+                logger.warning(f"  Market data: {market}")
                 continue
             
             # Check if we're already monitoring any of these tokens
             if any(tid in self.monitored_token_ids for tid in token_ids):
+                logger.info(f"  Already monitoring tokens {token_ids}, skipping")
                 continue
             
             # Add to monitoring

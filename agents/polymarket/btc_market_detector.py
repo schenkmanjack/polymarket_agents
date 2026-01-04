@@ -169,6 +169,7 @@ def get_market_by_event_slug(slug: str) -> Optional[Dict]:
                 market = markets[0]
                 market["_event_slug"] = event.get("slug")
                 market["_event_title"] = event.get("title")
+                logger.debug(f"Found market via slug {slug}: ID={market.get('id')}, clobTokenIds={market.get('clobTokenIds')}")
                 return market
     
     return None
@@ -197,6 +198,7 @@ def get_latest_btc_15m_market() -> Optional[Dict]:
             # Convert to format expected by rest of code
             latest["_event_slug"] = latest.get("slug", f"btc-updown-15m-{latest.get('id')}")
             latest["_event_title"] = latest.get("question", "")
+            logger.debug(f"CLOB market data: ID={latest.get('id')}, clobTokenIds={latest.get('clobTokenIds')}")
             return latest
     
     # Approach 2: Search events API
