@@ -105,10 +105,20 @@ class OrderbookStream:
         """Handle incoming WebSocket messages."""
         try:
             data = json.loads(message)
+            msg_type = data.get("type", "unknown")
+            
+            # Log first few messages to understand format
+            if not hasattr(self, '_message_count'):
+                self._message_count = 0
+            self._message_count += 1
+            if self._message_count <= 10:
+                logger.info(f"📨 WebSocket message #{self._message_count}: type={msg_type}, keys={list(data.keys())}")
+                if self._message_count <= 3:
+                    logger.info(f"   Full message: {str(data)[:500]}")
             
             # Handle different message types
-            if data.get("type") == "orderbook":
-                token_id = data.get("id")
+            if msg_type == "orderbook":
+                token_id = data.get("id") or data.get("asset_id")
                 orderbook_data = data.get("data", {})
                 
                 if token_id and self.on_orderbook_update:
@@ -116,22 +126,35 @@ class OrderbookStream:
                 else:
                     logger.warning(f"Orderbook message missing token_id or callback: token_id={token_id}, has_callback={bool(self.on_orderbook_update)}")
             
-            elif data.get("type") == "error":
+            elif msg_type == "error":
                 error_msg = data.get('message', 'Unknown error')
                 error_code = data.get('code', '')
                 logger.error(f"RTDS error: {error_msg} (code: {error_code})")
                 logger.error(f"Full error data: {data}")
             
-            elif data.get("type") == "subscribed":
-                logger.info(f"Successfully subscribed: {data}")
+            elif msg_type == "subscribed":
+                subscribed_id = data.get('id') or data.get('asset_id') or (data.get('assets_ids', [None])[0] if data.get('assets_ids') else None)
+                logger.info(f"✓ Successfully subscribed: {subscribed_id}")
+                logger.debug(f"Subscription confirmation: {data}")
             
-            elif data.get("type") == "unsubscribed":
+            elif msg_type == "unsubscribed":
                 logger.info(f"Successfully unsubscribed: {data}")
             
+            elif msg_type == "ping":
+                # Respond to ping with pong
+                pong_message = {"type": "pong"}
+                await self.websocket.send(json.dumps(pong_message))
+                logger.debug("Responded to ping with pong")
+            
+            else:
+                # Log any other message types we receive (for debugging)
+                if self._message_count <= 20:  # Log first 20 unknown messages
+                    logger.info(f"Received message type '{msg_type}': {str(data)[:200]}")
+            
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse message: {e}")
+            logger.error(f"Failed to parse message: {e}, message: {message[:200]}")
         except Exception as e:
-            logger.error(f"Error handling message: {e}")
+            logger.error(f"Error handling message: {e}", exc_info=True)
     
     async def listen(self):
         """Listen for incoming messages."""
