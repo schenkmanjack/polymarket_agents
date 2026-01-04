@@ -55,39 +55,25 @@ class OrderbookStream:
         if not self.websocket:
             await self.connect()
         
-        # RTDS subscription format - try multiple formats
-        subscribe_formats = [
-            # Format 1: Standard format
-            {
-                "type": "subscribe",
-                "channel": "orderbook",
-                "id": token_id,
-            },
-            # Format 2: With action instead of type
-            {
-                "action": "subscribe",
-                "channel": "orderbook",
-                "id": token_id,
-            },
-            # Format 3: With assets_ids array
-            {
-                "type": "subscribe",
-                "channel": "orderbook",
-                "assets_ids": [token_id],
-            },
-            # Format 4: Alternative format with topic
-            {
-                "action": "subscribe",
-                "topic": "orderbook",
-                "asset_id": token_id,
-            },
-        ]
+        # Build subscription message with authentication if available
+        subscribe_message = {
+            "type": "subscribe",
+            "channel": "orderbook",
+            "id": token_id,
+        }
+        
+        # Add API credentials if available (RTDS might require auth)
+        if self.api_credentials:
+            subscribe_message["auth"] = {
+                "key": self.api_credentials.get("api_key"),
+                "secret": self.api_credentials.get("api_secret"),
+                "passphrase": self.api_credentials.get("api_passphrase"),
+            }
+            logger.debug(f"Adding API credentials to subscription")
         
         try:
-            # Try first format
-            subscribe_message = subscribe_formats[0]
             logger.info(f"Sending subscription for token: {token_id[:20]}...")
-            logger.debug(f"Subscription message: {subscribe_message}")
+            logger.debug(f"Subscription message (without secrets): {json.dumps({k: v for k, v in subscribe_message.items() if k != 'auth'})}")
             
             await self.websocket.send(json.dumps(subscribe_message))
             self.subscribed_tokens.add(token_id)
