@@ -174,6 +174,8 @@ class BTC15mMonitor:
 async def main():
     from agents.polymarket.orderbook_db import OrderbookDatabase
     
+    # Initialize database (will use DATABASE_URL from env if set, otherwise SQLite)
+    # This will log which database it's connecting to
     db = OrderbookDatabase()
     monitor = BTC15mMonitor(db, check_interval=60.0)
     
