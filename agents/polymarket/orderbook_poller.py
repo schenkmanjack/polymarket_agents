@@ -71,17 +71,28 @@ class OrderbookPoller:
     async def _fetch_and_save_orderbook(self, token_id: str):
         """Fetch orderbook for a token and save to database."""
         try:
-            orderbook = self.polymarket.get_orderbook(token_id)
+            # Try using direct HTTP call first (works without wallet key)
+            bids, asks = self._fetch_orderbook_direct(token_id)
             
-            # Convert OrderBookSummary to lists
-            bids = [[float(bid.price), float(bid.size)] for bid in orderbook.bids]
-            asks = [[float(ask.price), float(ask.size)] for ask in orderbook.asks]
+            if not bids and not asks:
+                # Fallback: try using Polymarket client if available
+                if self.polymarket.private_key:
+                    try:
+                        orderbook = self.polymarket.get_orderbook(token_id)
+                        bids = [[float(bid.price), float(bid.size)] for bid in orderbook.bids]
+                        asks = [[float(ask.price), float(ask.size)] for ask in orderbook.asks]
+                    except Exception as e:
+                        logger.warning(f"Polymarket client failed for {token_id[:20]}...: {e}")
+            
+            if not bids and not asks:
+                logger.warning(f"No orderbook data retrieved for token {token_id[:20]}...")
+                return
             
             # Get market info if available
             market_meta = self.market_info.get(token_id, {})
             
             # Save to database
-            self.db.save_snapshot(
+            snapshot = self.db.save_snapshot(
                 token_id=token_id,
                 bids=bids,
                 asks=asks,
@@ -91,10 +102,18 @@ class OrderbookPoller:
                 metadata={"source": "polling", "poll_interval": self.poll_interval},
             )
             
-            logger.debug(f"Saved orderbook snapshot for token {token_id}")
+            # Log periodically to avoid spam
+            if not hasattr(self, '_save_count'):
+                self._save_count = {}
+            self._save_count[token_id] = self._save_count.get(token_id, 0) + 1
+            
+            if self._save_count[token_id] % 10 == 1:
+                best_bid = bids[0][0] if bids else None
+                best_ask = asks[0][0] if asks else None
+                logger.info(f"✓ Saved orderbook snapshot #{self._save_count[token_id]} (DB ID: {snapshot.id}) for token {token_id[:20]}... | Bid: {best_bid}, Ask: {best_ask}")
             
         except Exception as e:
-            logger.error(f"Error fetching/saving orderbook for {token_id}: {e}")
+            logger.error(f"❌ Error fetching/saving orderbook for {token_id[:20]}...: {e}", exc_info=True)
     
     async def poll_loop(self):
         """Main polling loop."""
