@@ -129,9 +129,6 @@ class BTC15mMonitor:
         
         # Try WebSocket first (lower latency) - now with API credentials
         # Fallback to polling if WebSocket fails
-        import os
-        has_wallet_key = bool(os.getenv("POLYGON_WALLET_PRIVATE_KEY"))
-        
         if has_wallet_key:
             # Try WebSocket first (lower latency, real-time updates)
             from agents.polymarket.orderbook_stream import OrderbookLogger
