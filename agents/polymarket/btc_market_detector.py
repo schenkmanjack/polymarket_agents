@@ -11,6 +11,50 @@ import re
 logger = logging.getLogger(__name__)
 
 
+def find_btc_15m_via_clob_api() -> List[Dict]:
+    """
+    Find BTC 15-minute markets using CLOB API directly.
+    This might return markets that Gamma API filters out.
+    
+    Returns:
+        List of market dicts
+    """
+    clob_url = "https://clob.polymarket.com/markets"
+    
+    try:
+        response = httpx.get(clob_url, params={"limit": 1000}, timeout=30.0)
+        if response.status_code != 200:
+            logger.warning(f"CLOB API returned {response.status_code}")
+            return []
+        
+        data = response.json()
+        markets = data.get("data", [])
+        
+        # Filter for BTC updown 15-minute markets
+        btc_markets = []
+        for market in markets:
+            # Check various fields for BTC/15m indicators
+            question = (market.get("question") or "").lower()
+            slug = (market.get("slug") or "").lower()
+            description = (market.get("description") or "").lower()
+            
+            # Look for BTC updown pattern
+            is_btc = "bitcoin" in question or "btc" in question or "btc" in slug
+            is_updown = "up" in question and "down" in question
+            is_15m = "15m" in slug or "15m" in question or "15 min" in question
+            
+            if is_btc and is_updown and is_15m:
+                btc_markets.append(market)
+                logger.debug(f"Found BTC 15m via CLOB: {market.get('slug', market.get('id'))}")
+        
+        logger.info(f"Found {len(btc_markets)} BTC 15-minute markets via CLOB API")
+        return btc_markets
+        
+    except Exception as e:
+        logger.error(f"Error fetching from CLOB API: {e}")
+        return []
+
+
 def find_btc_updown_15m_events(limit: int = 100) -> List[Dict]:
     """
     Find BTC updown 15-minute events by searching event slugs.
@@ -133,14 +177,29 @@ def get_market_by_event_slug(slug: str) -> Optional[Dict]:
 def get_latest_btc_15m_market() -> Optional[Dict]:
     """
     Get the most recent BTC 15-minute market.
-    Tries multiple approaches:
-    1. Search events API
-    2. Try constructing slug from current timestamp (15-minute intervals)
+    Tries multiple approaches in order:
+    1. CLOB API directly (most reliable, bypasses Gamma filtering)
+    2. Search events API
+    3. Try constructing slug from current timestamp (15-minute intervals)
     
     Returns:
         Market dict for the latest BTC updown 15-minute market, or None
     """
-    # Approach 1: Search events API
+    # Approach 1: CLOB API directly (bypasses Gamma API filtering)
+    clob_markets = find_btc_15m_via_clob_api()
+    if clob_markets:
+        # Filter for active markets and get latest
+        active_markets = [m for m in clob_markets if m.get("active") and not m.get("closed")]
+        if active_markets:
+            # Sort by ID (higher = newer) or creation time
+            latest = max(active_markets, key=lambda m: int(m.get("id", 0)))
+            logger.info(f"Found latest BTC 15m market via CLOB API: {latest.get('slug', latest.get('id'))}")
+            # Convert to format expected by rest of code
+            latest["_event_slug"] = latest.get("slug", f"btc-updown-15m-{latest.get('id')}")
+            latest["_event_title"] = latest.get("question", "")
+            return latest
+    
+    # Approach 2: Search events API
     events = find_btc_updown_15m_events(limit=200)
     
     if events:
@@ -151,13 +210,12 @@ def get_latest_btc_15m_market() -> Optional[Dict]:
             market = markets[0]
             market["_event_slug"] = latest_event.get("slug")
             market["_event_title"] = latest_event.get("title")
+            logger.info(f"Found latest BTC 15m market via Events API: {latest_event.get('slug')}")
             return market
     
-    # Approach 2: Try constructing slug from current time
+    # Approach 3: Try constructing slug from current time (fallback)
     # BTC 15-minute markets are created at 15-minute intervals
     # Slug pattern: btc-updown-15m-{timestamp}
-    # Timestamp is usually the start time of the 15-minute window
-    
     import time
     current_time = int(time.time())
     
