@@ -133,28 +133,48 @@ class BTC15mMonitor:
         has_wallet_key = bool(os.getenv("POLYGON_WALLET_PRIVATE_KEY"))
         
         if has_wallet_key:
-            # Use WebSocket (lower latency, real-time updates)
+            # Try WebSocket first (lower latency, real-time updates)
             from agents.polymarket.orderbook_stream import OrderbookLogger
             logger.info("✓ Wallet key found - Trying WebSocket mode with API credentials")
             logger.info("  WebSocket provides sub-second updates vs polling every 0.5s")
             
-            if self.logger_service is None:
-                # First time - create logger
-                self.logger_service = OrderbookLogger(
-                    self.db,
-                    token_ids,
-                    market_info=market_info,
-                )
-                self.logger_task = asyncio.create_task(self.logger_service.start())
-            else:
-                # Add new subscriptions to existing stream
-                if self.logger_service.stream and self.logger_service.stream.websocket:
-                    for token_id in token_ids:
-                        await self.logger_service.stream.subscribe_to_orderbook(token_id)
-                        self.logger_service.market_info.update(market_info)
-                        if token_id not in self.logger_service.token_ids:
-                            self.logger_service.token_ids.append(token_id)
-                    logger.info(f"Added {len(token_ids)} new subscriptions to WebSocket")
+            try:
+                if self.logger_service is None:
+                    # First time - create logger
+                    self.logger_service = OrderbookLogger(
+                        self.db,
+                        token_ids,
+                        market_info=market_info,
+                    )
+                    # Start WebSocket in background, but check if it's working
+                    self.logger_task = asyncio.create_task(self.logger_service.start())
+                    # Give it a moment to connect and receive first message
+                    await asyncio.sleep(2)
+                    
+                    # Check if we're receiving messages
+                    if hasattr(self.logger_service.stream, '_message_count'):
+                        msg_count = self.logger_service.stream._message_count
+                        if msg_count > 0:
+                            logger.info(f"✓ WebSocket is working! Received {msg_count} messages")
+                        else:
+                            logger.warning("⚠ WebSocket connected but no messages received - falling back to polling")
+                            raise Exception("No WebSocket messages")
+                    else:
+                        logger.warning("⚠ WebSocket may not be working - falling back to polling")
+                        raise Exception("WebSocket not initialized")
+                else:
+                    # Add new subscriptions to existing stream
+                    if self.logger_service.stream and self.logger_service.stream.websocket:
+                        for token_id in token_ids:
+                            await self.logger_service.stream.subscribe_to_orderbook(token_id)
+                            self.logger_service.market_info.update(market_info)
+                            if token_id not in self.logger_service.token_ids:
+                                self.logger_service.token_ids.append(token_id)
+                        logger.info(f"Added {len(token_ids)} new subscriptions to WebSocket")
+            except Exception as e:
+                logger.warning(f"WebSocket failed: {e} - Falling back to polling mode")
+                # Fall through to polling mode
+                has_wallet_key = False  # Force polling fallback
         else:
             # No wallet key - use polling
             logger.warning("⚠ No wallet key - Using polling mode")
