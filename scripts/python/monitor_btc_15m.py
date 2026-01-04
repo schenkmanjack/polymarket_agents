@@ -143,21 +143,32 @@ class BTC15mMonitor:
                         token_ids,
                         market_info=market_info,
                     )
-                    # Start WebSocket in background, but check if it's working
+                    # Start WebSocket in background - let it run and check later
                     self.logger_task = asyncio.create_task(self.logger_service.start())
-                    # Give it a moment to connect and receive first message
-                    await asyncio.sleep(2)
+                    # Give it more time to connect, subscribe, and receive messages
+                    await asyncio.sleep(5)
                     
-                    # Check if we're receiving messages
-                    if hasattr(self.logger_service.stream, '_message_count'):
+                    # Check if WebSocket stream exists and is connected
+                    if (self.logger_service.stream and 
+                        self.logger_service.stream.websocket and
+                        hasattr(self.logger_service.stream, '_message_count')):
                         msg_count = self.logger_service.stream._message_count
                         if msg_count > 0:
                             logger.info(f"✓ WebSocket is working! Received {msg_count} messages")
                         else:
-                            logger.warning("⚠ WebSocket connected but no messages received - falling back to polling")
+                            logger.warning("⚠ WebSocket connected but no messages received after 5s - falling back to polling")
+                            # Cancel WebSocket task
+                            self.logger_task.cancel()
+                            try:
+                                await self.logger_service.stop()
+                            except:
+                                pass
                             raise Exception("No WebSocket messages")
                     else:
-                        logger.warning("⚠ WebSocket may not be working - falling back to polling")
+                        logger.warning("⚠ WebSocket not properly initialized - falling back to polling")
+                        # Cancel WebSocket task
+                        if self.logger_task:
+                            self.logger_task.cancel()
                         raise Exception("WebSocket not initialized")
                 else:
                     # Add new subscriptions to existing stream
