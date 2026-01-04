@@ -168,6 +168,7 @@ class OrderbookLogger:
         self.db = db
         self.token_ids = token_ids
         self.market_info = market_info or {}
+        self._update_count = {}  # Track update counts per token
         self.stream = None
     
     async def _on_orderbook_update(self, token_id: str, orderbook_data: Dict[str, Any]):
@@ -204,7 +205,14 @@ class OrderbookLogger:
                 metadata={"source": "rtds", "raw_data": orderbook_data},
             )
             
-            logger.debug(f"Saved orderbook snapshot for token {token_id}")
+            # Log periodically (every 10th update) to avoid log spam
+            if not hasattr(self, '_update_count'):
+                self._update_count = {}
+            self._update_count[token_id] = self._update_count.get(token_id, 0) + 1
+            if self._update_count[token_id] % 10 == 1:
+                best_bid = bids[0][0] if bids else None
+                best_ask = asks[0][0] if asks else None
+                logger.info(f"✓ Saved orderbook snapshot #{self._update_count[token_id]} for token {token_id[:20]}... | Bid: {best_bid}, Ask: {best_ask}")
             
         except Exception as e:
             logger.error(f"Error saving orderbook update for {token_id}: {e}", exc_info=True)
