@@ -14,13 +14,17 @@ logger = logging.getLogger(__name__)
 def find_btc_updown_15m_events(limit: int = 100) -> List[Dict]:
     """
     Find BTC updown 15-minute events by searching event slugs.
+    Tries multiple approaches since API might filter results.
     
     Returns:
         List of event dicts matching btc-updown-15m pattern
     """
     events_url = "https://gamma-api.polymarket.com/events"
     
-    # Search for events - we'll filter by slug pattern
+    # Try without filters first (might get more results)
+    all_events = []
+    
+    # Approach 1: Search with filters
     response = httpx.get(events_url, params={
         "active": True,
         "closed": False,
@@ -28,23 +32,74 @@ def find_btc_updown_15m_events(limit: int = 100) -> List[Dict]:
         "limit": limit,
     })
     
-    if response.status_code != 200:
-        logger.error(f"Failed to fetch events: HTTP {response.status_code}")
-        return []
+    if response.status_code == 200:
+        all_events.extend(response.json())
     
-    events = response.json()
+    # Approach 2: Search without closed filter (recently closed might still be active)
+    response2 = httpx.get(events_url, params={
+        "active": True,
+        "archived": False,
+        "limit": limit,
+    })
+    
+    if response2.status_code == 200:
+        events2 = response2.json()
+        # Add events not already in list
+        existing_slugs = {e.get("slug") for e in all_events}
+        for event in events2:
+            if event.get("slug") not in existing_slugs:
+                all_events.append(event)
+    
+    # Approach 3: Search markets directly (might find them there)
+    markets_url = "https://gamma-api.polymarket.com/markets"
+    response3 = httpx.get(markets_url, params={
+        "active": True,
+        "limit": limit * 2,  # Check more markets
+        "enableOrderBook": True,
+    })
+    
+    if response3.status_code == 200:
+        markets = response3.json()
+        # Look for BTC markets in question/slug
+        for market in markets:
+            question = (market.get("question") or "").lower()
+            slug = (market.get("slug") or "").lower()
+            
+            # Check for BTC updown pattern
+            if ("bitcoin" in question or "btc" in question) and ("up" in question or "down" in question):
+                # Check if it's a 15-minute market
+                if "15" in question or "15m" in slug or extract_timestamp_from_slug(slug):
+                    # Try to find/create event for this market
+                    event_slug = market.get("slug", "").split("-")[0] if "-" in market.get("slug", "") else None
+                    if event_slug and "btc-updown-15m" in slug:
+                        # Create event-like dict
+                        event = {
+                            "id": market.get("id"),
+                            "slug": slug,
+                            "title": market.get("question", ""),
+                            "markets": [market],
+                        }
+                        if event not in all_events:
+                            all_events.append(event)
     
     # Filter for BTC updown 15-minute markets
     btc_events = []
-    for event in events:
+    for event in all_events:
         slug = (event.get("slug") or "").lower()
         title = (event.get("title") or "").lower()
         
         # Look for btc-updown-15m pattern in slug
-        if "btc-updown-15m" in slug or ("btc" in slug and "updown" in slug and "15m" in slug):
+        if "btc-updown-15m" in slug:
             btc_events.append(event)
-            logger.debug(f"Found BTC 15m event: {event.get('slug')}")
+            logger.info(f"Found BTC 15m event: {event.get('slug')}")
+        # Also check title/question for BTC updown pattern
+        elif ("bitcoin" in title or "btc" in title) and ("up" in title or "down" in title):
+            # Check if it's 15-minute (look for time ranges or 15m)
+            if "15" in title or "15m" in slug or extract_timestamp_from_slug(slug):
+                btc_events.append(event)
+                logger.info(f"Found BTC 15m event by pattern: {event.get('slug')}")
     
+    logger.debug(f"Found {len(btc_events)} BTC 15-minute events out of {len(all_events)} total events")
     return btc_events
 
 
