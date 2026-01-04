@@ -53,35 +53,48 @@ class OrderbookStream:
         if not self.websocket:
             await self.connect()
         
-        # Try multiple subscription formats - RTDS might use different formats
+        # RTDS subscription format - try multiple formats
         subscribe_formats = [
-            # Format 1: Standard RTDS format
+            # Format 1: Standard format
             {
                 "type": "subscribe",
                 "channel": "orderbook",
                 "id": token_id,
             },
-            # Format 2: With assets_ids array
+            # Format 2: With action instead of type
+            {
+                "action": "subscribe",
+                "channel": "orderbook",
+                "id": token_id,
+            },
+            # Format 3: With assets_ids array
             {
                 "type": "subscribe",
                 "channel": "orderbook",
                 "assets_ids": [token_id],
             },
-            # Format 3: Alternative format
+            # Format 4: Alternative format with topic
             {
-                "type": "subscribe",
-                "channel": "orderbook",
+                "action": "subscribe",
+                "topic": "orderbook",
                 "asset_id": token_id,
             },
         ]
         
         try:
-            # Try first format (most common)
+            # Try first format
             subscribe_message = subscribe_formats[0]
+            logger.info(f"Sending subscription for token: {token_id[:20]}...")
+            logger.debug(f"Subscription message: {subscribe_message}")
+            
             await self.websocket.send(json.dumps(subscribe_message))
             self.subscribed_tokens.add(token_id)
-            logger.info(f"Subscribed to orderbook for token: {token_id}")
-            logger.debug(f"Subscription message: {subscribe_message}")
+            logger.info(f"✓ Subscription sent for token: {token_id[:20]}...")
+            
+            # Wait briefly to see if we get a response
+            import asyncio
+            await asyncio.sleep(0.1)
+            
         except Exception as e:
             logger.error(f"Error subscribing to {token_id}: {e}", exc_info=True)
             raise
