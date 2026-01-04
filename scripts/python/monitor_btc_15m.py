@@ -1,0 +1,190 @@
+"""
+Automatically monitor new BTC updown 15-minute markets.
+Detects new markets by checking event slugs and starts monitoring them.
+
+Usage:
+    python scripts/python/monitor_btc_15m.py
+"""
+import asyncio
+import logging
+import sys
+import os
+from typing import Set
+from datetime import datetime
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
+
+from agents.polymarket.orderbook_db import OrderbookDatabase
+from agents.polymarket.orderbook_stream import OrderbookLogger
+from agents.polymarket.orderbook_poller import OrderbookPoller
+from agents.polymarket.btc_market_detector import (
+    get_latest_btc_15m_market,
+    get_all_active_btc_15m_markets,
+    extract_timestamp_from_slug,
+    is_market_active,
+)
+from agents.polymarket.market_finder import get_token_ids_from_market, get_market_info_for_logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+
+class BTC15mMonitor:
+    """Monitor for new BTC 15-minute markets."""
+    
+    def __init__(self, db: OrderbookDatabase, check_interval: float = 60.0):
+        self.db = db
+        self.check_interval = check_interval
+        self.monitored_event_slugs: Set[str] = set()
+        self.monitored_token_ids: Set[str] = set()
+        self.logger_service = None
+        self.logger_task = None
+        self.running = False
+    
+    async def _check_for_new_markets(self):
+        """Check for new BTC 15-minute markets."""
+        logger.info("Checking for new BTC updown 15-minute markets...")
+        
+        # Get all active markets
+        markets = get_all_active_btc_15m_markets()
+        logger.info(f"Found {len(markets)} active BTC 15-minute markets")
+        
+        new_token_ids = []
+        new_market_info = {}
+        
+        for market in markets:
+            event_slug = market.get("_event_slug", "")
+            
+            # Skip if already monitoring this event
+            if event_slug in self.monitored_event_slugs:
+                continue
+            
+            # Check if market is still active
+            if not is_market_active(market):
+                logger.debug(f"Market {event_slug} is not active, skipping")
+                continue
+            
+            # Extract token IDs
+            token_ids = get_token_ids_from_market(market)
+            if not token_ids:
+                logger.warning(f"No token IDs found for market {event_slug}")
+                continue
+            
+            # Check if we're already monitoring any of these tokens
+            if any(tid in self.monitored_token_ids for tid in token_ids):
+                continue
+            
+            # Add to monitoring
+            market_info = get_market_info_for_logging(market)
+            
+            for token_id in token_ids:
+                if token_id not in self.monitored_token_ids:
+                    new_token_ids.append(token_id)
+                    new_market_info.update(market_info)
+                    self.monitored_token_ids.add(token_id)
+            
+            self.monitored_event_slugs.add(event_slug)
+            logger.info(f"Found new BTC 15-minute market: {market.get('question', event_slug)[:60]}...")
+            logger.info(f"  Event slug: {event_slug}")
+            logger.info(f"  Token IDs: {token_ids}")
+        
+        # Start monitoring new tokens
+        if new_token_ids:
+            logger.info(f"Starting to monitor {len(new_token_ids)} new tokens")
+            await self._start_monitoring(new_token_ids, new_market_info)
+        else:
+            logger.debug("No new markets found")
+    
+    async def _start_monitoring(self, token_ids: list, market_info: dict):
+        """Start monitoring new tokens."""
+        import os
+        has_wallet_key = bool(os.getenv("POLYGON_WALLET_PRIVATE_KEY"))
+        
+        if has_wallet_key:
+            # Use WebSocket (lower latency)
+            from agents.polymarket.orderbook_stream import OrderbookLogger
+            
+            if self.logger_service is None:
+                # First time - create logger
+                self.logger_service = OrderbookLogger(
+                    self.db,
+                    token_ids,
+                    market_info=market_info,
+                )
+                self.logger_task = asyncio.create_task(self.logger_service.start())
+            else:
+                # Add new subscriptions to existing stream
+                if self.logger_service.stream and self.logger_service.stream.websocket:
+                    for token_id in token_ids:
+                        await self.logger_service.stream.subscribe_to_orderbook(token_id)
+                        self.logger_service.market_info.update(market_info)
+                        if token_id not in self.logger_service.token_ids:
+                            self.logger_service.token_ids.append(token_id)
+                    logger.info(f"Added {len(token_ids)} new subscriptions to WebSocket")
+        else:
+            # Use polling
+            logger.info("No wallet key - would use polling mode")
+            # For simplicity, we'll use WebSocket-only for now
+            # Can add polling fallback if needed
+    
+    async def run(self):
+        """Main monitoring loop."""
+        self.running = True
+        logger.info(f"Starting BTC 15-minute market monitor (check interval: {self.check_interval}s)")
+        
+        # Initial check
+        await self._check_for_new_markets()
+        
+        # Periodic checks
+        while self.running:
+            try:
+                await asyncio.sleep(self.check_interval)
+                if self.running:
+                    await self._check_for_new_markets()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in monitoring loop: {e}")
+                await asyncio.sleep(self.check_interval)
+    
+    def stop(self):
+        """Stop monitoring."""
+        self.running = False
+        if self.logger_service:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.create_task(self.logger_service.stop())
+            except:
+                pass
+
+
+async def main():
+    from agents.polymarket.orderbook_db import OrderbookDatabase
+    
+    db = OrderbookDatabase()
+    monitor = BTC15mMonitor(db, check_interval=60.0)
+    
+    try:
+        await monitor.run()
+    except KeyboardInterrupt:
+        logger.info("Stopping monitor...")
+        monitor.stop()
+    except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
+        monitor.stop()
+        raise
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Stopped by user")
+    except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
+        sys.exit(1)
+
