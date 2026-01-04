@@ -59,9 +59,13 @@ class OrderbookStream:
             "id": token_id,
         }
         
-        await self.websocket.send(json.dumps(subscribe_message))
-        self.subscribed_tokens.add(token_id)
-        logger.info(f"Subscribed to orderbook for token: {token_id}")
+        try:
+            await self.websocket.send(json.dumps(subscribe_message))
+            self.subscribed_tokens.add(token_id)
+            logger.info(f"Subscribed to orderbook for token: {token_id}")
+        except Exception as e:
+            logger.error(f"Error subscribing to {token_id}: {e}", exc_info=True)
+            raise
     
     async def unsubscribe_from_orderbook(self, token_id: str):
         """Unsubscribe from orderbook updates for a token."""
@@ -92,7 +96,10 @@ class OrderbookStream:
                     await self.on_orderbook_update(token_id, orderbook_data)
             
             elif data.get("type") == "error":
-                logger.error(f"RTDS error: {data.get('message', 'Unknown error')}")
+                error_msg = data.get('message', 'Unknown error')
+                error_code = data.get('code', '')
+                logger.error(f"RTDS error: {error_msg} (code: {error_code})")
+                logger.error(f"Full error data: {data}")
             
             elif data.get("type") == "subscribed":
                 logger.info(f"Successfully subscribed: {data}")
@@ -118,11 +125,12 @@ class OrderbookStream:
                 if not self.running:
                     break
                 await self._handle_message(message)
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning("WebSocket connection closed")
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.warning(f"WebSocket connection closed: {e}")
+            logger.warning("Will attempt to reconnect on next check")
             self.running = False
         except Exception as e:
-            logger.error(f"Error in listen loop: {e}")
+            logger.error(f"Error in listen loop: {e}", exc_info=True)
             self.running = False
     
     async def disconnect(self):
@@ -199,7 +207,9 @@ class OrderbookLogger:
             logger.debug(f"Saved orderbook snapshot for token {token_id}")
             
         except Exception as e:
-            logger.error(f"Error saving orderbook update for {token_id}: {e}")
+            logger.error(f"Error saving orderbook update for {token_id}: {e}", exc_info=True)
+            # Log the orderbook data structure for debugging
+            logger.debug(f"Orderbook data structure: {type(orderbook_data)}, keys: {list(orderbook_data.keys()) if isinstance(orderbook_data, dict) else 'N/A'}")
     
     async def start(self):
         """Start logging orderbook updates."""
