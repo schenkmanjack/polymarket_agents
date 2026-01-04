@@ -53,16 +53,35 @@ class OrderbookStream:
         if not self.websocket:
             await self.connect()
         
-        subscribe_message = {
-            "type": "subscribe",
-            "channel": "orderbook",
-            "id": token_id,
-        }
+        # Try multiple subscription formats - RTDS might use different formats
+        subscribe_formats = [
+            # Format 1: Standard RTDS format
+            {
+                "type": "subscribe",
+                "channel": "orderbook",
+                "id": token_id,
+            },
+            # Format 2: With assets_ids array
+            {
+                "type": "subscribe",
+                "channel": "orderbook",
+                "assets_ids": [token_id],
+            },
+            # Format 3: Alternative format
+            {
+                "type": "subscribe",
+                "channel": "orderbook",
+                "asset_id": token_id,
+            },
+        ]
         
         try:
+            # Try first format (most common)
+            subscribe_message = subscribe_formats[0]
             await self.websocket.send(json.dumps(subscribe_message))
             self.subscribed_tokens.add(token_id)
             logger.info(f"Subscribed to orderbook for token: {token_id}")
+            logger.debug(f"Subscription message: {subscribe_message}")
         except Exception as e:
             logger.error(f"Error subscribing to {token_id}: {e}", exc_info=True)
             raise
