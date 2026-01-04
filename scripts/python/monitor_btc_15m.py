@@ -143,33 +143,52 @@ class BTC15mMonitor:
                         token_ids,
                         market_info=market_info,
                     )
-                    # Start WebSocket in background - let it run and check later
+                    # Start WebSocket - it will connect, subscribe, and listen
+                    # We'll let it run in background and check periodically if it's working
                     self.logger_task = asyncio.create_task(self.logger_service.start())
-                    # Give it more time to connect, subscribe, and receive messages
-                    await asyncio.sleep(5)
                     
-                    # Check if WebSocket stream exists and is connected
+                    # Wait for stream to initialize (connect happens in start())
+                    for _ in range(10):  # Wait up to 5 seconds
+                        await asyncio.sleep(0.5)
+                        if (self.logger_service.stream and 
+                            self.logger_service.stream.websocket):
+                            break
+                    
+                    # Check if WebSocket is connected and receiving messages
                     if (self.logger_service.stream and 
-                        self.logger_service.stream.websocket and
-                        hasattr(self.logger_service.stream, '_message_count')):
-                        msg_count = self.logger_service.stream._message_count
-                        if msg_count > 0:
-                            logger.info(f"✓ WebSocket is working! Received {msg_count} messages")
+                        self.logger_service.stream.websocket):
+                        # Give it a bit more time to receive subscription confirmations
+                        await asyncio.sleep(3)
+                        
+                        if hasattr(self.logger_service.stream, '_message_count'):
+                            msg_count = self.logger_service.stream._message_count
+                            if msg_count > 0:
+                                logger.info(f"✓ WebSocket is working! Received {msg_count} messages")
+                            else:
+                                logger.warning("⚠ WebSocket connected but no messages received - falling back to polling")
+                                # Cancel WebSocket task
+                                self.logger_task.cancel()
+                                try:
+                                    await self.logger_service.stop()
+                                except:
+                                    pass
+                                self.logger_service = None
+                                raise Exception("No WebSocket messages")
                         else:
-                            logger.warning("⚠ WebSocket connected but no messages received after 5s - falling back to polling")
-                            # Cancel WebSocket task
+                            logger.warning("⚠ WebSocket connected but message counter not initialized - falling back to polling")
                             self.logger_task.cancel()
                             try:
                                 await self.logger_service.stop()
                             except:
                                 pass
-                            raise Exception("No WebSocket messages")
+                            self.logger_service = None
+                            raise Exception("WebSocket message counter not initialized")
                     else:
-                        logger.warning("⚠ WebSocket not properly initialized - falling back to polling")
-                        # Cancel WebSocket task
+                        logger.warning("⚠ WebSocket failed to connect - falling back to polling")
                         if self.logger_task:
                             self.logger_task.cancel()
-                        raise Exception("WebSocket not initialized")
+                        self.logger_service = None
+                        raise Exception("WebSocket connection failed")
                 else:
                     # Add new subscriptions to existing stream
                     if self.logger_service.stream and self.logger_service.stream.websocket:
