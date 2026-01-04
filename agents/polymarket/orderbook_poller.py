@@ -71,22 +71,30 @@ class OrderbookPoller:
     async def _fetch_and_save_orderbook(self, token_id: str):
         """Fetch orderbook for a token and save to database."""
         try:
-            # Try using direct HTTP call first (works without wallet key)
-            bids, asks = self._fetch_orderbook_direct(token_id)
+            bids, asks = [], []
             
-            if not bids and not asks:
-                # Fallback: try using Polymarket client if available
-                if self.polymarket.private_key:
-                    try:
-                        orderbook = self.polymarket.get_orderbook(token_id)
-                        bids = [[float(bid.price), float(bid.size)] for bid in orderbook.bids]
-                        asks = [[float(ask.price), float(ask.size)] for ask in orderbook.asks]
-                    except Exception as e:
-                        logger.warning(f"Polymarket client failed for {token_id[:20]}...: {e}")
+            # Prefer Polymarket client if wallet key is available (more reliable)
+            if self.polymarket.private_key:
+                try:
+                    logger.debug(f"Fetching orderbook via Polymarket client for {token_id[:20]}...")
+                    orderbook = self.polymarket.get_orderbook(token_id)
+                    bids = [[float(bid.price), float(bid.size)] for bid in orderbook.bids]
+                    asks = [[float(ask.price), float(ask.size)] for ask in orderbook.asks]
+                    logger.debug(f"Got {len(bids)} bids, {len(asks)} asks via Polymarket client")
+                except Exception as e:
+                    logger.warning(f"Polymarket client failed for {token_id[:20]}...: {e}, trying direct HTTP")
+                    # Fallback to direct HTTP
+                    bids, asks = self._fetch_orderbook_direct(token_id)
+            else:
+                # No wallet key - use direct HTTP
+                logger.debug(f"Fetching orderbook via direct HTTP for {token_id[:20]}...")
+                bids, asks = self._fetch_orderbook_direct(token_id)
             
             if not bids and not asks:
                 logger.warning(f"No orderbook data retrieved for token {token_id[:20]}...")
                 return
+            
+            logger.debug(f"Retrieved orderbook: {len(bids)} bids, {len(asks)} asks")
             
             # Get market info if available
             market_meta = self.market_info.get(token_id, {})
@@ -118,25 +126,36 @@ class OrderbookPoller:
     async def poll_loop(self):
         """Main polling loop."""
         self.running = True
+        has_wallet = bool(self.polymarket.private_key)
         logger.info(f"Starting orderbook poller for {len(self.token_ids)} tokens (interval: {self.poll_interval}s)")
+        logger.info(f"  Using {'Polymarket client (wallet key found)' if has_wallet else 'direct HTTP (no wallet key)'} for fetching")
         
+        poll_count = 0
         while self.running:
             try:
+                poll_count += 1
+                logger.debug(f"Poll cycle #{poll_count} - fetching orderbooks for {len(self.token_ids)} tokens")
+                
                 # Fetch orderbooks for all tokens concurrently
                 tasks = [
                     self._fetch_and_save_orderbook(token_id)
                     for token_id in self.token_ids
                 ]
-                await asyncio.gather(*tasks, return_exceptions=True)
+                results = await asyncio.gather(*tasks, return_exceptions=True)
                 
-                # Wait before next poll
+                # Check for exceptions
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        logger.error(f"Error in task for token {self.token_ids[i][:20]}...: {result}")
+                
+                logger.debug(f"Completed poll cycle #{poll_count}, sleeping {self.poll_interval}s")
                 await asyncio.sleep(self.poll_interval)
                 
             except asyncio.CancelledError:
                 logger.info("Polling cancelled")
                 break
             except Exception as e:
-                logger.error(f"Error in polling loop: {e}")
+                logger.error(f"❌ Error in polling loop: {e}", exc_info=True)
                 await asyncio.sleep(self.poll_interval)
     
     def stop(self):
