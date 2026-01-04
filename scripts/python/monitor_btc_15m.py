@@ -42,6 +42,8 @@ class BTC15mMonitor:
         self.monitored_token_ids: Set[str] = set()
         self.logger_service = None
         self.logger_task = None
+        self.poller = None
+        self.poller_task = None
         self.running = False
     
     async def _check_for_new_markets(self):
@@ -125,32 +127,52 @@ class BTC15mMonitor:
         import os
         has_wallet_key = bool(os.getenv("POLYGON_WALLET_PRIVATE_KEY"))
         
-        if has_wallet_key:
-            # Use WebSocket (lower latency)
-            from agents.polymarket.orderbook_stream import OrderbookLogger
-            
-            if self.logger_service is None:
-                # First time - create logger
-                self.logger_service = OrderbookLogger(
-                    self.db,
-                    token_ids,
-                    market_info=market_info,
-                )
-                self.logger_task = asyncio.create_task(self.logger_service.start())
-            else:
-                # Add new subscriptions to existing stream
-                if self.logger_service.stream and self.logger_service.stream.websocket:
-                    for token_id in token_ids:
-                        await self.logger_service.stream.subscribe_to_orderbook(token_id)
-                        self.logger_service.market_info.update(market_info)
-                        if token_id not in self.logger_service.token_ids:
-                            self.logger_service.token_ids.append(token_id)
-                    logger.info(f"Added {len(token_ids)} new subscriptions to WebSocket")
+        # TEMPORARY: Use polling since WebSocket isn't receiving data
+        # TODO: Fix WebSocket subscription format
+        logger.warning("⚠ Using polling mode temporarily - WebSocket not receiving data")
+        logger.info("  This will log orderbook data every 2 seconds")
+        logger.info("  Once WebSocket is fixed, we'll switch back for lower latency")
+        
+        from agents.polymarket.orderbook_poller import OrderbookPoller
+        
+        if not hasattr(self, 'poller') or self.poller is None:
+            self.poller = OrderbookPoller(
+                self.db,
+                token_ids,
+                poll_interval=2.0,
+                market_info=market_info,
+            )
+            self.poller_task = asyncio.create_task(self.poller.poll_loop())
         else:
-            # Use polling
-            logger.info("No wallet key - would use polling mode")
-            # For simplicity, we'll use WebSocket-only for now
-            # Can add polling fallback if needed
+            # Add new tokens to existing poller
+            for token_id in token_ids:
+                if token_id not in self.poller.token_ids:
+                    self.poller.token_ids.append(token_id)
+            self.poller.market_info.update(market_info)
+            logger.info(f"Added {len(token_ids)} tokens to polling")
+        
+        # OLD WebSocket code (commented out until fixed)
+        # if has_wallet_key:
+        #     # Use WebSocket (lower latency)
+        #     from agents.polymarket.orderbook_stream import OrderbookLogger
+        #     
+        #     if self.logger_service is None:
+        #         # First time - create logger
+        #         self.logger_service = OrderbookLogger(
+        #             self.db,
+        #             token_ids,
+        #             market_info=market_info,
+        #         )
+        #         self.logger_task = asyncio.create_task(self.logger_service.start())
+        #     else:
+        #         # Add new subscriptions to existing stream
+        #         if self.logger_service.stream and self.logger_service.stream.websocket:
+        #             for token_id in token_ids:
+        #                 await self.logger_service.stream.subscribe_to_orderbook(token_id)
+        #                 self.logger_service.market_info.update(market_info)
+        #                 if token_id not in self.logger_service.token_ids:
+        #                     self.logger_service.token_ids.append(token_id)
+        #             logger.info(f"Added {len(token_ids)} new subscriptions to WebSocket")
     
     async def run(self):
         """Main monitoring loop."""

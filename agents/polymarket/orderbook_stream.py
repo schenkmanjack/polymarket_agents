@@ -19,7 +19,9 @@ class OrderbookStream:
     RTDS Documentation: https://docs.polymarket.com/developers/RTDS/RTDS-overview
     """
     
+    # Try both RTDS and CLOB WebSocket endpoints
     RTDS_URL = "wss://ws-live-data.polymarket.com"
+    CLOB_WS_URL = "wss://clob.polymarket.com/ws"  # Alternative endpoint
     
     def __init__(self, on_orderbook_update: Optional[Callable] = None):
         """
