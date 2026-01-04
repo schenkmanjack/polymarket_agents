@@ -213,25 +213,38 @@ def get_latest_btc_15m_market() -> Optional[Dict]:
             logger.info(f"Found latest BTC 15m market via Events API: {latest_event.get('slug')}")
             return market
     
-    # Approach 3: Try constructing slug from current time (fallback)
-    # BTC 15-minute markets are created at 15-minute intervals
-    # Slug pattern: btc-updown-15m-{timestamp}
-    import time
-    current_time = int(time.time())
+    # Approach 3: Calculate current 15-minute window and construct slug
+    # BTC 15-minute markets use timestamps that represent the START of the 15-minute window
+    # Example: btc-updown-15m-1767555900 = market for 2:45PM-3:00PM ET (timestamp 1767555900 = 2:45PM start)
     
-    # Try last few 15-minute intervals (markets might be created slightly before start)
-    for offset_minutes in [0, -15, -30, -45, -60]:
-        test_timestamp = current_time + (offset_minutes * 60)
-        # Round down to nearest 15-minute mark
-        test_timestamp = (test_timestamp // 900) * 900
-        
+    import time
+    from datetime import datetime, timezone
+    
+    # Get current UTC time
+    now_utc = datetime.now(timezone.utc)
+    current_timestamp = int(now_utc.timestamp())
+    
+    # Round down to nearest 15-minute mark (900 seconds = 15 minutes)
+    window_start_timestamp = (current_timestamp // 900) * 900
+    
+    # Try current window and previous 2 windows (markets might be created slightly before start)
+    # This covers: current window, previous window, and window before that
+    for window_offset in [0, -1, -2]:
+        test_timestamp = window_start_timestamp + (window_offset * 900)
         slug = f"btc-updown-15m-{test_timestamp}"
-        logger.debug(f"Trying constructed slug: {slug}")
         
+        logger.debug(f"Trying constructed slug for window {window_offset}: {slug}")
         market = get_market_by_event_slug(slug)
+        
         if market:
-            logger.info(f"Found market using constructed slug: {slug}")
-            return market
+            # Verify it's still active
+            if is_market_active(market):
+                logger.info(f"Found active market using constructed slug: {slug}")
+                return market
+            else:
+                logger.debug(f"Market {slug} found but not active")
+    
+    return None
     
     return None
 

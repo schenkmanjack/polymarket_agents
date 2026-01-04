@@ -140,6 +140,10 @@ async def monitor_markets(event_slugs: List[str], market_ids: List[str]):
     logger.info(f"Starting to monitor {len(all_token_ids)} tokens")
     logger.info(f"Token IDs: {all_token_ids}")
     
+    # Initialize database (will use DATABASE_URL from env if set, otherwise SQLite)
+    from agents.polymarket.orderbook_db import OrderbookDatabase
+    db = OrderbookDatabase()  # Will log which database it's using
+    
     # Check if we have wallet key for WebSocket (lower latency), otherwise use polling
     has_wallet_key = bool(os.getenv("POLYGON_WALLET_PRIVATE_KEY"))
     

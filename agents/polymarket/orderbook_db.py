@@ -68,10 +68,18 @@ class OrderbookDatabase:
                 # Neon uses postgres:// but SQLAlchemy needs postgresql://
                 if database_url.startswith("postgres://"):
                     database_url = database_url.replace("postgres://", "postgresql://", 1)
+                # Log database type (but hide credentials)
+                db_type = "PostgreSQL/Neon" if database_url.startswith("postgresql://") else "Unknown"
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"✓ Connecting to {db_type} database (from DATABASE_URL)")
             else:
                 # Fall back to SQLite
                 db_path = os.getenv("ORDERBOOK_DB_PATH", "./orderbook.db")
                 database_url = f"sqlite:///{db_path}"
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"⚠ No DATABASE_URL found - using SQLite at {db_path}")
         
         # Configure engine based on database type
         if database_url.startswith("sqlite"):
