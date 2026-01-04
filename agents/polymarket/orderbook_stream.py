@@ -180,22 +180,42 @@ class OrderbookLogger:
             orderbook_data: Orderbook data from RTDS
         """
         try:
+            # Log first update to confirm we're receiving data
+            if token_id not in self._update_count:
+                logger.info(f"📥 Received first orderbook update for token {token_id[:20]}...")
+                logger.debug(f"Orderbook data keys: {list(orderbook_data.keys()) if isinstance(orderbook_data, dict) else 'N/A'}")
+            
             # Parse orderbook data
             # RTDS format may vary, but typically includes bids/asks
             bids = orderbook_data.get("bids", [])
             asks = orderbook_data.get("asks", [])
             
+            # Handle different RTDS message formats
+            # Sometimes data is nested under 'data' key
+            if not bids and not asks:
+                if isinstance(orderbook_data, dict) and "data" in orderbook_data:
+                    nested_data = orderbook_data["data"]
+                    bids = nested_data.get("bids", [])
+                    asks = nested_data.get("asks", [])
+            
             # Convert to list of [price, size] tuples if needed
             if bids and isinstance(bids[0], dict):
                 bids = [[float(b["price"]), float(b["size"])] for b in bids]
+            elif bids and isinstance(bids[0], list):
+                # Already in [price, size] format
+                bids = [[float(b[0]), float(b[1])] for b in bids if len(b) >= 2]
+            
             if asks and isinstance(asks[0], dict):
                 asks = [[float(a["price"]), float(a["size"])] for a in asks]
+            elif asks and isinstance(asks[0], list):
+                # Already in [price, size] format
+                asks = [[float(a[0]), float(a[1])] for a in asks if len(a) >= 2]
             
             # Get market info if available
             market_meta = self.market_info.get(token_id, {})
             
             # Save to database
-            self.db.save_snapshot(
+            snapshot = self.db.save_snapshot(
                 token_id=token_id,
                 bids=bids,
                 asks=asks,
@@ -210,12 +230,13 @@ class OrderbookLogger:
             if self._update_count[token_id] % 10 == 1:
                 best_bid = bids[0][0] if bids else None
                 best_ask = asks[0][0] if asks else None
-                logger.info(f"✓ Saved orderbook snapshot #{self._update_count[token_id]} for token {token_id[:20]}... | Bid: {best_bid}, Ask: {best_ask}")
+                logger.info(f"✓ Saved orderbook snapshot #{self._update_count[token_id]} (DB ID: {snapshot.id}) for token {token_id[:20]}... | Bid: {best_bid}, Ask: {best_ask}")
             
         except Exception as e:
-            logger.error(f"Error saving orderbook update for {token_id}: {e}", exc_info=True)
+            logger.error(f"❌ Error saving orderbook update for {token_id}: {e}", exc_info=True)
             # Log the orderbook data structure for debugging
-            logger.debug(f"Orderbook data structure: {type(orderbook_data)}, keys: {list(orderbook_data.keys()) if isinstance(orderbook_data, dict) else 'N/A'}")
+            logger.error(f"Orderbook data structure: {type(orderbook_data)}, keys: {list(orderbook_data.keys()) if isinstance(orderbook_data, dict) else 'N/A'}")
+            logger.error(f"Full orderbook data: {orderbook_data}")
     
     async def start(self):
         """Start logging orderbook updates."""
