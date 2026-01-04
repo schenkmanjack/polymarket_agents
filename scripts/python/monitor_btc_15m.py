@@ -127,29 +127,59 @@ class BTC15mMonitor:
         import os
         has_wallet_key = bool(os.getenv("POLYGON_WALLET_PRIVATE_KEY"))
         
-        # TEMPORARY: Use polling since WebSocket isn't receiving data
-        # TODO: Fix WebSocket subscription format
-        logger.warning("⚠ Using polling mode temporarily - WebSocket not receiving data")
-        logger.info("  This will log orderbook data every 2 seconds")
-        logger.info("  Once WebSocket is fixed, we'll switch back for lower latency")
+        # Try WebSocket first (lower latency) - now with API credentials
+        # Fallback to polling if WebSocket fails
+        import os
+        has_wallet_key = bool(os.getenv("POLYGON_WALLET_PRIVATE_KEY"))
         
-        from agents.polymarket.orderbook_poller import OrderbookPoller
-        
-        if not hasattr(self, 'poller') or self.poller is None:
-            self.poller = OrderbookPoller(
-                self.db,
-                token_ids,
-                poll_interval=2.0,
-                market_info=market_info,
-            )
-            self.poller_task = asyncio.create_task(self.poller.poll_loop())
+        if has_wallet_key:
+            # Use WebSocket (lower latency, real-time updates)
+            from agents.polymarket.orderbook_stream import OrderbookLogger
+            logger.info("✓ Wallet key found - Trying WebSocket mode with API credentials")
+            logger.info("  WebSocket provides sub-second updates vs polling every 0.5s")
+            
+            if self.logger_service is None:
+                # First time - create logger
+                self.logger_service = OrderbookLogger(
+                    self.db,
+                    token_ids,
+                    market_info=market_info,
+                )
+                self.logger_task = asyncio.create_task(self.logger_service.start())
+            else:
+                # Add new subscriptions to existing stream
+                if self.logger_service.stream and self.logger_service.stream.websocket:
+                    for token_id in token_ids:
+                        await self.logger_service.stream.subscribe_to_orderbook(token_id)
+                        self.logger_service.market_info.update(market_info)
+                        if token_id not in self.logger_service.token_ids:
+                            self.logger_service.token_ids.append(token_id)
+                    logger.info(f"Added {len(token_ids)} new subscriptions to WebSocket")
         else:
-            # Add new tokens to existing poller
-            for token_id in token_ids:
-                if token_id not in self.poller.token_ids:
-                    self.poller.token_ids.append(token_id)
-            self.poller.market_info.update(market_info)
-            logger.info(f"Added {len(token_ids)} tokens to polling")
+            # No wallet key - use polling
+            logger.warning("⚠ No wallet key - Using polling mode")
+            logger.info("  Add POLYGON_WALLET_PRIVATE_KEY to use WebSocket for better performance")
+            
+            from agents.polymarket.orderbook_poller import OrderbookPoller
+            
+            if not hasattr(self, 'poller') or self.poller is None:
+                # Poll every 0.5 seconds for HFT backtesting
+                # Track top 20 competitive levels - captures all micro-movements
+                self.poller = OrderbookPoller(
+                    self.db,
+                    token_ids,
+                    poll_interval=0.5,  # 500ms - fast polling for HFT
+                    market_info=market_info,
+                    track_top_n=20,  # Track top 20 bid/ask levels for competitive edge
+                )
+                self.poller_task = asyncio.create_task(self.poller.poll_loop())
+            else:
+                # Add new tokens to existing poller
+                for token_id in token_ids:
+                    if token_id not in self.poller.token_ids:
+                        self.poller.token_ids.append(token_id)
+                self.poller.market_info.update(market_info)
+                logger.info(f"Added {len(token_ids)} tokens to polling")
         
         # OLD WebSocket code (commented out until fixed)
         # if has_wallet_key:
