@@ -206,8 +206,6 @@ class OrderbookLogger:
             )
             
             # Log periodically (every 10th update) to avoid log spam
-            if not hasattr(self, '_update_count'):
-                self._update_count = {}
             self._update_count[token_id] = self._update_count.get(token_id, 0) + 1
             if self._update_count[token_id] % 10 == 1:
                 best_bid = bids[0][0] if bids else None
