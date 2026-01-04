@@ -285,7 +285,27 @@ class OrderbookLogger:
     
     async def start(self):
         """Start logging orderbook updates."""
-        self.stream = OrderbookStream(on_orderbook_update=self._on_orderbook_update)
+        # Get API credentials from Polymarket if wallet key is available
+        api_credentials = None
+        import os
+        if os.getenv("POLYGON_WALLET_PRIVATE_KEY"):
+            try:
+                from agents.polymarket.polymarket import Polymarket
+                pm = Polymarket()
+                if hasattr(pm, 'credentials') and pm.credentials:
+                    api_credentials = {
+                        "api_key": pm.credentials.api_key,
+                        "api_secret": pm.credentials.api_secret,
+                        "api_passphrase": pm.credentials.api_passphrase,
+                    }
+                    logger.info("✓ Using API credentials for WebSocket authentication")
+            except Exception as e:
+                logger.warning(f"Could not get API credentials: {e}, trying without auth")
+        
+        self.stream = OrderbookStream(
+            on_orderbook_update=self._on_orderbook_update,
+            api_credentials=api_credentials
+        )
         
         await self.stream.connect()
         
