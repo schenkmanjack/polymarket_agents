@@ -308,13 +308,26 @@ class OrderbookDatabase:
         """
         session = self.get_session()
         try:
-            # Get appropriate table (base or market-specific)
-            # This ensures table exists before we try to insert
-            SnapshotTable = self._get_table_for_market(market_id)
+            # Determine asset type (for btc_eth_table)
+            asset_type = None
+            if market_question:
+                question_lower = market_question.lower()
+                if "bitcoin" in question_lower or "btc" in question_lower:
+                    asset_type = "BTC"
+                elif "ethereum" in question_lower or "eth" in question_lower:
+                    asset_type = "ETH"
+            
+            # Use btc_eth_table if enabled (simpler, no dynamic table creation)
+            if self.use_btc_eth_table:
+                SnapshotTable = BTCEthOrderbookSnapshot
+            else:
+                # Get appropriate table (base or market-specific)
+                # This ensures table exists before we try to insert
+                SnapshotTable = self._get_table_for_market(market_id)
             
             # CRITICAL: Ensure table exists in database before inserting
             # This is especially important for per-market tables that might be created concurrently
-            if self.per_market_tables and market_id:
+            if self.per_market_tables and market_id and not self.use_btc_eth_table:
                 table_name = f"orderbook_snapshots_market_{market_id}"
                 from sqlalchemy import inspect
                 import logging
