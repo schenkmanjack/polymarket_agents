@@ -185,14 +185,18 @@ class OrderbookPoller:
                 metadata={"source": "polling", "poll_interval": self.poll_interval},
             )
             
-            # Log periodically to avoid spam
+            # Log every save (with track_top_n=0, we save everything)
             if not hasattr(self, '_save_count'):
                 self._save_count = {}
             self._save_count[token_id] = self._save_count.get(token_id, 0) + 1
             
             best_bid = bids[0][0] if bids else None
             best_ask = asks[0][0] if asks else None
-            logger.info(f"✓ Saved orderbook snapshot #{self._save_count[token_id]} (DB ID: {snapshot.id}) for token {token_id[:20]}... | Bid: {best_bid}, Ask: {best_ask} | Changed")
+            
+            # Log every save (since we're saving full orderbook every 0.5s for HFT)
+            # Log every 10th save to avoid spam, but always log first few
+            if self._save_count[token_id] <= 5 or self._save_count[token_id] % 10 == 0:
+                logger.info(f"✓ Saved orderbook snapshot #{self._save_count[token_id]} (DB ID: {snapshot.id}) for token {token_id[:20]}... | Bid: {best_bid}, Ask: {best_ask} | Levels: {len(bids)} bids, {len(asks)} asks")
             
         except Exception as e:
             logger.error(f"❌ Error fetching/saving orderbook for {token_id[:20]}...: {e}", exc_info=True)
@@ -208,7 +212,9 @@ class OrderbookPoller:
         while self.running:
             try:
                 poll_count += 1
-                logger.debug(f"Poll cycle #{poll_count} - fetching orderbooks for {len(self.token_ids)} tokens")
+                # Log every 10th poll cycle to show activity
+                if poll_count == 1 or poll_count % 10 == 0:
+                    logger.info(f"Poll cycle #{poll_count} - fetching orderbooks for {len(self.token_ids)} tokens")
                 
                 # Fetch orderbooks for all tokens concurrently
                 tasks = [
@@ -222,7 +228,8 @@ class OrderbookPoller:
                     if isinstance(result, Exception):
                         logger.error(f"Error in task for token {self.token_ids[i][:20]}...: {result}")
                 
-                logger.debug(f"Completed poll cycle #{poll_count}, sleeping {self.poll_interval}s")
+                if poll_count == 1 or poll_count % 10 == 0:
+                    logger.info(f"Completed poll cycle #{poll_count}, sleeping {self.poll_interval}s")
                 await asyncio.sleep(self.poll_interval)
                 
             except asyncio.CancelledError:
