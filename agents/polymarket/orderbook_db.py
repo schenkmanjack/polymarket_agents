@@ -103,8 +103,9 @@ class OrderbookDatabase:
         SessionLocal = sessionmaker(bind=self.engine)
         self.SessionLocal = SessionLocal
         
-        # Track created per-market tables
-        self._created_tables = set()
+        # Track created per-market tables (cache table classes to avoid recreating)
+        self._created_tables = set()  # Track table names
+        self._table_class_cache = {}  # Cache table_name -> table_class mapping
         self.per_market_tables = per_market_tables
     
     def get_session(self) -> Session:
