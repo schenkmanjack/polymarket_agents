@@ -210,15 +210,15 @@ class BTC15mMonitor:
             from agents.polymarket.orderbook_poller import OrderbookPoller
             
             if not hasattr(self, 'poller') or self.poller is None:
-            # Poll every 0.5 seconds for HFT backtesting
-            # Save every snapshot (no change detection) - async writes prevent blocking
-            self.poller = OrderbookPoller(
-                self.db,
-                token_ids,
-                poll_interval=0.5,  # 500ms - fast polling for HFT
-                market_info=market_info,
-                track_top_n=0,  # 0 = save all snapshots, no change detection
-            )
+                # Poll every 0.5 seconds for HFT backtesting
+                # Save every snapshot (no change detection) - async writes prevent blocking
+                self.poller = OrderbookPoller(
+                    self.db,
+                    token_ids,
+                    poll_interval=0.5,  # 500ms - fast polling for HFT
+                    market_info=market_info,
+                    track_top_n=0,  # 0 = save all snapshots, no change detection
+                )
                 self.poller_task = asyncio.create_task(self.poller.poll_loop())
             else:
                 # Add new tokens to existing poller
