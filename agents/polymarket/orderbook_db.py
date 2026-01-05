@@ -3,7 +3,7 @@ Database models and utilities for storing orderbook snapshots.
 """
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from sqlalchemy import create_engine, Column, String, Float, Integer, DateTime, JSON, Index
 from sqlalchemy.ext.declarative import declarative_base
@@ -24,7 +24,7 @@ class OrderbookSnapshot(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     token_id = Column(String, nullable=False, index=True)
     market_id = Column(String, nullable=True, index=True)  # Polymarket market ID
-    timestamp = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
     
     # Best bid/ask
     best_bid_price = Column(Float, nullable=True)
@@ -60,7 +60,7 @@ class BTCEthOrderbookSnapshot(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     token_id = Column(String, nullable=False, index=True)
     market_id = Column(String, nullable=False, index=True)  # Polymarket market ID (required)
-    timestamp = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
     
     # Best bid/ask
     best_bid_price = Column(Float, nullable=True)
@@ -81,6 +81,11 @@ class BTCEthOrderbookSnapshot(Base):
     outcome = Column(String, nullable=True)  # Which outcome this token represents
     asset_type = Column(String, nullable=True)  # 'BTC' or 'ETH'
     
+    # Market timing (for time-decay strategies and backtesting)
+    market_start_date = Column(DateTime, nullable=True)  # When market starts (UTC timezone-aware)
+    market_end_date = Column(DateTime, nullable=True, index=True)  # When market resolves (UTC timezone-aware)
+    time_remaining_seconds = Column(Float, nullable=True, index=True)  # Calculated: end_date - timestamp
+    
     # Additional metadata
     extra_metadata = Column(JSON, nullable=True)
     
@@ -88,6 +93,7 @@ class BTCEthOrderbookSnapshot(Base):
         Index('idx_btc_eth_token_timestamp', 'token_id', 'timestamp'),
         Index('idx_btc_eth_market_timestamp', 'market_id', 'timestamp'),
         Index('idx_btc_eth_asset_timestamp', 'asset_type', 'timestamp'),
+        Index('idx_btc_eth_time_remaining', 'time_remaining_seconds'),
     )
 
 
@@ -286,6 +292,9 @@ class OrderbookDatabase:
         market_question: Optional[str] = None,
         outcome: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        market_start_date: Optional[datetime] = None,
+        market_end_date: Optional[datetime] = None,
+        asset_type: Optional[str] = None,
     ) -> OrderbookSnapshot:
         """
         Save an orderbook snapshot to the database (synchronous).
@@ -396,11 +405,27 @@ class OrderbookDatabase:
                 if mid_price > 0:
                     spread_bps = (spread / mid_price) * 10000
             
+            # Get current timestamp (timezone-aware UTC)
+            current_timestamp = datetime.now(timezone.utc)
+            
+            # Calculate time remaining if end_date is provided
+            time_remaining_seconds = None
+            if market_end_date:
+                # Ensure both are timezone-aware for subtraction
+                if market_end_date.tzinfo is None:
+                    # If naive, assume UTC
+                    market_end_date = market_end_date.replace(tzinfo=timezone.utc)
+                if current_timestamp.tzinfo is None:
+                    current_timestamp = current_timestamp.replace(tzinfo=timezone.utc)
+                
+                time_delta = market_end_date - current_timestamp
+                time_remaining_seconds = time_delta.total_seconds()
+            
             # Create snapshot with appropriate fields
             snapshot_data = {
                 "token_id": token_id,
                 "market_id": market_id,
-                "timestamp": datetime.utcnow(),
+                "timestamp": current_timestamp,
                 "best_bid_price": best_bid_price,
                 "best_bid_size": best_bid_size,
                 "best_ask_price": best_ask_price,
@@ -414,9 +439,12 @@ class OrderbookDatabase:
                 "extra_metadata": metadata,
             }
             
-            # Add asset_type for btc_eth_table
+            # Add fields for btc_eth_table
             if self.use_btc_eth_table:
                 snapshot_data["asset_type"] = asset_type
+                snapshot_data["market_start_date"] = market_start_date
+                snapshot_data["market_end_date"] = market_end_date
+                snapshot_data["time_remaining_seconds"] = time_remaining_seconds
             
             snapshot = SnapshotTable(**snapshot_data)
             
@@ -439,6 +467,9 @@ class OrderbookDatabase:
         market_question: Optional[str] = None,
         outcome: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        market_start_date: Optional[datetime] = None,
+        market_end_date: Optional[datetime] = None,
+        asset_type: Optional[str] = None,
     ) -> OrderbookSnapshot:
         """
         Save an orderbook snapshot asynchronously (non-blocking).
@@ -458,6 +489,9 @@ class OrderbookDatabase:
             market_question=market_question,
             outcome=outcome,
             metadata=metadata,
+            market_start_date=market_start_date,
+            market_end_date=market_end_date,
+            asset_type=asset_type,
         )
         return await loop.run_in_executor(None, save_func)
     

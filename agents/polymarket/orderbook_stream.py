@@ -259,6 +259,16 @@ class OrderbookLogger:
             # Get market info if available
             market_meta = self.market_info.get(token_id, {})
             
+            # Determine asset type from market question
+            asset_type = None
+            market_question = market_meta.get("market_question", "")
+            if market_question:
+                question_lower = market_question.lower()
+                if "bitcoin" in question_lower or "btc" in question_lower:
+                    asset_type = "BTC"
+                elif "ethereum" in question_lower or "eth" in question_lower:
+                    asset_type = "ETH"
+            
             # Save to database
             snapshot = self.db.save_snapshot(
                 token_id=token_id,
@@ -268,6 +278,9 @@ class OrderbookLogger:
                 market_question=market_meta.get("market_question"),
                 outcome=market_meta.get("outcome"),
                 metadata={"source": "rtds", "raw_data": orderbook_data},
+                market_start_date=market_meta.get("market_start_date"),
+                market_end_date=market_meta.get("market_end_date"),
+                asset_type=asset_type,
             )
             
             # Log periodically (every 10th update) to avoid log spam

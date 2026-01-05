@@ -6,6 +6,7 @@ import pdb
 import time
 import ast
 import requests
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -352,10 +353,72 @@ class Polymarket:
         return resp
 
     def get_usdc_balance(self) -> float:
+        """Get USDC balance from your Polygon wallet (direct wallet)."""
         balance_res = self.usdc.functions.balanceOf(
             self.get_address_for_private_key()
         ).call()
         return float(balance_res / 10e5)
+    
+    def get_polymarket_balance(self) -> Optional[float]:
+        """
+        Get USDC balance from Polymarket (proxy wallet/trading balance).
+        This is the balance available for trading on Polymarket.
+        
+        Returns:
+            USDC balance as float, or None if unavailable
+        """
+        try:
+            if not self.client:
+                return None
+            
+            # Try to get balance from CLOB API
+            # Check if client has a balance method
+            if hasattr(self.client, 'get_balance'):
+                try:
+                    balance = self.client.get_balance()
+                    return float(balance) if balance else None
+                except:
+                    pass
+            
+            # Alternative: Try authenticated API endpoint
+            import httpx
+            try:
+                # Get API credentials for authenticated request
+                if hasattr(self.client, 'get_headers'):
+                    headers = self.client.get_headers()
+                else:
+                    # Fallback: use credentials directly
+                    headers = {}
+                    if hasattr(self.client, 'api_creds') and self.client.api_creds:
+                        creds = self.client.api_creds
+                        if hasattr(creds, 'api_key') and hasattr(creds, 'api_secret'):
+                            # Create auth header
+                            import base64
+                            auth_str = f"{creds.api_key}:{creds.api_secret}"
+                            auth_bytes = base64.b64encode(auth_str.encode()).decode()
+                            headers['Authorization'] = f'Basic {auth_bytes}'
+                
+                # Try balance endpoint
+                response = httpx.get(
+                    f"{self.clob_url}/balance",
+                    headers=headers,
+                    timeout=10.0
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    # Balance might be in different formats
+                    if isinstance(data, dict):
+                        balance = data.get('balance') or data.get('usdc_balance') or data.get('available') or data.get('usdc')
+                        if balance:
+                            return float(balance)
+                    elif isinstance(data, (int, float, str)):
+                        return float(data)
+            except Exception as e:
+                pass
+            
+            return None
+        except Exception as e:
+            return None
 
 
 def test():

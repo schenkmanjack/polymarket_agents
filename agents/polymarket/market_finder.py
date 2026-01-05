@@ -208,12 +208,58 @@ def get_market_info_for_logging(market: dict) -> dict:
     Extract market info needed for orderbook logging.
     
     Returns:
-        Dict with market_id, market_question, and token_id -> outcome mapping
+        Dict with market_id, market_question, token_id -> outcome mapping, and market dates
     """
+    from datetime import datetime, timezone
+    
     market_id = str(market.get("id", ""))
     question = market.get("question", "")
     outcomes = market.get("outcome", [])
     token_ids = get_token_ids_from_market(market)
+    
+    # Extract start/end dates from market data
+    start_date = None
+    end_date = None
+    
+    # Try startDateIso first, then startDate
+    start_date_str = market.get("startDateIso") or market.get("startDate")
+    if start_date_str:
+        try:
+            if isinstance(start_date_str, str):
+                start_str = start_date_str.replace("Z", "+00:00")
+                # Fix microseconds if too long
+                if '.' in start_str:
+                    parts = start_str.split('.')
+                    if len(parts) > 1:
+                        microsec_part = parts[1].split('+')[0].split('-')[0]
+                        if len(microsec_part) > 6:
+                            start_str = parts[0] + '.' + microsec_part[:6] + parts[1][len(microsec_part):]
+                start_date = datetime.fromisoformat(start_str)
+                # Ensure timezone-aware (UTC)
+                if start_date.tzinfo is None:
+                    start_date = start_date.replace(tzinfo=timezone.utc)
+        except Exception as e:
+            pass  # If parsing fails, leave as None
+    
+    # Try endDateIso first, then endDate
+    end_date_str = market.get("endDateIso") or market.get("endDate")
+    if end_date_str:
+        try:
+            if isinstance(end_date_str, str):
+                end_str = end_date_str.replace("Z", "+00:00")
+                # Fix microseconds if too long
+                if '.' in end_str:
+                    parts = end_str.split('.')
+                    if len(parts) > 1:
+                        microsec_part = parts[1].split('+')[0].split('-')[0]
+                        if len(microsec_part) > 6:
+                            end_str = parts[0] + '.' + microsec_part[:6] + parts[1][len(microsec_part):]
+                end_date = datetime.fromisoformat(end_str)
+                # Ensure timezone-aware (UTC)
+                if end_date.tzinfo is None:
+                    end_date = end_date.replace(tzinfo=timezone.utc)
+        except Exception as e:
+            pass  # If parsing fails, leave as None
     
     # Create mapping of token_id -> market info
     market_info = {}
@@ -223,6 +269,8 @@ def get_market_info_for_logging(market: dict) -> dict:
             "market_id": market_id,
             "market_question": question,
             "outcome": outcome,
+            "market_start_date": start_date,
+            "market_end_date": end_date,
         }
     
     return market_info
