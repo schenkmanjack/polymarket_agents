@@ -45,7 +45,7 @@ class OrderbookPoller:
             track_top_n: Number of top bid/ask levels to track for change detection (default: 20)
         """
         self.db = db
-        self.token_ids = token_ids
+        self.token_ids = token_ids.copy() if isinstance(token_ids, list) else list(token_ids)  # Make mutable copy
         self.poll_interval = poll_interval
         self.market_info = market_info or {}
         self.track_top_n = track_top_n  # Track top N levels (0 = save all, no change detection)
@@ -54,6 +54,9 @@ class OrderbookPoller:
         self.running = False
         # Track last orderbooks for change detection (only used if track_top_n > 0)
         self._last_orderbooks = {} if track_top_n > 0 else {}
+        # Track consecutive failures for ended markets
+        self._failed_tokens = {}  # {token_id: failure_count}
+        self._max_failures = 3  # Remove token after 3 consecutive 404 failures
     
     def _fetch_orderbook_direct(self, token_id: str):
         """Fetch orderbook directly from CLOB API (no auth needed)."""
@@ -65,13 +68,13 @@ class OrderbookPoller:
                 data = response.json()
                 bids = [[float(b["price"]), float(b["size"])] for b in data.get("bids", [])]
                 asks = [[float(a["price"]), float(a["size"])] for a in data.get("asks", [])]
-                return bids, asks
+                return bids, asks, None  # Return status code as third element
             else:
-                logger.warning(f"Failed to fetch orderbook for {token_id}: HTTP {response.status_code}")
-                return [], []
+                # Return status code so caller can detect 404
+                return [], [], response.status_code
         except Exception as e:
             logger.error(f"Error fetching orderbook directly: {e}")
-            return [], []
+            return [], [], None
     
     def _orderbook_changed(self, bids: list, asks: list, last_bids: list, last_asks: list) -> bool:
         """
@@ -136,7 +139,7 @@ class OrderbookPoller:
             bids, asks = [], []
             
             # Prefer Polymarket client if wallet key is available (more reliable)
-            if self.polymarket.private_key:
+            if self.polymarket and self.polymarket.private_key:
                 try:
                     logger.debug(f"Fetching orderbook via Polymarket client for {token_id[:20]}...")
                     orderbook = self.polymarket.get_orderbook(token_id)
@@ -144,17 +147,65 @@ class OrderbookPoller:
                     asks = [[float(ask.price), float(ask.size)] for ask in orderbook.asks]
                     logger.debug(f"Got {len(bids)} bids, {len(asks)} asks via Polymarket client")
                 except Exception as e:
+                    error_str = str(e).lower()
+                    # Check if it's a 404 error (market ended)
+                    if "404" in error_str or "no orderbook exists" in error_str:
+                        self._failed_tokens[token_id] = self._failed_tokens.get(token_id, 0) + 1
+                        failure_count = self._failed_tokens[token_id]
+                        
+                        if failure_count >= self._max_failures:
+                            logger.info(f"⚠ Market ended: Token {token_id[:20]}... returned 404 {failure_count} times - removing from monitoring")
+                            # Remove from token_ids list
+                            if token_id in self.token_ids:
+                                self.token_ids.remove(token_id)
+                                # Clean up tracking data
+                                self._failed_tokens.pop(token_id, None)
+                                self._last_orderbooks.pop(token_id, None)
+                                if hasattr(self, '_save_count'):
+                                    self._save_count.pop(token_id, None)
+                                if hasattr(self, '_first_fetch'):
+                                    self._first_fetch.discard(token_id)
+                            return
+                        else:
+                            logger.debug(f"Token {token_id[:20]}... returned 404 ({failure_count}/{self._max_failures}) - market may be ending")
+                    
                     logger.warning(f"Polymarket client failed for {token_id[:20]}...: {e}, trying direct HTTP")
                     # Fallback to direct HTTP
-                    bids, asks = self._fetch_orderbook_direct(token_id)
+                    bids, asks, http_status = self._fetch_orderbook_direct(token_id)
             else:
                 # No wallet key - use direct HTTP
                 logger.debug(f"Fetching orderbook via direct HTTP for {token_id[:20]}...")
-                bids, asks = self._fetch_orderbook_direct(token_id)
+                bids, asks, http_status = self._fetch_orderbook_direct(token_id)
+            
+            # Check for 404 errors (market ended) from direct HTTP
+            if http_status == 404:
+                self._failed_tokens[token_id] = self._failed_tokens.get(token_id, 0) + 1
+                failure_count = self._failed_tokens[token_id]
+                
+                if failure_count >= self._max_failures:
+                    logger.info(f"⚠ Market ended: Token {token_id[:20]}... returned 404 {failure_count} times - removing from monitoring")
+                    # Remove from token_ids list
+                    if token_id in self.token_ids:
+                        self.token_ids.remove(token_id)
+                        # Clean up tracking data
+                        self._failed_tokens.pop(token_id, None)
+                        self._last_orderbooks.pop(token_id, None)
+                        if hasattr(self, '_save_count'):
+                            self._save_count.pop(token_id, None)
+                        if hasattr(self, '_first_fetch'):
+                            self._first_fetch.discard(token_id)
+                    return
+                else:
+                    logger.debug(f"Token {token_id[:20]}... returned 404 ({failure_count}/{self._max_failures}) - market may be ending")
+                    return
             
             if not bids and not asks:
                 logger.warning(f"No orderbook data retrieved for token {token_id[:20]}...")
                 return
+            
+            # Successfully fetched orderbook - reset failure count
+            if token_id in self._failed_tokens:
+                self._failed_tokens.pop(token_id)
             
             # Log first retrieval to confirm we're getting data
             if not hasattr(self, '_first_fetch'):
@@ -222,7 +273,7 @@ class OrderbookPoller:
     async def poll_loop(self):
         """Main polling loop."""
         self.running = True
-        has_wallet = bool(self.polymarket.private_key)
+        has_wallet = bool(self.polymarket and self.polymarket.private_key)
         logger.info(f"Starting orderbook poller for {len(self.token_ids)} tokens (interval: {self.poll_interval}s)")
         logger.info(f"  Using {'Polymarket client (wallet key found)' if has_wallet else 'direct HTTP (no wallet key)'} for fetching")
         

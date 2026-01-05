@@ -261,6 +261,10 @@ class BTC15mMonitor:
         self.running = True
         logger.info(f"Starting BTC 15-minute market monitor (check interval: {self.check_interval}s)")
         
+        # Track check count for periodic balance logging
+        check_count = 0
+        balance_log_interval = 1  # Log balance every check (every ~1 minute with 60s interval)
+        
         # Initial check
         await self._check_for_new_markets()
         
@@ -270,6 +274,13 @@ class BTC15mMonitor:
                 await asyncio.sleep(self.check_interval)
                 if self.running:
                     await self._check_for_new_markets()
+                    
+                    # Log balance periodically
+                    check_count += 1
+                    if check_count % balance_log_interval == 0:
+                        logger.info("")
+                        log_balances()
+                        logger.info("")
             except asyncio.CancelledError:
                 break
             except Exception as e:
