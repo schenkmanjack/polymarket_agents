@@ -202,10 +202,15 @@ class BTC15mMonitor:
                 logger.warning(f"WebSocket failed: {e} - Falling back to polling mode")
                 # Fall through to polling mode
                 has_wallet_key = False  # Force polling fallback
-        else:
-            # No wallet key - use polling
-            logger.warning("⚠ No wallet key - Using polling mode")
-            logger.info("  Add POLYGON_WALLET_PRIVATE_KEY to use WebSocket for better performance")
+        
+        # Use polling if WebSocket failed or no wallet key
+        if not has_wallet_key:
+            # No wallet key or WebSocket failed - use polling
+            if os.getenv("POLYGON_WALLET_PRIVATE_KEY"):
+                logger.warning("⚠ WebSocket failed - Using polling mode")
+            else:
+                logger.warning("⚠ No wallet key - Using polling mode")
+                logger.info("  Add POLYGON_WALLET_PRIVATE_KEY to use WebSocket for better performance")
             
             from agents.polymarket.orderbook_poller import OrderbookPoller
             
