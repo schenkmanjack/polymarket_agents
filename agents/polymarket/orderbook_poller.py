@@ -48,11 +48,12 @@ class OrderbookPoller:
         self.token_ids = token_ids
         self.poll_interval = poll_interval
         self.market_info = market_info or {}
+        self.track_top_n = track_top_n  # Track top N levels (0 = save all, no change detection)
         # Only initialize Polymarket if available (requires wallet key)
         self.polymarket = Polymarket() if POLYMARKET_AVAILABLE else None
         self.running = False
-        # Note: Removed change detection - saving every poll for HFT backtesting
-        # Storage is manageable (~0.82 GB/day) and async writes prevent blocking
+        # Track last orderbooks for change detection (only used if track_top_n > 0)
+        self._last_orderbooks = {} if track_top_n > 0 else {}
     
     def _fetch_orderbook_direct(self, token_id: str):
         """Fetch orderbook directly from CLOB API (no auth needed)."""
