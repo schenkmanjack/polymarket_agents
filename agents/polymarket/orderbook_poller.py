@@ -32,6 +32,7 @@ class OrderbookPoller:
         token_ids: List[str],
         poll_interval: float = 1.0,
         market_info: Optional[Dict[str, Dict]] = None,
+        track_top_n: int = 20,  # Track top N competitive levels for HFT
     ):
         """
         Initialize the orderbook poller.
@@ -41,6 +42,7 @@ class OrderbookPoller:
             token_ids: List of token IDs to monitor
             poll_interval: Seconds between polls (default: 1.0)
             market_info: Optional dict mapping token_id to market metadata
+            track_top_n: Number of top bid/ask levels to track for change detection (default: 20)
         """
         self.db = db
         self.token_ids = token_ids
@@ -49,6 +51,8 @@ class OrderbookPoller:
         # Only initialize Polymarket if available (requires wallet key)
         self.polymarket = Polymarket() if POLYMARKET_AVAILABLE else None
         self.running = False
+        # Note: Removed change detection - saving every poll for HFT backtesting
+        # Storage is manageable (~0.82 GB/day) and async writes prevent blocking
     
     def _fetch_orderbook_direct(self, token_id: str):
         """Fetch orderbook directly from CLOB API (no auth needed)."""
@@ -67,6 +71,63 @@ class OrderbookPoller:
         except Exception as e:
             logger.error(f"Error fetching orderbook directly: {e}")
             return [], []
+    
+    def _orderbook_changed(self, bids: list, asks: list, last_bids: list, last_asks: list) -> bool:
+        """
+        Check if orderbook has changed in top N competitive levels.
+        For HFT backtesting, we capture ANY change, no matter how small.
+        
+        Saves if:
+        - First time (no last orderbook)
+        - ANY price change in top N levels
+        - ANY size change in top N levels (even 0.01% - captures all liquidity shifts)
+        - Levels added/removed in top N
+        """
+        # Always save first time
+        if not last_bids and not last_asks:
+            return True
+        
+        # Check top N bid levels for ANY changes
+        top_n_bids = min(self.track_top_n, len(bids), len(last_bids))
+        
+        # Check if number of levels changed
+        if len(bids) != len(last_bids):
+            return True
+        
+        # Check each level in top N for ANY price or size change
+        for i in range(top_n_bids):
+            if i >= len(bids) or i >= len(last_bids):
+                return True  # Level added/removed
+            
+            # ANY price change (even 0.0001)
+            if bids[i][0] != last_bids[i][0]:
+                return True
+            
+            # ANY size change (even tiny amounts matter for HFT)
+            if bids[i][1] != last_bids[i][1]:
+                return True
+        
+        # Check top N ask levels for ANY changes
+        top_n_asks = min(self.track_top_n, len(asks), len(last_asks))
+        
+        # Check if number of levels changed
+        if len(asks) != len(last_asks):
+            return True
+        
+        # Check each level in top N for ANY price or size change
+        for i in range(top_n_asks):
+            if i >= len(asks) or i >= len(last_asks):
+                return True  # Level added/removed
+            
+            # ANY price change
+            if asks[i][0] != last_asks[i][0]:
+                return True
+            
+            # ANY size change
+            if asks[i][1] != last_asks[i][1]:
+                return True
+        
+        return False  # No changes in top N levels
     
     async def _fetch_and_save_orderbook(self, token_id: str):
         """Fetch orderbook for a token and save to database."""
@@ -96,11 +157,24 @@ class OrderbookPoller:
             
             logger.debug(f"Retrieved orderbook: {len(bids)} bids, {len(asks)} asks")
             
+            # Check if orderbook has changed (if change detection enabled)
+            if self.track_top_n > 0:
+                last_bids, last_asks = self._last_orderbooks.get(token_id, ([], []))
+                has_changed = self._orderbook_changed(bids, asks, last_bids, last_asks)
+                
+                if not has_changed:
+                    logger.debug(f"No change in top {self.track_top_n} levels for token {token_id[:20]}..., skipping save")
+                    return
+                
+                # Update last orderbook
+                self._last_orderbooks[token_id] = (bids.copy(), asks.copy())
+            
             # Get market info if available
             market_meta = self.market_info.get(token_id, {})
             
-            # Save to database
-            snapshot = self.db.save_snapshot(
+            # Save to database asynchronously (non-blocking)
+            # This allows polling to continue without waiting for DB write
+            snapshot = await self.db.save_snapshot_async(
                 token_id=token_id,
                 bids=bids,
                 asks=asks,
@@ -115,10 +189,9 @@ class OrderbookPoller:
                 self._save_count = {}
             self._save_count[token_id] = self._save_count.get(token_id, 0) + 1
             
-            if self._save_count[token_id] % 10 == 1:
-                best_bid = bids[0][0] if bids else None
-                best_ask = asks[0][0] if asks else None
-                logger.info(f"✓ Saved orderbook snapshot #{self._save_count[token_id]} (DB ID: {snapshot.id}) for token {token_id[:20]}... | Bid: {best_bid}, Ask: {best_ask}")
+            best_bid = bids[0][0] if bids else None
+            best_ask = asks[0][0] if asks else None
+            logger.info(f"✓ Saved orderbook snapshot #{self._save_count[token_id]} (DB ID: {snapshot.id}) for token {token_id[:20]}... | Bid: {best_bid}, Ask: {best_ask} | Changed")
             
         except Exception as e:
             logger.error(f"❌ Error fetching/saving orderbook for {token_id[:20]}...: {e}", exc_info=True)

@@ -117,6 +117,10 @@ class OrderbookDatabase:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> OrderbookSnapshot:
         """
+        Save an orderbook snapshot to the database (synchronous).
+        For async version, use save_snapshot_async().
+        """
+        """
         Save an orderbook snapshot to the database.
         
         Args:
@@ -174,6 +178,37 @@ class OrderbookDatabase:
             raise e
         finally:
             session.close()
+    
+    async def save_snapshot_async(
+        self,
+        token_id: str,
+        bids: List[List[float]],
+        asks: List[List[float]],
+        market_id: Optional[str] = None,
+        market_question: Optional[str] = None,
+        outcome: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> OrderbookSnapshot:
+        """
+        Save an orderbook snapshot asynchronously (non-blocking).
+        Runs database write in thread pool to avoid blocking event loop.
+        """
+        import asyncio
+        from functools import partial
+        
+        # Run synchronous save in thread pool
+        loop = asyncio.get_event_loop()
+        save_func = partial(
+            self.save_snapshot,
+            token_id=token_id,
+            bids=bids,
+            asks=asks,
+            market_id=market_id,
+            market_question=market_question,
+            outcome=outcome,
+            metadata=metadata,
+        )
+        return await loop.run_in_executor(None, save_func)
     
     def get_snapshots(
         self,
