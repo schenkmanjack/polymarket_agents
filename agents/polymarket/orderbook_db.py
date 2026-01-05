@@ -176,7 +176,19 @@ class OrderbookDatabase:
             )
             
             # Create table in database (checkfirst=True means it won't error if exists)
-            market_table.__table__.create(self.engine, checkfirst=True)
+            # Use bind=self.engine to ensure it's created synchronously
+            try:
+                market_table.__table__.create(bind=self.engine, checkfirst=True)
+            except Exception as e:
+                # If creation fails, check if table already exists in DB
+                from sqlalchemy import inspect
+                inspector = inspect(self.engine)
+                if table_name in inspector.get_table_names():
+                    # Table exists in DB, just cache the class
+                    pass
+                else:
+                    # Re-raise if it's a different error
+                    raise
             
             # Cache the table class
             self._table_class_cache[table_name] = market_table
@@ -226,7 +238,18 @@ class OrderbookDatabase:
         session = self.get_session()
         try:
             # Get appropriate table (base or market-specific)
+            # This ensures table exists before we try to insert
             SnapshotTable = self._get_table_for_market(market_id)
+            
+            # Ensure table exists in database (double-check for per-market tables)
+            if self.per_market_tables and market_id:
+                table_name = f"orderbook_snapshots_market_{market_id}"
+                # Verify table exists, create if needed
+                from sqlalchemy import inspect
+                inspector = inspect(self.engine)
+                if table_name not in inspector.get_table_names():
+                    # Table doesn't exist, create it
+                    SnapshotTable.__table__.create(bind=self.engine, checkfirst=True)
             
             # Calculate best bid/ask
             best_bid_price = bids[0][0] if bids else None
