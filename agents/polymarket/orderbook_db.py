@@ -5,7 +5,7 @@ import os
 import threading
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
-from sqlalchemy import create_engine, Column, String, Float, Integer, DateTime, JSON, Index, text
+from sqlalchemy import create_engine, Column, String, Float, Integer, DateTime, JSON, Index, text, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import StaticPool
@@ -165,6 +165,67 @@ class OrderbookDatabase:
             self._migrate_btc_eth_table()
         # Per-table locks for creation (prevents race conditions)
         self._table_locks = {}
+    
+    def _migrate_btc_eth_table(self):
+        """Add missing columns to btc_eth_table if they don't exist (migration)."""
+        from sqlalchemy import inspect
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        try:
+            inspector = inspect(self.engine)
+            table_name = "btc_eth_table"
+            
+            if table_name not in inspector.get_table_names():
+                logger.debug(f"Table {table_name} doesn't exist yet, will be created with all columns")
+                return
+            
+            # Get existing columns
+            existing_columns = [col['name'] for col in inspector.get_columns(table_name)]
+            columns_to_add = []
+            
+            # Check which columns are missing
+            if 'market_start_date' not in existing_columns:
+                columns_to_add.append('market_start_date')
+            if 'market_end_date' not in existing_columns:
+                columns_to_add.append('market_end_date')
+            if 'time_remaining_seconds' not in existing_columns:
+                columns_to_add.append('time_remaining_seconds')
+            
+            # Add missing columns
+            if columns_to_add:
+                logger.info(f"Migrating {table_name}: Adding {len(columns_to_add)} missing column(s)...")
+                with self.engine.begin() as conn:
+                    for col_name in columns_to_add:
+                        try:
+                            # Determine column type
+                            if col_name in ['market_start_date', 'market_end_date']:
+                                # PostgreSQL uses TIMESTAMP, SQLite uses DATETIME
+                                if 'postgresql' in str(self.engine.url).lower():
+                                    conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN {col_name} TIMESTAMP'))
+                                else:
+                                    conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN {col_name} DATETIME'))
+                            elif col_name == 'time_remaining_seconds':
+                                # PostgreSQL uses DOUBLE PRECISION, SQLite uses REAL
+                                if 'postgresql' in str(self.engine.url).lower():
+                                    conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN {col_name} DOUBLE PRECISION'))
+                                else:
+                                    conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN {col_name} REAL'))
+                            
+                            logger.info(f"  ✓ Added column: {col_name}")
+                        except Exception as e:
+                            error_str = str(e).lower()
+                            if 'duplicate' in error_str or 'already exists' in error_str or 'duplicate column' in error_str:
+                                logger.debug(f"  Column {col_name} already exists (skipping)")
+                            else:
+                                logger.warning(f"  Failed to add column {col_name}: {e}")
+                
+                logger.info(f"✓ Migration complete for {table_name}")
+            else:
+                logger.debug(f"Table {table_name} already has all required columns")
+        except Exception as e:
+            logger.warning(f"Migration check failed (non-critical): {e}")
+            # Don't raise - allow script to continue
     
     def get_session(self) -> Session:
         """Get a database session."""
