@@ -156,7 +156,12 @@ class OrderbookPoller:
                 logger.warning(f"No orderbook data retrieved for token {token_id[:20]}...")
                 return
             
-            logger.debug(f"Retrieved orderbook: {len(bids)} bids, {len(asks)} asks")
+            # Log first retrieval to confirm we're getting data
+            if not hasattr(self, '_first_fetch'):
+                self._first_fetch = set()
+            if token_id not in self._first_fetch:
+                logger.info(f"✓ Retrieved orderbook for {token_id[:20]}...: {len(bids)} bids, {len(asks)} asks")
+                self._first_fetch.add(token_id)
             
             # Check if orderbook has changed (if change detection enabled)
             if self.track_top_n > 0:
