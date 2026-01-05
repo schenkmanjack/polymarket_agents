@@ -2,6 +2,7 @@
 Database models and utilities for storing orderbook snapshots.
 """
 import os
+import threading
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from sqlalchemy import create_engine, Column, String, Float, Integer, DateTime, JSON, Index
@@ -10,6 +11,10 @@ from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import StaticPool
 
 Base = declarative_base()
+
+# Lock for table creation to prevent race conditions
+_table_creation_locks = {}
+_table_creation_lock = threading.Lock()
 
 
 class OrderbookSnapshot(Base):
@@ -107,6 +112,8 @@ class OrderbookDatabase:
         self._created_tables = set()  # Track table names
         self._table_class_cache = {}  # Cache table_name -> table_class mapping
         self.per_market_tables = per_market_tables
+        # Per-table locks for creation (prevents race conditions)
+        self._table_locks = {}
     
     def get_session(self) -> Session:
         """Get a database session."""
