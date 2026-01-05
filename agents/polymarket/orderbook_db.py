@@ -269,31 +269,46 @@ class OrderbookDatabase:
                 from sqlalchemy import inspect
                 import logging
                 logger = logging.getLogger(__name__)
-                inspector = inspect(self.engine)
                 
-                # Always verify table exists before inserting (handles race conditions)
-                if table_name not in inspector.get_table_names():
-                    # Table doesn't exist - create it now
-                    logger.warning(f"Table {table_name} does not exist, creating it now...")
-                    try:
-                        SnapshotTable.__table__.create(bind=self.engine, checkfirst=True)
-                        # Verify it was created
-                        if table_name not in inspector.get_table_names():
-                            raise Exception(f"Failed to create table {table_name}")
-                        logger.info(f"✓ Created table {table_name}")
-                    except Exception as e:
-                        error_str = str(e).lower()
-                        # Check if table exists now (might have been created by another process)
-                        if table_name in inspector.get_table_names():
-                            # Table exists now, that's fine
-                            logger.debug(f"Table {table_name} exists (created by another process)")
-                        elif "duplicate" in error_str or "already exists" in error_str:
-                            # Table/index exists, that's fine
-                            logger.debug(f"Table {table_name} or indexes already exist")
-                        else:
-                            # Real error - re-raise
-                            logger.error(f"Failed to create table {table_name}: {e}")
-                            raise
+                # Use a connection to check/create table (ensures we're on the same connection)
+                with self.engine.connect() as conn:
+                    inspector = inspect(self.engine)
+                    
+                    # Always verify table exists before inserting (handles race conditions)
+                    if table_name not in inspector.get_table_names():
+                        # Table doesn't exist - create it now synchronously
+                        logger.warning(f"Table {table_name} does not exist, creating it now...")
+                        try:
+                            # Create table using the connection
+                            SnapshotTable.__table__.create(bind=conn, checkfirst=True)
+                            # Commit the table creation
+                            conn.commit()
+                            
+                            # Verify it was created (refresh inspector)
+                            inspector = inspect(self.engine)
+                            if table_name not in inspector.get_table_names():
+                                raise Exception(f"Failed to create table {table_name} - table still does not exist after creation")
+                            logger.info(f"✓ Created table {table_name}")
+                        except Exception as e:
+                            # Rollback any partial changes
+                            conn.rollback()
+                            error_str = str(e).lower()
+                            
+                            # Check if table exists now (might have been created by another process)
+                            inspector = inspect(self.engine)
+                            if table_name in inspector.get_table_names():
+                                # Table exists now, that's fine
+                                logger.debug(f"Table {table_name} exists (created by another process)")
+                            elif "duplicate" in error_str or "already exists" in error_str:
+                                # Table/index exists, that's fine
+                                logger.debug(f"Table {table_name} or indexes already exist")
+                            else:
+                                # Real error - re-raise
+                                logger.error(f"Failed to create table {table_name}: {e}")
+                                raise
+                    else:
+                        # Table exists, but verify it's accessible
+                        logger.debug(f"Table {table_name} exists, proceeding with insert")
             
             # Calculate best bid/ask
             best_bid_price = bids[0][0] if bids else None
