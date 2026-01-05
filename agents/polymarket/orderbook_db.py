@@ -296,13 +296,11 @@ class OrderbookDatabase:
         try:
             # If per-market tables enabled, use market-specific table
             if self.per_market_tables and market_id:
-                SnapshotTable = self._get_table_for_market(market_id)
-                query = session.query(SnapshotTable)
+                model_class = self._get_table_for_market(market_id)
             else:
-                query = session.query(OrderbookSnapshot)
+                model_class = OrderbookSnapshot
             
-            # Get the model class
-            model_class = SnapshotTable if (self.per_market_tables and market_id) else OrderbookSnapshot
+            query = session.query(model_class)
             
             if token_id:
                 query = query.filter(model_class.token_id == token_id)
