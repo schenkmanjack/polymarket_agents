@@ -266,8 +266,8 @@ async def main():
     
     # Initialize database (will use DATABASE_URL from env if set, otherwise SQLite)
     # This will log which database it's connecting to
-    # Use per-market tables for better organization
-    db = OrderbookDatabase(per_market_tables=True)
+    # Use btc_eth_table - single table for all BTC/ETH markets (simpler, no race conditions)
+    db = OrderbookDatabase(use_btc_eth_table=True)
     monitor = ETH15mMonitor(db, check_interval=60.0)
     
     try:

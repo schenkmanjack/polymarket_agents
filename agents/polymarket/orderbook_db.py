@@ -53,10 +53,48 @@ class OrderbookSnapshot(Base):
     )
 
 
+class BTCEthOrderbookSnapshot(Base):
+    """Single table for all BTC and ETH 15-minute market orderbook snapshots."""
+    __tablename__ = "btc_eth_table"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    token_id = Column(String, nullable=False, index=True)
+    market_id = Column(String, nullable=False, index=True)  # Polymarket market ID (required)
+    timestamp = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    
+    # Best bid/ask
+    best_bid_price = Column(Float, nullable=True)
+    best_bid_size = Column(Float, nullable=True)
+    best_ask_price = Column(Float, nullable=True)
+    best_ask_size = Column(Float, nullable=True)
+    
+    # Spread metrics
+    spread = Column(Float, nullable=True)
+    spread_bps = Column(Float, nullable=True)  # Spread in basis points
+    
+    # Full orderbook data (stored as JSON)
+    bids = Column(JSON, nullable=True)  # List of [price, size] tuples
+    asks = Column(JSON, nullable=True)  # List of [price, size] tuples
+    
+    # Market metadata
+    market_question = Column(String, nullable=True)
+    outcome = Column(String, nullable=True)  # Which outcome this token represents
+    asset_type = Column(String, nullable=True)  # 'BTC' or 'ETH'
+    
+    # Additional metadata
+    extra_metadata = Column(JSON, nullable=True)
+    
+    __table_args__ = (
+        Index('idx_btc_eth_token_timestamp', 'token_id', 'timestamp'),
+        Index('idx_btc_eth_market_timestamp', 'market_id', 'timestamp'),
+        Index('idx_btc_eth_asset_timestamp', 'asset_type', 'timestamp'),
+    )
+
+
 class OrderbookDatabase:
     """Database manager for orderbook snapshots."""
     
-    def __init__(self, database_url: Optional[str] = None, per_market_tables: bool = False):
+    def __init__(self, database_url: Optional[str] = None, per_market_tables: bool = False, use_btc_eth_table: bool = False):
         """
         Initialize database connection.
         
@@ -112,6 +150,11 @@ class OrderbookDatabase:
         self._created_tables = set()  # Track table names
         self._table_class_cache = {}  # Cache table_name -> table_class mapping
         self.per_market_tables = per_market_tables
+        self.use_btc_eth_table = use_btc_eth_table  # Use single btc_eth_table instead
+        
+        # Create btc_eth_table if requested
+        if self.use_btc_eth_table:
+            BTCEthOrderbookSnapshot.__table__.create(self.engine, checkfirst=True)
         # Per-table locks for creation (prevents race conditions)
         self._table_locks = {}
     
@@ -277,46 +320,53 @@ class OrderbookDatabase:
                 import logging
                 logger = logging.getLogger(__name__)
                 
-                # Use the session's connection to check/create table (ensures same connection as insert)
-                inspector = inspect(self.engine)
+                # Get or create a lock for this specific table (prevents concurrent creation)
+                with _table_creation_lock:
+                    if table_name not in _table_creation_locks:
+                        _table_creation_locks[table_name] = threading.Lock()
+                    table_lock = _table_creation_locks[table_name]
                 
-                # Always verify table exists before inserting (handles race conditions)
-                if table_name not in inspector.get_table_names():
-                    # Table doesn't exist - create it now synchronously
-                    logger.warning(f"Table {table_name} does not exist, creating it now...")
-                    try:
-                        # Create table using the engine (will be visible to all connections)
-                        SnapshotTable.__table__.create(bind=self.engine, checkfirst=True)
-                        
-                        # Verify it was created (refresh inspector)
-                        inspector = inspect(self.engine)
-                        if table_name not in inspector.get_table_names():
-                            # Try one more time with explicit commit
-                            from sqlalchemy import text
+                # Use table-specific lock to prevent concurrent creation attempts
+                with table_lock:
+                    inspector = inspect(self.engine)
+                    
+                    # Always verify table exists before inserting (handles race conditions)
+                    if table_name not in inspector.get_table_names():
+                        # Table doesn't exist - create it now synchronously
+                        logger.warning(f"Table {table_name} does not exist, creating it now...")
+                        try:
+                            # Create table using engine.begin() for atomic transaction
                             with self.engine.begin() as conn:
                                 SnapshotTable.__table__.create(bind=conn, checkfirst=True)
+                            
+                            # Verify it was created (refresh inspector)
                             inspector = inspect(self.engine)
                             if table_name not in inspector.get_table_names():
-                                raise Exception(f"Failed to create table {table_name} - table still does not exist after creation")
-                        logger.info(f"✓ Created table {table_name}")
-                    except Exception as e:
-                        error_str = str(e).lower()
-                        
-                        # Check if table exists now (might have been created by another process)
-                        inspector = inspect(self.engine)
-                        if table_name in inspector.get_table_names():
-                            # Table exists now, that's fine
-                            logger.debug(f"Table {table_name} exists (created by another process)")
-                        elif "duplicate" in error_str or "already exists" in error_str:
-                            # Table/index exists, that's fine
-                            logger.debug(f"Table {table_name} or indexes already exist")
-                        else:
-                            # Real error - re-raise
-                            logger.error(f"Failed to create table {table_name}: {e}")
-                            raise
-                else:
-                    # Table exists, but verify it's accessible
-                    logger.debug(f"Table {table_name} exists, proceeding with insert")
+                                # Double-check - maybe it was created by another process
+                                import time
+                                time.sleep(0.1)  # Brief wait for DB to sync
+                                inspector = inspect(self.engine)
+                                if table_name not in inspector.get_table_names():
+                                    raise Exception(f"Failed to create table {table_name} - table still does not exist after creation")
+                            logger.info(f"✓ Created table {table_name}")
+                        except Exception as e:
+                            error_str = str(e).lower()
+                            
+                            # Check if table exists now (might have been created by another process)
+                            inspector = inspect(self.engine)
+                            if table_name in inspector.get_table_names():
+                                # Table exists now, that's fine
+                                logger.debug(f"Table {table_name} exists (created by another process)")
+                            elif "duplicate" in error_str or "already exists" in error_str:
+                                # Table/index exists, that's fine
+                                logger.debug(f"Table {table_name} or indexes already exist")
+                            else:
+                                # Real error - re-raise
+                                logger.error(f"Failed to create table {table_name}: {e}")
+                                raise
+                    else:
+                        # Table exists, proceed
+                        logger.debug(f"Table {table_name} exists, proceeding with insert")
             
             # Calculate best bid/ask
             best_bid_price = bids[0][0] if bids else None
@@ -333,22 +383,29 @@ class OrderbookDatabase:
                 if mid_price > 0:
                     spread_bps = (spread / mid_price) * 10000
             
-            snapshot = SnapshotTable(
-                token_id=token_id,
-                market_id=market_id,
-                timestamp=datetime.utcnow(),
-                best_bid_price=best_bid_price,
-                best_bid_size=best_bid_size,
-                best_ask_price=best_ask_price,
-                best_ask_size=best_ask_size,
-                spread=spread,
-                spread_bps=spread_bps,
-                bids=bids,
-                asks=asks,
-                market_question=market_question,
-                outcome=outcome,
-                extra_metadata=metadata,
-            )
+            # Create snapshot with appropriate fields
+            snapshot_data = {
+                "token_id": token_id,
+                "market_id": market_id,
+                "timestamp": datetime.utcnow(),
+                "best_bid_price": best_bid_price,
+                "best_bid_size": best_bid_size,
+                "best_ask_price": best_ask_price,
+                "best_ask_size": best_ask_size,
+                "spread": spread,
+                "spread_bps": spread_bps,
+                "bids": bids,
+                "asks": asks,
+                "market_question": market_question,
+                "outcome": outcome,
+                "extra_metadata": metadata,
+            }
+            
+            # Add asset_type for btc_eth_table
+            if self.use_btc_eth_table:
+                snapshot_data["asset_type"] = asset_type
+            
+            snapshot = SnapshotTable(**snapshot_data)
             
             session.add(snapshot)
             session.commit()

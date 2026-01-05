@@ -28,8 +28,8 @@ async def main():
     from agents.polymarket.orderbook_db import OrderbookDatabase
     
     # Initialize database (will use DATABASE_URL from env if set, otherwise SQLite)
-    # Use per-market tables for better organization
-    db = OrderbookDatabase(per_market_tables=True)
+    # Use btc_eth_table - single table for all BTC/ETH markets (simpler, no race conditions)
+    db = OrderbookDatabase(use_btc_eth_table=True)
     
     # Create both monitors
     btc_monitor = BTC15mMonitor(db, check_interval=60.0)
