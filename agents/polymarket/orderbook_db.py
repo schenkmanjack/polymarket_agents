@@ -5,7 +5,7 @@ import os
 import threading
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
-from sqlalchemy import create_engine, Column, String, Float, Integer, DateTime, JSON, Index
+from sqlalchemy import create_engine, Column, String, Float, Integer, DateTime, JSON, Index, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import StaticPool
@@ -161,6 +161,8 @@ class OrderbookDatabase:
         # Create btc_eth_table if requested
         if self.use_btc_eth_table:
             BTCEthOrderbookSnapshot.__table__.create(self.engine, checkfirst=True)
+            # Migrate existing table to add new columns if they don't exist
+            self._migrate_btc_eth_table()
         # Per-table locks for creation (prevents race conditions)
         self._table_locks = {}
     
