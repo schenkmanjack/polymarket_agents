@@ -178,33 +178,32 @@ class OrderbookDatabase:
             # Create table in database (checkfirst=True means it won't error if exists)
             # Use bind=self.engine to ensure it's created synchronously
             try:
-                # Create table without indexes first
+                # Create table - SQLAlchemy will handle indexes
+                # But we need to catch index errors separately
                 market_table.__table__.create(bind=self.engine, checkfirst=True)
-                
-                # Create indexes separately (they might already exist)
-                from sqlalchemy import inspect
-                inspector = inspect(self.engine)
-                existing_indexes = {idx['name'] for idx in inspector.get_indexes(table_name)}
-                
-                # Create indexes if they don't exist
-                for idx in market_table.__table__.indexes:
-                    if idx.name not in existing_indexes:
-                        try:
-                            idx.create(bind=self.engine, checkfirst=True)
-                        except Exception as idx_e:
-                            # Index might have been created by another process
-                            if "already exists" not in str(idx_e).lower() and "duplicate" not in str(idx_e).lower():
-                                logger.warning(f"Could not create index {idx.name}: {idx_e}")
             except Exception as e:
-                # If creation fails, check if table already exists in DB
-                from sqlalchemy import inspect
-                inspector = inspect(self.engine)
-                if table_name in inspector.get_table_names():
-                    # Table exists in DB, just cache the class
-                    pass
+                # Handle different types of errors
+                error_str = str(e).lower()
+                
+                # If it's a duplicate index error, that's okay - table exists
+                if "duplicate" in error_str and "index" in error_str:
+                    # Table exists, indexes exist, that's fine
+                    logger.debug(f"Table {table_name} and indexes already exist")
+                # If it's a duplicate table error, that's also okay
+                elif "already exists" in error_str or "duplicate" in error_str:
+                    # Table exists, that's fine
+                    logger.debug(f"Table {table_name} already exists")
                 else:
-                    # Re-raise if it's a different error
-                    raise
+                    # Check if table exists in DB
+                    from sqlalchemy import inspect
+                    inspector = inspect(self.engine)
+                    if table_name in inspector.get_table_names():
+                        # Table exists in DB, just cache the class
+                        logger.debug(f"Table {table_name} exists in database")
+                    else:
+                        # Re-raise if it's a different error
+                        logger.error(f"Error creating table {table_name}: {e}")
+                        raise
             
             # Cache the table class
             self._table_class_cache[table_name] = market_table
