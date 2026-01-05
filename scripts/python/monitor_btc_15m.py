@@ -27,8 +27,12 @@ from agents.polymarket.market_finder import get_token_ids_from_market, get_marke
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    force=True  # Force reconfiguration (useful for Railway)
 )
+# Ensure logs are flushed immediately (important for Railway)
+import sys
+logging.getLogger().handlers[0].stream = sys.stdout
 logger = logging.getLogger(__name__)
 
 
@@ -359,11 +363,22 @@ async def main():
 
 
 if __name__ == "__main__":
+    # Print startup message immediately (helps with Railway logging)
+    print("=" * 70, flush=True)
+    print("Starting BTC 15-Minute Market Monitor", flush=True)
+    print("=" * 70, flush=True)
+    
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Stopped by user")
+        sys.stdout.flush()
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
+        print(f"FATAL ERROR: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
         sys.exit(1)
 
