@@ -51,7 +51,7 @@ class OrderbookSnapshot(Base):
 class OrderbookDatabase:
     """Database manager for orderbook snapshots."""
     
-    def __init__(self, database_url: Optional[str] = None):
+    def __init__(self, database_url: Optional[str] = None, per_market_tables: bool = False):
         """
         Initialize database connection.
         
@@ -98,13 +98,71 @@ class OrderbookDatabase:
                 pool_pre_ping=True,  # Verify connections before using
             )
         
+        # Create base table
         Base.metadata.create_all(self.engine)
         SessionLocal = sessionmaker(bind=self.engine)
         self.SessionLocal = SessionLocal
+        
+        # Track created per-market tables
+        self._created_tables = set()
+        self.per_market_tables = per_market_tables
     
     def get_session(self) -> Session:
         """Get a database session."""
         return self.SessionLocal()
+    
+    def _get_table_for_market(self, market_id: Optional[str]):
+        """
+        Get or create table for a specific market.
+        If per_market_tables is False, returns base OrderbookSnapshot.
+        If per_market_tables is True, creates/returns market-specific table.
+        """
+        if not self.per_market_tables or not market_id:
+            return OrderbookSnapshot
+        
+        # Create market-specific table name (sanitize for SQL)
+        table_name = f"orderbook_snapshots_market_{market_id}"
+        
+        # Check if table already created in this session
+        if table_name in self._created_tables:
+            # Return existing table class - need to look it up from Base registry
+            for mapper in Base.registry.mappers:
+                if mapper.class_.__tablename__ == table_name:
+                    return mapper.class_
+        
+        # Create new table class for this market
+        market_table = type(
+            f"OrderbookSnapshot_{market_id}",
+            (Base,),
+            {
+                "__tablename__": table_name,
+                "id": Column(Integer, primary_key=True, autoincrement=True),
+                "token_id": Column(String, nullable=False, index=True),
+                "market_id": Column(String, nullable=True, index=True),
+                "timestamp": Column(DateTime, nullable=False, default=datetime.utcnow, index=True),
+                "best_bid_price": Column(Float, nullable=True),
+                "best_bid_size": Column(Float, nullable=True),
+                "best_ask_price": Column(Float, nullable=True),
+                "best_ask_size": Column(Float, nullable=True),
+                "spread": Column(Float, nullable=True),
+                "spread_bps": Column(Float, nullable=True),
+                "bids": Column(JSON, nullable=True),
+                "asks": Column(JSON, nullable=True),
+                "market_question": Column(String, nullable=True),
+                "outcome": Column(String, nullable=True),
+                "extra_metadata": Column(JSON, nullable=True),
+                "__table_args__": (
+                    Index('idx_token_timestamp', 'token_id', 'timestamp'),
+                    Index('idx_market_timestamp', 'market_id', 'timestamp'),
+                ),
+            }
+        )
+        
+        # Create table in database (checkfirst=True means it won't error if exists)
+        market_table.__table__.create(self.engine, checkfirst=True)
+        self._created_tables.add(table_name)
+        
+        return market_table
     
     def save_snapshot(
         self,
@@ -137,6 +195,9 @@ class OrderbookDatabase:
         """
         session = self.get_session()
         try:
+            # Get appropriate table (base or market-specific)
+            SnapshotTable = self._get_table_for_market(market_id)
+            
             # Calculate best bid/ask
             best_bid_price = bids[0][0] if bids else None
             best_bid_size = bids[0][1] if bids else None
@@ -152,7 +213,7 @@ class OrderbookDatabase:
                 if mid_price > 0:
                     spread_bps = (spread / mid_price) * 10000
             
-            snapshot = OrderbookSnapshot(
+            snapshot = SnapshotTable(
                 token_id=token_id,
                 market_id=market_id,
                 timestamp=datetime.utcnow(),
@@ -223,7 +284,7 @@ class OrderbookDatabase:
         
         Args:
             token_id: Filter by token ID
-            market_id: Filter by market ID
+            market_id: Filter by market ID (required if per_market_tables=True)
             start_time: Start of time range
             end_time: End of time range
             limit: Maximum number of results
@@ -233,18 +294,26 @@ class OrderbookDatabase:
         """
         session = self.get_session()
         try:
-            query = session.query(OrderbookSnapshot)
+            # If per-market tables enabled, use market-specific table
+            if self.per_market_tables and market_id:
+                SnapshotTable = self._get_table_for_market(market_id)
+                query = session.query(SnapshotTable)
+            else:
+                query = session.query(OrderbookSnapshot)
+            
+            # Get the model class
+            model_class = SnapshotTable if (self.per_market_tables and market_id) else OrderbookSnapshot
             
             if token_id:
-                query = query.filter(OrderbookSnapshot.token_id == token_id)
-            if market_id:
-                query = query.filter(OrderbookSnapshot.market_id == market_id)
+                query = query.filter(model_class.token_id == token_id)
+            if market_id and not self.per_market_tables:
+                query = query.filter(model_class.market_id == market_id)
             if start_time:
-                query = query.filter(OrderbookSnapshot.timestamp >= start_time)
+                query = query.filter(model_class.timestamp >= start_time)
             if end_time:
-                query = query.filter(OrderbookSnapshot.timestamp <= end_time)
+                query = query.filter(model_class.timestamp <= end_time)
             
-            query = query.order_by(OrderbookSnapshot.timestamp.desc())
+            query = query.order_by(model_class.timestamp.desc())
             query = query.limit(limit)
             
             return query.all()
