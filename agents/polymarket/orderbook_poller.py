@@ -137,6 +137,7 @@ class OrderbookPoller:
         """Fetch orderbook for a token and save to database."""
         try:
             bids, asks = [], []
+            http_status = None  # Initialize http_status
             
             # Prefer Polymarket client if wallet key is available (more reliable)
             if self.polymarket and self.polymarket.private_key:
@@ -146,10 +147,12 @@ class OrderbookPoller:
                     bids = [[float(bid.price), float(bid.size)] for bid in orderbook.bids]
                     asks = [[float(ask.price), float(ask.size)] for ask in orderbook.asks]
                     logger.debug(f"Got {len(bids)} bids, {len(asks)} asks via Polymarket client")
+                    # Success - http_status remains None (not a 404)
                 except Exception as e:
                     error_str = str(e).lower()
                     # Check if it's a 404 error (market ended)
                     if "404" in error_str or "no orderbook exists" in error_str:
+                        http_status = 404  # Mark as 404
                         self._failed_tokens[token_id] = self._failed_tokens.get(token_id, 0) + 1
                         failure_count = self._failed_tokens[token_id]
                         
@@ -168,6 +171,7 @@ class OrderbookPoller:
                             return
                         else:
                             logger.debug(f"Token {token_id[:20]}... returned 404 ({failure_count}/{self._max_failures}) - market may be ending")
+                            return  # Don't try direct HTTP if we already got 404
                     
                     logger.warning(f"Polymarket client failed for {token_id[:20]}...: {e}, trying direct HTTP")
                     # Fallback to direct HTTP
