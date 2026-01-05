@@ -178,28 +178,34 @@ class OrderbookDatabase:
             # Create table in database (checkfirst=True means it won't error if exists)
             # Use bind=self.engine to ensure it's created synchronously
             try:
-                # Create table - SQLAlchemy will handle indexes
-                # But we need to catch index errors separately
-                market_table.__table__.create(bind=self.engine, checkfirst=True)
+                # First check if table already exists
+                from sqlalchemy import inspect
+                inspector = inspect(self.engine)
+                if table_name in inspector.get_table_names():
+                    # Table exists, skip creation
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.debug(f"Table {table_name} already exists in database")
+                else:
+                    # Create table - SQLAlchemy will handle indexes
+                    market_table.__table__.create(bind=self.engine, checkfirst=True)
             except Exception as e:
                 # Handle different types of errors
+                import logging
+                logger = logging.getLogger(__name__)
                 error_str = str(e).lower()
                 
-                # If it's a duplicate index error, that's okay - table exists
-                if "duplicate" in error_str and "index" in error_str:
-                    # Table exists, indexes exist, that's fine
-                    logger.debug(f"Table {table_name} and indexes already exist")
-                # If it's a duplicate table error, that's also okay
-                elif "already exists" in error_str or "duplicate" in error_str:
-                    # Table exists, that's fine
-                    logger.debug(f"Table {table_name} already exists")
+                # If it's a duplicate index/table error, that's okay - table exists
+                if "duplicate" in error_str or "already exists" in error_str:
+                    # Table/index exists, that's fine
+                    logger.debug(f"Table {table_name} or indexes already exist: {error_str[:100]}")
                 else:
-                    # Check if table exists in DB
+                    # Check if table exists in DB before re-raising
                     from sqlalchemy import inspect
                     inspector = inspect(self.engine)
                     if table_name in inspector.get_table_names():
                         # Table exists in DB, just cache the class
-                        logger.debug(f"Table {table_name} exists in database")
+                        logger.debug(f"Table {table_name} exists in database despite error")
                     else:
                         # Re-raise if it's a different error
                         logger.error(f"Error creating table {table_name}: {e}")
@@ -257,23 +263,33 @@ class OrderbookDatabase:
             SnapshotTable = self._get_table_for_market(market_id)
             
             # Ensure table exists in database (double-check for per-market tables)
+            # Only check if table is not in cache (meaning it might not exist yet)
             if self.per_market_tables and market_id:
                 table_name = f"orderbook_snapshots_market_{market_id}"
-                # Verify table exists, create if needed
-                from sqlalchemy import inspect
-                inspector = inspect(self.engine)
-                if table_name not in inspector.get_table_names():
-                    # Table doesn't exist, create it (this should have been done in _get_table_for_market)
-                    # But double-check and create if needed
-                    try:
-                        SnapshotTable.__table__.create(bind=self.engine, checkfirst=True)
-                    except Exception as e:
-                        # If table creation fails due to duplicate/index issues, verify it exists
-                        if table_name in inspector.get_table_names():
-                            # Table exists, that's fine
-                            pass
-                        else:
-                            raise
+                # If table is in cache, it should already exist - skip check
+                if table_name not in self._table_class_cache:
+                    # Verify table exists, create if needed
+                    from sqlalchemy import inspect
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    inspector = inspect(self.engine)
+                    if table_name not in inspector.get_table_names():
+                        # Table doesn't exist, create it
+                        try:
+                            SnapshotTable.__table__.create(bind=self.engine, checkfirst=True)
+                        except Exception as e:
+                            error_str = str(e).lower()
+                            # If it's a duplicate index/table error, that's okay - table exists
+                            if "duplicate" in error_str or "already exists" in error_str:
+                                # Table/index exists, that's fine
+                                logger.debug(f"Table {table_name} or indexes already exist")
+                            else:
+                                # Verify table exists before re-raising
+                                if table_name in inspector.get_table_names():
+                                    # Table exists, that's fine
+                                    pass
+                                else:
+                                    raise
             
             # Calculate best bid/ask
             best_bid_price = bids[0][0] if bids else None
