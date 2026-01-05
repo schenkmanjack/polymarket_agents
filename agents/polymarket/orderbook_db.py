@@ -123,46 +123,75 @@ class OrderbookDatabase:
         # Create market-specific table name (sanitize for SQL)
         table_name = f"orderbook_snapshots_market_{market_id}"
         
-        # Check if table already created in this session
-        if table_name in self._created_tables:
-            # Return existing table class - need to look it up from Base registry
-            for mapper in Base.registry.mappers:
-                if mapper.class_.__tablename__ == table_name:
-                    return mapper.class_
+        # Check cache first (fastest)
+        if table_name in self._table_class_cache:
+            return self._table_class_cache[table_name]
+        
+        # Check if table class already exists in Base registry (from previous run or concurrent access)
+        for mapper in Base.registry.mappers:
+            if hasattr(mapper.class_, '__tablename__') and mapper.class_.__tablename__ == table_name:
+                # Cache it for next time
+                self._table_class_cache[table_name] = mapper.class_
+                self._created_tables.add(table_name)
+                return mapper.class_
         
         # Create new table class for this market
-        market_table = type(
-            f"OrderbookSnapshot_{market_id}",
-            (Base,),
-            {
-                "__tablename__": table_name,
-                "id": Column(Integer, primary_key=True, autoincrement=True),
-                "token_id": Column(String, nullable=False, index=True),
-                "market_id": Column(String, nullable=True, index=True),
-                "timestamp": Column(DateTime, nullable=False, default=datetime.utcnow, index=True),
-                "best_bid_price": Column(Float, nullable=True),
-                "best_bid_size": Column(Float, nullable=True),
-                "best_ask_price": Column(Float, nullable=True),
-                "best_ask_size": Column(Float, nullable=True),
-                "spread": Column(Float, nullable=True),
-                "spread_bps": Column(Float, nullable=True),
-                "bids": Column(JSON, nullable=True),
-                "asks": Column(JSON, nullable=True),
-                "market_question": Column(String, nullable=True),
-                "outcome": Column(String, nullable=True),
-                "extra_metadata": Column(JSON, nullable=True),
-                "__table_args__": (
-                    Index('idx_token_timestamp', 'token_id', 'timestamp'),
-                    Index('idx_market_timestamp', 'market_id', 'timestamp'),
-                ),
-            }
-        )
+        # Use a unique class name to avoid conflicts
+        class_name = f"OrderbookSnapshot_{market_id}_{id(self)}"  # Add instance ID for uniqueness
         
-        # Create table in database (checkfirst=True means it won't error if exists)
-        market_table.__table__.create(self.engine, checkfirst=True)
-        self._created_tables.add(table_name)
+        # Check one more time if table was created by another thread/process
+        for mapper in Base.registry.mappers:
+            if hasattr(mapper.class_, '__tablename__') and mapper.class_.__tablename__ == table_name:
+                self._table_class_cache[table_name] = mapper.class_
+                self._created_tables.add(table_name)
+                return mapper.class_
         
-        return market_table
+        try:
+            market_table = type(
+                class_name,
+                (Base,),
+                {
+                    "__tablename__": table_name,
+                    "__table_args__": (
+                        Index('idx_token_timestamp', 'token_id', 'timestamp'),
+                        Index('idx_market_timestamp', 'market_id', 'timestamp'),
+                    ),
+                    "id": Column(Integer, primary_key=True, autoincrement=True),
+                    "token_id": Column(String, nullable=False, index=True),
+                    "market_id": Column(String, nullable=True, index=True),
+                    "timestamp": Column(DateTime, nullable=False, default=datetime.utcnow, index=True),
+                    "best_bid_price": Column(Float, nullable=True),
+                    "best_bid_size": Column(Float, nullable=True),
+                    "best_ask_price": Column(Float, nullable=True),
+                    "best_ask_size": Column(Float, nullable=True),
+                    "spread": Column(Float, nullable=True),
+                    "spread_bps": Column(Float, nullable=True),
+                    "bids": Column(JSON, nullable=True),
+                    "asks": Column(JSON, nullable=True),
+                    "market_question": Column(String, nullable=True),
+                    "outcome": Column(String, nullable=True),
+                    "extra_metadata": Column(JSON, nullable=True),
+                }
+            )
+            
+            # Create table in database (checkfirst=True means it won't error if exists)
+            market_table.__table__.create(self.engine, checkfirst=True)
+            
+            # Cache the table class
+            self._table_class_cache[table_name] = market_table
+            self._created_tables.add(table_name)
+            
+            return market_table
+        except Exception as e:
+            # If table already exists in metadata, try to find it
+            if "already defined" in str(e) or "already exists" in str(e).lower():
+                # Look for existing table in registry
+                for mapper in Base.registry.mappers:
+                    if hasattr(mapper.class_, '__tablename__') and mapper.class_.__tablename__ == table_name:
+                        self._table_class_cache[table_name] = mapper.class_
+                        self._created_tables.add(table_name)
+                        return mapper.class_
+            raise
     
     def save_snapshot(
         self,
