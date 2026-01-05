@@ -178,7 +178,23 @@ class OrderbookDatabase:
             # Create table in database (checkfirst=True means it won't error if exists)
             # Use bind=self.engine to ensure it's created synchronously
             try:
+                # Create table without indexes first
                 market_table.__table__.create(bind=self.engine, checkfirst=True)
+                
+                # Create indexes separately (they might already exist)
+                from sqlalchemy import inspect
+                inspector = inspect(self.engine)
+                existing_indexes = {idx['name'] for idx in inspector.get_indexes(table_name)}
+                
+                # Create indexes if they don't exist
+                for idx in market_table.__table__.indexes:
+                    if idx.name not in existing_indexes:
+                        try:
+                            idx.create(bind=self.engine, checkfirst=True)
+                        except Exception as idx_e:
+                            # Index might have been created by another process
+                            if "already exists" not in str(idx_e).lower() and "duplicate" not in str(idx_e).lower():
+                                logger.warning(f"Could not create index {idx.name}: {idx_e}")
             except Exception as e:
                 # If creation fails, check if table already exists in DB
                 from sqlalchemy import inspect
@@ -248,8 +264,17 @@ class OrderbookDatabase:
                 from sqlalchemy import inspect
                 inspector = inspect(self.engine)
                 if table_name not in inspector.get_table_names():
-                    # Table doesn't exist, create it
-                    SnapshotTable.__table__.create(bind=self.engine, checkfirst=True)
+                    # Table doesn't exist, create it (this should have been done in _get_table_for_market)
+                    # But double-check and create if needed
+                    try:
+                        SnapshotTable.__table__.create(bind=self.engine, checkfirst=True)
+                    except Exception as e:
+                        # If table creation fails due to duplicate/index issues, verify it exists
+                        if table_name in inspector.get_table_names():
+                            # Table exists, that's fine
+                            pass
+                        else:
+                            raise
             
             # Calculate best bid/ask
             best_bid_price = bids[0][0] if bids else None
