@@ -6,6 +6,7 @@ import pdb
 import time
 import ast
 import requests
+import logging
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -45,6 +46,7 @@ class Polymarket:
 
         self.chain_id = 137  # POLYGON
         self.private_key = os.getenv("POLYGON_WALLET_PRIVATE_KEY")
+        self.proxy_wallet_address = os.getenv("POLYMARKET_PROXY_WALLET_ADDRESS")  # For gasless trading
         self.polygon_rpc = "https://polygon-rpc.com"
         self.w3 = Web3(Web3.HTTPProvider(self.polygon_rpc))
 
@@ -71,9 +73,29 @@ class Polymarket:
         self._init_approvals(False)
 
     def _init_api_keys(self) -> None:
-        self.client = ClobClient(
-            self.clob_url, key=self.private_key, chain_id=self.chain_id
-        )
+        # Initialize CLOB client with proxy wallet as funder (for gasless trading)
+        # If proxy wallet address is set, use it as funder for gasless trading
+        if self.proxy_wallet_address:
+            # signature_type: 1 = Magic/Email, 2 = Browser/Gnosis Safe
+            # Using 2 for Gnosis Safe (proxy wallet)
+            self.client = ClobClient(
+                host=self.clob_url,
+                key=self.private_key,
+                chain_id=self.chain_id,
+                funder=self.proxy_wallet_address,
+                signature_type=2
+            )
+            logger = logging.getLogger(__name__)
+            logger.info(f"✓ Using proxy wallet as funder: {self.proxy_wallet_address[:10]}...{self.proxy_wallet_address[-8:]}")
+            logger.info("  (Gasless trading enabled)")
+        else:
+            # Standard initialization without proxy wallet
+            self.client = ClobClient(
+                host=self.clob_url,
+                key=self.private_key,
+                chain_id=self.chain_id
+            )
+        
         self.credentials = self.client.create_or_derive_api_creds()
         self.client.set_api_creds(self.credentials)
         # print(self.credentials)
@@ -359,15 +381,32 @@ class Polymarket:
         ).call()
         return float(balance_res / 10e5)
     
-    def get_polymarket_balance(self) -> Optional[float]:
+    def get_polymarket_balance(self, proxy_wallet_address: Optional[str] = None) -> Optional[float]:
         """
         Get USDC balance from Polymarket (proxy wallet/trading balance).
         This is the balance available for trading on Polymarket.
+        
+        Args:
+            proxy_wallet_address: Optional proxy wallet address. If not provided,
+                                will try to get from POLYMARKET_PROXY_WALLET_ADDRESS env var.
         
         Returns:
             USDC balance as float, or None if unavailable
         """
         try:
+            # First, try to query proxy wallet balance on-chain (most reliable)
+            proxy_address = proxy_wallet_address or os.getenv("POLYMARKET_PROXY_WALLET_ADDRESS")
+            if proxy_address:
+                try:
+                    # Query USDC balance of proxy wallet on-chain
+                    balance_res = self.usdc.functions.balanceOf(proxy_address).call()
+                    balance = float(balance_res / 10e5)
+                    return balance
+                except Exception as e:
+                    # If on-chain query fails, continue to try API methods
+                    pass
+            
+            # Fallback: Try API methods (may not work, but worth trying)
             if not self.client:
                 return None
             

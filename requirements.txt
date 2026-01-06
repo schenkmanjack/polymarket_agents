@@ -90,6 +90,7 @@ newsapi-python==0.2.7
 nodeenv==1.9.1
 numpy==1.26.4
 pandas==2.2.2
+pyarrow==14.0.1
 oauthlib==3.2.2
 onnxruntime==1.18.1
 openai==1.37.1
@@ -170,3 +171,9 @@ websockets==12.0
 wrapt==1.16.0
 yarl==1.9.4
 zipp==3.19.2
+
+# Optional: For AI model integration (Lag-Llama, Chronos-Bolt)
+# Uncomment to enable model predictions:
+# transformers>=4.30.0
+# torch>=2.0.0
+# accelerate>=0.20.0

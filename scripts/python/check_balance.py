@@ -55,14 +55,27 @@ def check_balances():
         logger.info("")
         
         # Check Polymarket trading balance (proxy wallet)
+        proxy_address = os.getenv("POLYMARKET_PROXY_WALLET_ADDRESS")
+        if not proxy_address:
+            logger.info("")
+            logger.info("💡 To check proxy wallet balance, set POLYMARKET_PROXY_WALLET_ADDRESS")
+            logger.info("   Get this address from Polymarket deposit page")
+            logger.info("   Add to .env: POLYMARKET_PROXY_WALLET_ADDRESS=0x...")
+        
         try:
             polymarket_balance = pm.get_polymarket_balance()
             if polymarket_balance is not None:
                 logger.info(f"✓ Polymarket Trading Balance: ${polymarket_balance:,.2f}")
-                logger.info("  (Proxy wallet balance - available for trading)")
+                if proxy_address:
+                    logger.info(f"  (Proxy wallet: {proxy_address[:10]}...{proxy_address[-8:]})")
+                logger.info("  (Available for trading on Polymarket)")
             else:
-                logger.info("⚠ Polymarket trading balance: Not available")
-                logger.info("  (May need to deposit funds to proxy wallet)")
+                if proxy_address:
+                    logger.info("⚠ Polymarket trading balance: $0.00 or unavailable")
+                    logger.info(f"  (Proxy wallet: {proxy_address[:10]}...{proxy_address[-8:]})")
+                else:
+                    logger.info("⚠ Polymarket trading balance: Not available")
+                    logger.info("  (Set POLYMARKET_PROXY_WALLET_ADDRESS to check)")
         except Exception as e:
             logger.warning(f"⚠ Could not get Polymarket balance: {e}")
             polymarket_balance = None
