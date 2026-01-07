@@ -28,33 +28,53 @@ This document tracks the status of integrating AI models (Lag-Llama/Chronos-Bolt
    - ✓ Moving average predictions
    - ✓ Linear trend projections
 
+### ✅ Completed (Recent Updates)
+
+1. **Historical Market Fetcher** (`agents/backtesting/market_fetcher.py`)
+   - ✓ Fetches closed/resolved BTC 15-minute markets from Polymarket API
+   - ✓ Filters markets by date range
+   - ✓ Extracts market metadata (start time, outcomes, etc.)
+   - ✓ Enriches markets with BTC price data
+   - ✓ Supports sequential processing for cache efficiency
+
+2. **Backtesting Framework** (`agents/backtesting/btc_backtester.py`)
+   - ✓ Processes markets sequentially
+   - ✓ Runs predictions using configured model
+   - ✓ Compares predictions to actual outcomes
+   - ✓ Calculates performance metrics:
+     - Win rate
+     - P&L (profit/loss)
+     - Sharpe ratio
+     - Profit factor
+     - Mean Absolute Error
+   - ✓ Supports saving results to CSV
+
+3. **Model Integration** (`agents/models/btc_predictor.py`)
+   - ✓ Improved Lag-Llama integration (with PyTorch support)
+   - ✓ Improved Chronos-Bolt integration (with PyTorch support)
+   - ✓ Graceful fallback to baseline if models unavailable
+   - ✓ Proper data normalization and denormalization
+   - ⚠️ Full model inference requires PyTorch installation
+
 ### 🟡 In Progress
 
-1. **Model Integration**
+1. **Model Testing**
    - ⚠️ Lag-Llama: Cannot test (PyTorch not installed)
    - ⚠️ Chronos-Bolt: Cannot test (PyTorch not installed)
    - ⚠️ Need to install dependencies and retest
 
-2. **Historical Market Fetcher**
-   - ⚠️ Not yet implemented
-   - Need to fetch closed/resolved BTC 15-minute markets from Polymarket
-
-3. **Backtesting Framework**
-   - ⚠️ Not yet implemented
-   - Need to process markets sequentially, run predictions, calculate metrics
-
 ### ❌ Blocked / Missing
 
 1. **Dependencies**
-   - ❌ PyTorch - Required for Lag-Llama/Chronos models
-   - ❌ PyArrow - Required for Parquet caching (already in requirements.txt but not installed)
-   - ❌ Transformers (HuggingFace) - Required for model loading
+   - ❌ PyTorch - Required for Lag-Llama/Chronos models (optional, commented in requirements.txt)
+   - ❌ Transformers (HuggingFace) - Required for model loading (optional, commented in requirements.txt)
+   - ✓ PyArrow - Already installed (required for Parquet caching)
 
-2. **Model Integration**
-   - ❌ Full Lag-Llama integration (probabilistic forecasting)
-   - ❌ Full Chronos-Bolt integration (time series forecasting)
-   - ❌ Proper data formatting for models
-   - ❌ Inference pipeline setup
+2. **Model Testing**
+   - ⚠️ Full Lag-Llama inference needs testing (requires PyTorch)
+   - ⚠️ Full Chronos-Bolt inference needs testing (requires PyTorch)
+   - ✓ Data formatting implemented
+   - ✓ Inference pipeline setup implemented
 
 ## Architecture
 
@@ -188,34 +208,31 @@ Once backtesting is implemented, we'll track:
 
 ## Next Steps
 
-1. **Install Dependencies**
+1. **Install Dependencies (Optional - for AI models)**
    ```bash
-   pip install pyarrow torch transformers
+   pip install torch transformers
    ```
+   Note: PyArrow is already installed. PyTorch and transformers are optional and only needed for Lag-Llama/Chronos models.
 
 2. **Test Model Integration**
-   - Run `test_model_integration.py` again
-   - Verify Lag-Llama and Chronos can load
+   - Run `test_model_integration.py` to test model loading
+   - Verify Lag-Llama and Chronos can load (requires PyTorch)
    - Test with actual BTC price sequences
 
-3. **Build Historical Market Fetcher**
-   - Query Polymarket API for closed BTC 15-minute markets
-   - Extract: market start time, starting prices, final outcomes
-   - Match with BTC price data
+3. **Test Backtesting Framework**
+   - Run `test_backtesting.py` to test the backtesting framework
+   - Verify market fetching works
+   - Verify backtesting produces results
 
-4. **Build Backtesting Framework**
-   - Process markets sequentially
-   - For each market:
-     - Get BTC data up to market start
-     - Run model prediction
-     - Compare to actual outcome
-     - Calculate P&L
-   - Aggregate metrics across all markets
+4. **Run Full Backtest**
+   - Use `run_backtest()` function or `BTCBacktester` class
+   - Process historical markets
+   - Analyze results and metrics
 
-5. **Model Integration**
-   - Implement proper data formatting for models
-   - Set up inference pipelines
-   - Handle model outputs (point predictions vs distributions)
+5. **Model Fine-tuning (Future)**
+   - Test actual model inference once PyTorch is installed
+   - Fine-tune model parameters
+   - Compare model performance vs baseline
 
 ## File Structure
 
@@ -223,13 +240,17 @@ Once backtesting is implemented, we'll track:
 agents/
   connectors/
     btc_data.py          # BTC data fetcher (✓ Working)
-  backtesting/           # (To be created)
-    btc_backtester.py    # Backtesting framework
-    market_fetcher.py    # Historical market fetcher
+  backtesting/           # (✓ Created)
+    __init__.py          # Package init
+    btc_backtester.py    # Backtesting framework (✓ Implemented)
+    market_fetcher.py    # Historical market fetcher (✓ Implemented)
+  models/
+    btc_predictor.py     # BTC predictor with model integration (✓ Improved)
 
 scripts/python/
   test_btc_fetcher.py           # Test BTC fetcher (✓ Working)
   test_model_integration.py     # Test model integration (⚠️ Needs PyTorch)
+  test_backtesting.py           # Test backtesting framework (✓ Created)
 
 data/
   btc_cache/            # Cached BTC data (Parquet files)
@@ -263,4 +284,12 @@ data/
 ## Last Updated
 
 2026-01-05
+
+## Recent Changes
+
+- ✅ Implemented Historical Market Fetcher (`agents/backtesting/market_fetcher.py`)
+- ✅ Implemented Backtesting Framework (`agents/backtesting/btc_backtester.py`)
+- ✅ Improved model integration for Lag-Llama and Chronos-Bolt
+- ✅ Created test script for backtesting (`scripts/python/test_backtesting.py`)
+- ✅ Updated status documentation
 
