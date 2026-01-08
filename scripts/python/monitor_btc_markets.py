@@ -139,16 +139,16 @@ class BTCMarketsMonitor:
                 logger.info(f"  Already monitoring tokens {token_ids}, skipping")
                 continue
             
-            # Add to monitoring
+            # Prepare for monitoring (store event slug and token IDs for tracking)
             market_info = get_market_info_for_logging(market)
+            market_info["_event_slug"] = event_slug
+            market_info["_token_ids"] = token_ids
             
             for token_id in token_ids:
                 if token_id not in self.monitored_token_ids:
                     new_token_ids.append(token_id)
                     new_market_info.update(market_info)
-                    self.monitored_token_ids.add(token_id)
             
-            self.monitored_15m_event_slugs.add(event_slug)
             logger.info(f"✓ Found new BTC 15-minute market: {market.get('question', event_slug)[:60]}...")
             logger.info(f"  Event slug: {event_slug}")
             logger.info(f"  Token IDs: {token_ids}")
@@ -156,7 +156,21 @@ class BTCMarketsMonitor:
         # Start monitoring new tokens
         if new_token_ids:
             logger.info(f"Starting to monitor {len(new_token_ids)} new 15-minute market tokens")
-            await self._start_monitoring(new_token_ids, new_market_info, market_type="15m")
+            try:
+                success = await self._start_monitoring(new_token_ids, new_market_info, market_type="15m")
+                if success:
+                    # Only mark as monitored AFTER successful start
+                    event_slug = new_market_info.get("_event_slug")
+                    token_ids = new_market_info.get("_token_ids", [])
+                    if event_slug:
+                        self.monitored_15m_event_slugs.add(event_slug)
+                        for token_id in token_ids:
+                            self.monitored_token_ids.add(token_id)
+                        logger.info(f"✓ Successfully started monitoring 15-minute market {event_slug}")
+                else:
+                    logger.warning(f"⚠ Failed to start monitoring 15-minute market (will retry on next check)")
+            except Exception as e:
+                logger.error(f"Error starting monitoring for 15-minute market: {e}", exc_info=True)
     
     async def _check_1h_markets(self):
         """Check for new BTC 1-hour markets."""
@@ -209,16 +223,16 @@ class BTCMarketsMonitor:
                 logger.info(f"  Already monitoring tokens {token_ids}, skipping")
                 continue
             
-            # Add to monitoring
+            # Prepare for monitoring (store event slug and token IDs for tracking)
             market_info = get_market_info_for_logging(market)
+            market_info["_event_slug"] = event_slug
+            market_info["_token_ids"] = token_ids
             
             for token_id in token_ids:
                 if token_id not in self.monitored_token_ids:
                     new_token_ids.append(token_id)
                     new_market_info.update(market_info)
-                    self.monitored_token_ids.add(token_id)
             
-            self.monitored_1h_event_slugs.add(event_slug)
             logger.info(f"✓ Found new BTC 1-hour market: {market.get('question', event_slug)[:60]}...")
             logger.info(f"  Event slug: {event_slug}")
             logger.info(f"  Token IDs: {token_ids}")
@@ -226,9 +240,23 @@ class BTCMarketsMonitor:
         # Start monitoring new tokens
         if new_token_ids:
             logger.info(f"Starting to monitor {len(new_token_ids)} new 1-hour market tokens")
-            await self._start_monitoring(new_token_ids, new_market_info, market_type="1h")
+            try:
+                success = await self._start_monitoring(new_token_ids, new_market_info, market_type="1h")
+                if success:
+                    # Only mark as monitored AFTER successful start
+                    event_slug = new_market_info.get("_event_slug")
+                    token_ids = new_market_info.get("_token_ids", [])
+                    if event_slug:
+                        self.monitored_1h_event_slugs.add(event_slug)
+                        for token_id in token_ids:
+                            self.monitored_token_ids.add(token_id)
+                        logger.info(f"✓ Successfully started monitoring 1-hour market {event_slug}")
+                else:
+                    logger.warning(f"⚠ Failed to start monitoring 1-hour market (will retry on next check)")
+            except Exception as e:
+                logger.error(f"Error starting monitoring for 1-hour market: {e}", exc_info=True)
     
-    async def _start_monitoring(self, token_ids: list, market_info: dict, market_type: str):
+    async def _start_monitoring(self, token_ids: list, market_info: dict, market_type: str) -> bool:
         """
         Start monitoring new tokens.
         
@@ -236,6 +264,9 @@ class BTCMarketsMonitor:
             token_ids: List of token IDs to monitor
             market_info: Market metadata dict
             market_type: "15m" or "1h"
+        
+        Returns:
+            True if monitoring started successfully, False otherwise
         """
         import os
         # Use separate wallet key for monitoring script (not trading script)
@@ -294,6 +325,7 @@ class BTCMarketsMonitor:
                                 else:
                                     self.logger_service_1h = new_logger_service
                                     self.logger_task_1h = new_logger_task
+                                return True  # Success
                             else:
                                 logger.warning(f"⚠ WebSocket connected but no messages for {market_type} - falling back to polling")
                                 new_logger_task.cancel()
@@ -324,6 +356,7 @@ class BTCMarketsMonitor:
                             if token_id not in logger_service.token_ids:
                                 logger_service.token_ids.append(token_id)
                         logger.info(f"Added {len(token_ids)} new subscriptions to {market_type} WebSocket")
+                        return True  # Success
             except Exception as e:
                 logger.warning(f"WebSocket failed for {market_type}: {e} - Falling back to polling mode")
                 has_wallet_key = False  # Force polling fallback
@@ -357,10 +390,16 @@ class BTCMarketsMonitor:
                     self.poller_task_1h = new_poller_task
                 
                 logger.info(f"Started polling for {market_type} markets (0.5s interval)")
+                return True  # Success
             else:
                 # Add tokens to existing poller
                 poller.add_tokens(token_ids, market_info)
                 logger.info(f"Added {len(token_ids)} tokens to existing {market_type} poller")
+                return True  # Success
+        
+        # If we get here, monitoring didn't start
+        logger.error(f"Failed to start monitoring for {market_type} markets")
+        return False
     
     async def run(self):
         """Main monitoring loop."""
