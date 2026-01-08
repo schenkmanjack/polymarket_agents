@@ -286,10 +286,6 @@ class BTC15mMonitor:
         self.running = True
         logger.info(f"Starting BTC 15-minute market monitor (check interval: {self.check_interval}s)")
         
-        # Track check count for periodic balance logging
-        check_count = 0
-        balance_log_interval = 1  # Log balance every check (every ~1 minute with 60s interval)
-        
         # Initial check
         await self._check_for_new_markets()
         
@@ -299,13 +295,6 @@ class BTC15mMonitor:
                 await asyncio.sleep(self.check_interval)
                 if self.running:
                     await self._check_for_new_markets()
-                    
-                    # Log balance periodically
-                    check_count += 1
-                    if check_count % balance_log_interval == 0:
-                        logger.info("")
-                        log_balances()
-                        logger.info("")
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -324,40 +313,6 @@ class BTC15mMonitor:
                 pass
 
 
-def log_balances():
-    """Check and log Polymarket balances."""
-    try:
-        from agents.polymarket.polymarket import Polymarket
-        pm = Polymarket()
-        
-        if not pm.private_key:
-            logger.debug("POLYGON_WALLET_PRIVATE_KEY not set - skipping balance check")
-            return
-        
-        # Get wallet address
-        wallet_address = pm.get_address_for_private_key()
-        
-        # Check Polygon wallet USDC balance
-        try:
-            polygon_balance = pm.get_usdc_balance()
-            logger.info(f"💰 Polygon Wallet USDC Balance: ${polygon_balance:,.2f} (Address: {wallet_address[:10]}...{wallet_address[-8:]})")
-        except Exception as e:
-            logger.debug(f"Could not get Polygon wallet balance: {e}")
-        
-        # Check Polymarket trading balance (proxy wallet)
-        try:
-            polymarket_balance = pm.get_polymarket_balance()
-            if polymarket_balance is not None:
-                logger.info(f"💰 Polymarket Trading Balance: ${polymarket_balance:,.2f} (Proxy wallet - available for trading)")
-            else:
-                logger.debug("Polymarket trading balance not available (may need to deposit to proxy wallet)")
-        except Exception as e:
-            logger.debug(f"Could not get Polymarket balance: {e}")
-            
-    except Exception as e:
-        logger.debug(f"Error checking balances: {e}")
-
-
 async def main():
     from agents.polymarket.orderbook_db import OrderbookDatabase
     
@@ -368,11 +323,6 @@ async def main():
     # Proactive mode: check every 10 seconds (instead of 60)
     # This catches markets within seconds of creation, not minutes
     monitor = BTC15mMonitor(db, check_interval=10.0, proactive=True)
-    
-    # Check and log balances before starting monitoring
-    logger.info("")
-    log_balances()
-    logger.info("")
     
     try:
         await monitor.run()
