@@ -59,9 +59,9 @@ This document tracks the status of integrating AI models (Lag-Llama/Chronos-Bolt
 ### 🟡 In Progress
 
 1. **Model Testing**
-   - ⚠️ Lag-Llama: Cannot test (PyTorch not installed)
-   - ⚠️ Chronos-Bolt: Cannot test (PyTorch not installed)
-   - ⚠️ Need to install dependencies and retest
+   - ⚠️ Lag-Llama: Not available (gluonts 0.16.2 doesn't include Lag-Llama module)
+   - ✓ Chronos-Bolt: Working (tested and functional)
+   - ✓ Baseline: Working (fallback predictor)
 
 ### ❌ Blocked / Missing
 
@@ -71,8 +71,9 @@ This document tracks the status of integrating AI models (Lag-Llama/Chronos-Bolt
    - ✓ PyArrow - Already installed (required for Parquet caching)
 
 2. **Model Testing**
-   - ⚠️ Full Lag-Llama inference needs testing (requires PyTorch)
-   - ⚠️ Full Chronos-Bolt inference needs testing (requires PyTorch)
+   - ⚠️ Lag-Llama: Not available in current setup (gluonts 0.16.2 doesn't include it)
+   - ✓ Chronos-Bolt: Working and tested
+   - ✓ Baseline: Working and tested
    - ✓ Data formatting implemented
    - ✓ Inference pipeline setup implemented
 
@@ -173,7 +174,11 @@ python scripts/python/test_model_integration.py
 - **Model**: `time-series-foundation-models/Lag-Llama`
 - **Output**: Distribution (Student's t-distribution) - perfect for uncertainty quantification
 - **Use case**: When you need confidence intervals (e.g., "90% CI suggests price > threshold")
-- **Status**: ⚠️ Not tested (PyTorch missing)
+- **Status**: ⚠️ Not available (requires specific implementation)
+  - gluonts 0.16.2 installed ✓
+  - Lag-Llama module not available in this gluonts version
+  - HuggingFace model exists but lacks standard config.json for transformers
+  - Falls back to baseline predictor
 
 ### Chronos-Bolt (High-Frequency Forecasting)
 - **Model**: `amazon/chronos-t5-tiny` (or other Chronos variants)
@@ -284,6 +289,13 @@ data/
 ## Last Updated
 
 2026-01-05
+
+## Recent Changes (Latest)
+
+- ✅ Installed gluonts 0.16.2, PyTorch 2.6.0, lightning, and scipy in conda environment
+- ⚠️ Lag-Llama: Not available in gluonts 0.16.2 (module doesn't exist)
+- ✅ Chronos-Bolt: Confirmed working and ready for backtesting
+- ✅ Updated code to gracefully handle Lag-Llama unavailability
 
 ## Recent Changes
 

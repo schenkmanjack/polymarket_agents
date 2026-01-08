@@ -28,7 +28,8 @@ class BTCBacktester:
         self,
         model_name: str = "baseline",
         lookback_minutes: int = 200,
-        prediction_horizon_minutes: int = 15
+        prediction_horizon_minutes: int = 15,
+        proxy: Optional[str] = None
     ):
         """
         Initialize backtester.
@@ -37,14 +38,18 @@ class BTCBacktester:
             model_name: Model to use ('lag-llama', 'chronos-bolt', or 'baseline')
             lookback_minutes: Minutes of history to use for prediction (default: 200)
             prediction_horizon_minutes: Minutes ahead to predict (default: 15)
+            proxy: Optional proxy URL for VPN/routing. Supports:
+                   - HTTP/HTTPS: "http://user:pass@proxy.example.com:8080"
+                   - Oxylabs: "http://user-USERNAME:PASSWORD@isp.oxylabs.io:8001"
+                   - Or set HTTPS_PROXY/OXYLABS_* environment variables
         """
         self.model_name = model_name
         self.lookback_minutes = lookback_minutes
         self.prediction_horizon_minutes = prediction_horizon_minutes
         
-        # Initialize components
-        self.market_fetcher = HistoricalMarketFetcher()
-        self.btc_fetcher = BTCDataFetcher()
+        # Initialize components with proxy support
+        self.market_fetcher = HistoricalMarketFetcher(proxy=proxy)
+        self.btc_fetcher = BTCDataFetcher(proxy=proxy)
         
         # Initialize predictor (may fall back to baseline if model unavailable)
         try:

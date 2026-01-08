@@ -190,6 +190,44 @@ def get_market_by_event_slug(slug: str) -> Optional[Dict]:
     return None
 
 
+def get_latest_btc_15m_market_proactive() -> Optional[Dict]:
+    """
+    Proactive detection: Check future windows first, then current.
+    This catches markets immediately when they're created, not after they've been running.
+    
+    Returns:
+        Market dict for the latest BTC updown 15-minute market, or None
+    """
+    import time
+    from datetime import datetime, timezone
+    
+    # Get current UTC time
+    now_utc = datetime.now(timezone.utc)
+    current_timestamp = int(now_utc.timestamp())
+    
+    # Round down to nearest 15-minute mark (900 seconds = 15 minutes)
+    window_start_timestamp = (current_timestamp // 900) * 900
+    
+    # PROACTIVE: Check future windows first [+1, +2, 0, -1, -2]
+    # This prioritizes upcoming markets over old ones
+    for window_offset in [1, 2, 0, -1, -2]:
+        test_timestamp = window_start_timestamp + (window_offset * 900)
+        slug = f"btc-updown-15m-{test_timestamp}"
+        
+        logger.debug(f"Trying constructed slug for window {window_offset}: {slug}")
+        market = get_market_by_event_slug(slug)
+        
+        if market:
+            # Verify it's still active (or will be active soon)
+            if is_market_active(market):
+                logger.info(f"Found active market using proactive slug construction: {slug} (window {window_offset})")
+                return market
+            else:
+                logger.debug(f"Market {slug} found but not active")
+    
+    return None
+
+
 def get_latest_btc_15m_market() -> Optional[Dict]:
     """
     Get the most recent BTC 15-minute market.

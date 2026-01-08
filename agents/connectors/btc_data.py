@@ -58,7 +58,7 @@ class BTCDataFetcher:
     - Efficient data retrieval with automatic caching
     """
     
-    def __init__(self, cache_dir: Optional[str] = None):
+    def __init__(self, cache_dir: Optional[str] = None, proxy: Optional[str] = None):
         """
         Initialize BTC data fetcher.
         
@@ -67,6 +67,10 @@ class BTCDataFetcher:
         
         Args:
             cache_dir: Directory to cache data files. Defaults to ./data/btc_cache/
+            proxy: Optional proxy URL. Supports:
+                   - HTTP/HTTPS: "http://user:pass@proxy.example.com:8080"
+                   - Oxylabs: "http://user-USERNAME:PASSWORD@isp.oxylabs.io:8001"
+                   - Or set HTTPS_PROXY/OXYLABS_* environment variables
         """
         if cache_dir is None:
             cache_dir = os.path.join(os.getcwd(), "data", "btc_cache")
@@ -75,7 +79,19 @@ class BTCDataFetcher:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         
         self.base_url = "https://api.binance.com/api/v3"
+        self.coingecko_url = "https://api.coingecko.com/api/v3"
         self.timeout = 30.0
+        
+        # Proxy configuration - use provided proxy or global config
+        if proxy is None:
+            from agents.utils.proxy_config import get_proxy
+            proxy = get_proxy()
+        self.proxy = proxy
+        
+        # Headers for API requests
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
         
         # Rate limiting: Binance allows 1200 requests/minute (IP-based)
         # Using 1.2s between requests = ~50 requests/minute (well under limit)
@@ -83,6 +99,8 @@ class BTCDataFetcher:
         self._min_request_interval = 1.2  # seconds between requests
         
         logger.info(f"BTC Data Fetcher initialized. Cache directory: {self.cache_dir}")
+        if self.proxy:
+            logger.info(f"Using proxy: {self.proxy.split('@')[1] if '@' in self.proxy else 'configured'}")
         logger.info("Using Binance public API - no API key required")
     
     def _get_cache_path(self, start_date: datetime, end_date: datetime, interval: str) -> Path:
@@ -182,7 +200,11 @@ class BTCDataFetcher:
             }
             
             try:
-                response = httpx.get(url, params=params, timeout=self.timeout)
+                # Use proxy if configured (always check global config)
+                from agents.utils.proxy_config import get_proxy_dict
+                proxies = get_proxy_dict()  # Always use global proxy if configured
+                
+                response = httpx.get(url, params=params, timeout=self.timeout, proxies=proxies)
                 response.raise_for_status()
                 data = response.json()
                 

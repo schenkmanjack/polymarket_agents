@@ -97,10 +97,54 @@ class BTCEthOrderbookSnapshot(Base):
     )
 
 
+class BTC15MinOrderbookSnapshot(Base):
+    """Table specifically for BTC 15-minute market orderbook snapshots (proactive logging)."""
+    __tablename__ = "btc_15_min_table"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    token_id = Column(String, nullable=False, index=True)
+    market_id = Column(String, nullable=False, index=True)  # Polymarket market ID (required)
+    timestamp = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+    
+    # Best bid/ask
+    best_bid_price = Column(Float, nullable=True)
+    best_bid_size = Column(Float, nullable=True)
+    best_ask_price = Column(Float, nullable=True)
+    best_ask_size = Column(Float, nullable=True)
+    
+    # Spread metrics
+    spread = Column(Float, nullable=True)
+    spread_bps = Column(Float, nullable=True)  # Spread in basis points
+    
+    # Full orderbook data (stored as JSON)
+    bids = Column(JSON, nullable=True)  # List of [price, size] tuples
+    asks = Column(JSON, nullable=True)  # List of [price, size] tuples
+    
+    # Market metadata
+    market_question = Column(String, nullable=True)
+    outcome = Column(String, nullable=True)  # Which outcome this token represents
+    
+    # Market timing (for time-decay strategies and backtesting)
+    market_start_date = Column(DateTime, nullable=True)  # When market starts (UTC timezone-aware)
+    market_end_date = Column(DateTime, nullable=True, index=True)  # When market resolves (UTC timezone-aware)
+    time_remaining_seconds = Column(Float, nullable=True, index=True)  # Calculated: end_date - timestamp
+    time_since_start_seconds = Column(Float, nullable=True, index=True)  # Calculated: timestamp - start_date
+    
+    # Additional metadata
+    extra_metadata = Column(JSON, nullable=True)
+    
+    __table_args__ = (
+        Index('idx_btc_15m_token_timestamp', 'token_id', 'timestamp'),
+        Index('idx_btc_15m_market_timestamp', 'market_id', 'timestamp'),
+        Index('idx_btc_15m_time_remaining', 'time_remaining_seconds'),
+        Index('idx_btc_15m_time_since_start', 'time_since_start_seconds'),
+    )
+
+
 class OrderbookDatabase:
     """Database manager for orderbook snapshots."""
     
-    def __init__(self, database_url: Optional[str] = None, per_market_tables: bool = False, use_btc_eth_table: bool = False):
+    def __init__(self, database_url: Optional[str] = None, per_market_tables: bool = False, use_btc_eth_table: bool = False, use_btc_15_min_table: bool = False):
         """
         Initialize database connection.
         
@@ -157,12 +201,17 @@ class OrderbookDatabase:
         self._table_class_cache = {}  # Cache table_name -> table_class mapping
         self.per_market_tables = per_market_tables
         self.use_btc_eth_table = use_btc_eth_table  # Use single btc_eth_table instead
+        self.use_btc_15_min_table = use_btc_15_min_table  # Use btc_15_min_table for proactive logging
         
         # Create btc_eth_table if requested
         if self.use_btc_eth_table:
             BTCEthOrderbookSnapshot.__table__.create(self.engine, checkfirst=True)
             # Migrate existing table to add new columns if they don't exist
             self._migrate_btc_eth_table()
+        
+        # Create btc_15_min_table if requested
+        if self.use_btc_15_min_table:
+            BTC15MinOrderbookSnapshot.__table__.create(self.engine, checkfirst=True)
         # Per-table locks for creation (prevents race conditions)
         self._table_locks = {}
     
@@ -389,8 +438,11 @@ class OrderbookDatabase:
                 elif "ethereum" in question_lower or "eth" in question_lower:
                     asset_type = "ETH"
             
+            # Use btc_15_min_table if enabled (for proactive BTC 15-min logging)
+            if self.use_btc_15_min_table:
+                SnapshotTable = BTC15MinOrderbookSnapshot
             # Use btc_eth_table if enabled (simpler, no dynamic table creation)
-            if self.use_btc_eth_table:
+            elif self.use_btc_eth_table:
                 SnapshotTable = BTCEthOrderbookSnapshot
             else:
                 # Get appropriate table (base or market-specific)
@@ -509,6 +561,22 @@ class OrderbookDatabase:
                 snapshot_data["market_end_date"] = market_end_date
                 snapshot_data["time_remaining_seconds"] = time_remaining_seconds
             
+            # Add fields for btc_15_min_table
+            if self.use_btc_15_min_table:
+                snapshot_data["market_start_date"] = market_start_date
+                snapshot_data["market_end_date"] = market_end_date
+                snapshot_data["time_remaining_seconds"] = time_remaining_seconds
+                # Calculate time since start
+                time_since_start_seconds = None
+                if market_start_date:
+                    if market_start_date.tzinfo is None:
+                        market_start_date = market_start_date.replace(tzinfo=timezone.utc)
+                    if current_timestamp.tzinfo is None:
+                        current_timestamp = current_timestamp.replace(tzinfo=timezone.utc)
+                    time_delta = current_timestamp - market_start_date
+                    time_since_start_seconds = time_delta.total_seconds()
+                snapshot_data["time_since_start_seconds"] = time_since_start_seconds
+            
             snapshot = SnapshotTable(**snapshot_data)
             
             session.add(snapshot)
@@ -581,8 +649,14 @@ class OrderbookDatabase:
         """
         session = self.get_session()
         try:
+            # If using btc_15_min_table, use that model
+            if self.use_btc_15_min_table:
+                model_class = BTC15MinOrderbookSnapshot
+            # If using btc_eth_table, use that model
+            elif self.use_btc_eth_table:
+                model_class = BTCEthOrderbookSnapshot
             # If per-market tables enabled, use market-specific table
-            if self.per_market_tables and market_id:
+            elif self.per_market_tables and market_id:
                 model_class = self._get_table_for_market(market_id)
             else:
                 model_class = OrderbookSnapshot

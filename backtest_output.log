@@ -1,0 +1,1001 @@
+2026-01-08 15:27:53,488 - __main__ - INFO - Starting orderbook-based backtest...
+2026-01-08 15:27:53,488 - __main__ - INFO - Model: chronos-bolt
+2026-01-08 15:27:53,488 - __main__ - INFO - Shares per trade: 1.0
+2026-01-08 15:27:54,357 - agents.backtesting.market_fetcher - INFO - ✓ Using authenticated API access (wallet key)
+2026-01-08 15:27:54,358 - agents.connectors.btc_data - INFO - BTC Data Fetcher initialized. Cache directory: /home/ubuntu/polymarket_agents/data/btc_cache
+2026-01-08 15:27:54,358 - agents.connectors.btc_data - INFO - Using Binance public API - no API key required
+2026-01-08 15:27:54,358 - agents.polymarket.orderbook_db - INFO - ✓ Connecting to PostgreSQL/Neon database (from DATABASE_URL)
+2026-01-08 15:27:58,313 - agents.models.btc_predictor - INFO - Loading Chronos-Bolt from amazon/chronos-t5-tiny...
+2026-01-08 15:27:59,154 - agents.models.btc_predictor - INFO - ✓ Chronos-Bolt loaded successfully
+2026-01-08 15:27:59,155 - agents.backtesting.orderbook_backtester - INFO - ======================================================================
+2026-01-08 15:27:59,155 - agents.backtesting.orderbook_backtester - INFO - Starting Orderbook-Based BTC Backtest
+2026-01-08 15:27:59,155 - agents.backtesting.orderbook_backtester - INFO - ======================================================================
+2026-01-08 15:27:59,155 - agents.backtesting.orderbook_backtester - INFO - Model: chronos-bolt
+2026-01-08 15:27:59,155 - agents.backtesting.orderbook_backtester - INFO - Lookback: 200 minutes
+2026-01-08 15:27:59,155 - agents.backtesting.orderbook_backtester - INFO - Prediction horizon: 15 minutes
+2026-01-08 15:27:59,155 - agents.backtesting.orderbook_backtester - INFO - Shares per trade: 1.0
+2026-01-08 15:28:16,829 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1129175 "HTTP/1.1 200 OK"
+2026-01-08 15:28:17,000 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1129150 "HTTP/1.1 200 OK"
+2026-01-08 15:28:17,172 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1129054 "HTTP/1.1 200 OK"
+2026-01-08 15:28:17,352 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1129037 "HTTP/1.1 200 OK"
+2026-01-08 15:28:17,533 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1128954 "HTTP/1.1 200 OK"
+2026-01-08 15:28:17,746 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1128927 "HTTP/1.1 200 OK"
+2026-01-08 15:28:17,911 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1128897 "HTTP/1.1 200 OK"
+2026-01-08 15:28:18,227 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1128882 "HTTP/1.1 200 OK"
+2026-01-08 15:28:18,436 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1128798 "HTTP/1.1 200 OK"
+2026-01-08 15:28:18,622 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1128784 "HTTP/1.1 200 OK"
+2026-01-08 15:28:18,826 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1128735 "HTTP/1.1 200 OK"
+2026-01-08 15:28:19,030 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1128719 "HTTP/1.1 200 OK"
+2026-01-08 15:28:19,212 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1128633 "HTTP/1.1 200 OK"
+2026-01-08 15:28:19,379 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1128612 "HTTP/1.1 200 OK"
+2026-01-08 15:28:19,556 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1128492 "HTTP/1.1 200 OK"
+2026-01-08 15:28:19,732 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1128477 "HTTP/1.1 200 OK"
+2026-01-08 15:28:19,914 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1128391 "HTTP/1.1 200 OK"
+2026-01-08 15:28:20,088 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1128369 "HTTP/1.1 200 OK"
+2026-01-08 15:28:20,290 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1128285 "HTTP/1.1 200 OK"
+2026-01-08 15:28:20,483 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1128275 "HTTP/1.1 200 OK"
+2026-01-08 15:28:20,665 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1128188 "HTTP/1.1 200 OK"
+2026-01-08 15:28:20,851 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1128175 "HTTP/1.1 200 OK"
+2026-01-08 15:28:21,022 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1128136 "HTTP/1.1 200 OK"
+2026-01-08 15:28:21,218 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1128114 "HTTP/1.1 200 OK"
+2026-01-08 15:28:21,399 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1128030 "HTTP/1.1 200 OK"
+2026-01-08 15:28:21,577 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1128016 "HTTP/1.1 200 OK"
+2026-01-08 15:28:21,804 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1127990 "HTTP/1.1 200 OK"
+2026-01-08 15:28:21,983 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1127973 "HTTP/1.1 200 OK"
+2026-01-08 15:28:22,199 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1127890 "HTTP/1.1 200 OK"
+2026-01-08 15:28:22,422 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1127873 "HTTP/1.1 200 OK"
+2026-01-08 15:28:22,606 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1127858 "HTTP/1.1 200 OK"
+2026-01-08 15:28:22,784 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1127835 "HTTP/1.1 200 OK"
+2026-01-08 15:28:22,953 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1127757 "HTTP/1.1 200 OK"
+2026-01-08 15:28:23,139 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1127680 "HTTP/1.1 200 OK"
+2026-01-08 15:28:23,314 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1127659 "HTTP/1.1 200 OK"
+2026-01-08 15:28:23,539 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1127643 "HTTP/1.1 200 OK"
+2026-01-08 15:28:23,718 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1127558 "HTTP/1.1 200 OK"
+2026-01-08 15:28:23,892 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1127442 "HTTP/1.1 200 OK"
+2026-01-08 15:28:24,105 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1127403 "HTTP/1.1 200 OK"
+2026-01-08 15:28:24,279 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1127386 "HTTP/1.1 200 OK"
+2026-01-08 15:28:24,460 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1127301 "HTTP/1.1 200 OK"
+2026-01-08 15:28:24,658 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1127213 "HTTP/1.1 200 OK"
+2026-01-08 15:28:24,849 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1127036 "HTTP/1.1 200 OK"
+2026-01-08 15:28:25,032 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1127019 "HTTP/1.1 200 OK"
+2026-01-08 15:28:25,223 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1126938 "HTTP/1.1 200 OK"
+2026-01-08 15:28:25,410 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1126890 "HTTP/1.1 200 OK"
+2026-01-08 15:28:25,582 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1126870 "HTTP/1.1 200 OK"
+2026-01-08 15:28:25,756 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1126840 "HTTP/1.1 200 OK"
+2026-01-08 15:28:25,928 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1126750 "HTTP/1.1 200 OK"
+2026-01-08 15:28:26,104 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1126733 "HTTP/1.1 200 OK"
+2026-01-08 15:28:26,278 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1126706 "HTTP/1.1 200 OK"
+2026-01-08 15:28:26,448 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1126686 "HTTP/1.1 200 OK"
+2026-01-08 15:28:26,618 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1126571 "HTTP/1.1 200 OK"
+2026-01-08 15:28:26,863 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1126520 "HTTP/1.1 200 OK"
+2026-01-08 15:28:27,036 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1126496 "HTTP/1.1 200 OK"
+2026-01-08 15:28:27,234 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1126480 "HTTP/1.1 200 OK"
+2026-01-08 15:28:27,455 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1126364 "HTTP/1.1 200 OK"
+2026-01-08 15:28:27,667 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1126255 "HTTP/1.1 200 OK"
+2026-01-08 15:28:27,914 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1126216 "HTTP/1.1 200 OK"
+2026-01-08 15:28:28,116 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1126193 "HTTP/1.1 200 OK"
+2026-01-08 15:28:28,307 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1126037 "HTTP/1.1 200 OK"
+2026-01-08 15:28:28,498 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1125961 "HTTP/1.1 200 OK"
+2026-01-08 15:28:28,672 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1125903 "HTTP/1.1 200 OK"
+2026-01-08 15:28:28,883 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1125887 "HTTP/1.1 200 OK"
+2026-01-08 15:28:29,048 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1125683 "HTTP/1.1 200 OK"
+2026-01-08 15:28:29,216 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1125620 "HTTP/1.1 200 OK"
+2026-01-08 15:28:29,392 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1125600 "HTTP/1.1 200 OK"
+2026-01-08 15:28:29,559 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1125346 "HTTP/1.1 200 OK"
+2026-01-08 15:28:29,723 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1125123 "HTTP/1.1 200 OK"
+2026-01-08 15:28:29,883 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1125096 "HTTP/1.1 200 OK"
+2026-01-08 15:28:30,063 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1125072 "HTTP/1.1 200 OK"
+2026-01-08 15:28:30,284 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1125059 "HTTP/1.1 200 OK"
+2026-01-08 15:28:30,459 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1125052 "HTTP/1.1 200 OK"
+2026-01-08 15:28:30,623 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1124823 "HTTP/1.1 200 OK"
+2026-01-08 15:28:30,795 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1124792 "HTTP/1.1 200 OK"
+2026-01-08 15:28:30,978 - httpx - INFO - HTTP Request: GET https://gamma-api.polymarket.com/markets/1124678 "HTTP/1.1 200 OK"
+2026-01-08 15:28:30,979 - agents.backtesting.orderbook_backtester - INFO - Found 76 markets with orderbook data
+2026-01-08 15:28:30,979 - agents.backtesting.orderbook_backtester - INFO - Processing 76 markets...
+2026-01-08 15:28:31,574 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:28:31,574 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 17:16:59.767997+00:00 to 2026-01-07 20:36:59.767997+00:00 (1m)
+2026-01-08 15:28:31,574 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 17:16:59.767997+00:00 to 2026-01-07 20:36:59.767997+00:00 (1m)
+2026-01-08 15:28:31,574 - agents.utils.proxy_config - INFO - Using proxy from PROXY_USER/PROXY_PASS environment variables (port 8001)
+2026-01-08 15:28:31,574 - agents.utils.proxy_config - INFO - ✓ Proxy configured globally: isp.oxylabs.io:8001
+2026-01-08 15:28:32,812 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767806219767&endTime=1767818219767&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:28:32,819 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:28:32,820 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:28:39,391 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:28:39,391 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 20:36:59.767997+00:00 to 2026-01-07 20:38:59.767997+00:00 (1m)
+2026-01-08 15:28:39,392 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 20:36:59.767997+00:00 to 2026-01-07 20:38:59.767997+00:00 (1m)
+2026-01-08 15:28:40,318 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767818219767&endTime=1767818339767&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:28:40,327 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:28:40,328 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:28:40,329 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:28:40,658 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:28:40,658 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 17:25:05.803460+00:00 to 2026-01-07 20:45:05.803460+00:00 (1m)
+2026-01-08 15:28:40,658 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 17:25:05.803460+00:00 to 2026-01-07 20:45:05.803460+00:00 (1m)
+2026-01-08 15:28:42,029 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767806705803&endTime=1767818705803&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:28:42,038 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:28:42,039 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:28:48,519 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:28:48,520 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 20:45:05.803460+00:00 to 2026-01-07 20:47:05.803460+00:00 (1m)
+2026-01-08 15:28:48,520 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 20:45:05.803460+00:00 to 2026-01-07 20:47:05.803460+00:00 (1m)
+2026-01-08 15:28:49,459 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767818705803&endTime=1767818825803&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:28:49,467 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:28:49,468 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:28:49,468 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:28:49,859 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:28:49,859 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 17:40:05.106384+00:00 to 2026-01-07 21:00:05.106384+00:00 (1m)
+2026-01-08 15:28:49,859 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 17:40:05.106384+00:00 to 2026-01-07 21:00:05.106384+00:00 (1m)
+2026-01-08 15:28:51,296 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767807605106&endTime=1767819605106&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:28:51,302 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:28:51,302 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:28:57,663 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:28:57,663 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 21:00:05.106384+00:00 to 2026-01-07 21:02:05.106384+00:00 (1m)
+2026-01-08 15:28:57,664 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 21:00:05.106384+00:00 to 2026-01-07 21:02:05.106384+00:00 (1m)
+2026-01-08 15:28:58,616 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767819605106&endTime=1767819725106&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:28:58,621 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:28:58,622 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:28:58,622 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:28:59,007 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:28:59,007 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 17:54:57.638466+00:00 to 2026-01-07 21:14:57.638466+00:00 (1m)
+2026-01-08 15:28:59,007 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 17:54:57.638466+00:00 to 2026-01-07 21:14:57.638466+00:00 (1m)
+2026-01-08 15:28:59,963 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767808497638&endTime=1767820497638&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:28:59,969 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:28:59,969 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:29:06,318 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:29:06,318 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 21:14:57.638466+00:00 to 2026-01-07 21:16:57.638466+00:00 (1m)
+2026-01-08 15:29:06,318 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 21:14:57.638466+00:00 to 2026-01-07 21:16:57.638466+00:00 (1m)
+2026-01-08 15:29:07,278 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767820497638&endTime=1767820617638&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:29:07,284 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:29:07,284 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:29:07,285 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:29:07,671 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:29:07,671 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 18:09:52.382849+00:00 to 2026-01-07 21:29:52.382849+00:00 (1m)
+2026-01-08 15:29:07,671 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 18:09:52.382849+00:00 to 2026-01-07 21:29:52.382849+00:00 (1m)
+2026-01-08 15:29:08,881 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767809392382&endTime=1767821392382&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:29:08,891 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:29:08,892 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:29:15,248 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:29:15,248 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 21:29:52.382849+00:00 to 2026-01-07 21:31:52.382849+00:00 (1m)
+2026-01-08 15:29:15,248 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 21:29:52.382849+00:00 to 2026-01-07 21:31:52.382849+00:00 (1m)
+2026-01-08 15:29:16,176 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767821392382&endTime=1767821512382&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:29:16,182 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:29:16,183 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:29:16,183 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:29:16,569 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:29:16,570 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 18:24:44.658526+00:00 to 2026-01-07 21:44:44.658526+00:00 (1m)
+2026-01-08 15:29:16,570 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 18:24:44.658526+00:00 to 2026-01-07 21:44:44.658526+00:00 (1m)
+2026-01-08 15:29:17,545 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767810284658&endTime=1767822284658&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:29:17,555 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:29:17,556 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:29:23,942 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:29:23,942 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 21:44:44.658526+00:00 to 2026-01-07 21:46:44.658526+00:00 (1m)
+2026-01-08 15:29:23,942 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 21:44:44.658526+00:00 to 2026-01-07 21:46:44.658526+00:00 (1m)
+2026-01-08 15:29:25,186 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767822284658&endTime=1767822404658&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:29:25,195 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:29:25,195 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:29:25,196 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:29:25,586 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:29:25,586 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 18:39:39.074135+00:00 to 2026-01-07 21:59:39.074135+00:00 (1m)
+2026-01-08 15:29:25,586 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 18:39:39.074135+00:00 to 2026-01-07 21:59:39.074135+00:00 (1m)
+2026-01-08 15:29:26,521 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767811179074&endTime=1767823179074&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:29:26,530 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:29:26,530 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:29:34,686 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:29:34,686 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 21:59:39.074135+00:00 to 2026-01-07 22:01:39.074135+00:00 (1m)
+2026-01-08 15:29:34,686 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 21:59:39.074135+00:00 to 2026-01-07 22:01:39.074135+00:00 (1m)
+2026-01-08 15:29:35,654 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767823179074&endTime=1767823299074&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:29:35,662 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:29:35,663 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:29:35,663 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:29:36,053 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:29:36,054 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 18:54:34.319521+00:00 to 2026-01-07 22:14:34.319521+00:00 (1m)
+2026-01-08 15:29:36,054 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 18:54:34.319521+00:00 to 2026-01-07 22:14:34.319521+00:00 (1m)
+2026-01-08 15:29:36,992 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767812074319&endTime=1767824074319&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:29:37,002 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:29:37,002 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:29:43,340 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:29:43,340 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 22:14:34.319521+00:00 to 2026-01-07 22:16:34.319521+00:00 (1m)
+2026-01-08 15:29:43,340 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 22:14:34.319521+00:00 to 2026-01-07 22:16:34.319521+00:00 (1m)
+2026-01-08 15:29:44,527 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767824074319&endTime=1767824194319&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:29:44,533 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:29:44,533 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:29:44,534 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:29:44,920 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:29:44,920 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 19:09:11.450506+00:00 to 2026-01-07 22:29:11.450506+00:00 (1m)
+2026-01-08 15:29:44,920 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 19:09:11.450506+00:00 to 2026-01-07 22:29:11.450506+00:00 (1m)
+2026-01-08 15:29:45,893 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767812951450&endTime=1767824951450&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:29:45,903 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:29:45,904 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:29:52,367 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:29:52,367 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 22:29:11.450506+00:00 to 2026-01-07 22:31:11.450506+00:00 (1m)
+2026-01-08 15:29:52,367 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 22:29:11.450506+00:00 to 2026-01-07 22:31:11.450506+00:00 (1m)
+2026-01-08 15:29:53,312 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767824951450&endTime=1767825071450&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:29:53,321 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:29:53,322 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:29:53,322 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:29:53,711 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:29:53,712 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 19:25:06.778492+00:00 to 2026-01-07 22:45:06.778492+00:00 (1m)
+2026-01-08 15:29:53,712 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 19:25:06.778492+00:00 to 2026-01-07 22:45:06.778492+00:00 (1m)
+2026-01-08 15:29:54,642 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767813906778&endTime=1767825906778&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:29:54,652 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:29:54,653 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:30:01,151 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:30:01,151 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 22:45:06.778492+00:00 to 2026-01-07 22:47:06.778492+00:00 (1m)
+2026-01-08 15:30:01,151 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 22:45:06.778492+00:00 to 2026-01-07 22:47:06.778492+00:00 (1m)
+2026-01-08 15:30:02,443 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767825906778&endTime=1767826026778&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:30:02,449 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:30:02,450 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:30:02,450 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:30:02,455 - agents.backtesting.orderbook_backtester - INFO - Processed 10/76 markets...
+2026-01-08 15:30:02,843 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:30:02,843 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 19:39:59.196836+00:00 to 2026-01-07 22:59:59.196836+00:00 (1m)
+2026-01-08 15:30:02,843 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 19:39:59.196836+00:00 to 2026-01-07 22:59:59.196836+00:00 (1m)
+2026-01-08 15:30:03,808 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767814799196&endTime=1767826799196&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:30:03,814 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:30:03,815 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:30:10,143 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:30:10,143 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 22:59:59.196836+00:00 to 2026-01-07 23:01:59.196836+00:00 (1m)
+2026-01-08 15:30:10,143 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 22:59:59.196836+00:00 to 2026-01-07 23:01:59.196836+00:00 (1m)
+2026-01-08 15:30:12,090 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767826799196&endTime=1767826919196&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:30:12,098 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:30:12,099 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:30:12,099 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:30:12,490 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:30:12,491 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 19:54:52.437506+00:00 to 2026-01-07 23:14:52.437506+00:00 (1m)
+2026-01-08 15:30:12,491 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 19:54:52.437506+00:00 to 2026-01-07 23:14:52.437506+00:00 (1m)
+2026-01-08 15:30:13,439 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767815692437&endTime=1767827692437&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:30:13,449 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:30:13,450 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:30:19,781 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:30:19,781 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 23:14:52.437506+00:00 to 2026-01-07 23:16:52.437506+00:00 (1m)
+2026-01-08 15:30:19,782 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 23:14:52.437506+00:00 to 2026-01-07 23:16:52.437506+00:00 (1m)
+2026-01-08 15:30:21,140 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767827692437&endTime=1767827812437&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:30:21,149 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:30:21,150 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:30:21,150 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:30:21,538 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:30:21,538 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 20:09:48.328149+00:00 to 2026-01-07 23:29:48.328149+00:00 (1m)
+2026-01-08 15:30:21,538 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 20:09:48.328149+00:00 to 2026-01-07 23:29:48.328149+00:00 (1m)
+2026-01-08 15:30:22,702 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767816588328&endTime=1767828588328&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:30:22,708 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:30:22,709 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:30:29,099 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:30:29,099 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 23:29:48.328149+00:00 to 2026-01-07 23:31:48.328149+00:00 (1m)
+2026-01-08 15:30:29,099 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 23:29:48.328149+00:00 to 2026-01-07 23:31:48.328149+00:00 (1m)
+2026-01-08 15:30:30,070 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767828588328&endTime=1767828708328&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:30:30,077 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:30:30,078 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:30:30,078 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:30:30,468 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:30:30,468 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 20:24:40.461686+00:00 to 2026-01-07 23:44:40.461686+00:00 (1m)
+2026-01-08 15:30:30,469 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 20:24:40.461686+00:00 to 2026-01-07 23:44:40.461686+00:00 (1m)
+2026-01-08 15:30:31,407 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767817480461&endTime=1767829480461&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:30:31,417 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:30:31,418 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:30:37,873 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:30:37,873 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 23:44:40.461686+00:00 to 2026-01-07 23:46:40.461686+00:00 (1m)
+2026-01-08 15:30:37,873 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 23:44:40.461686+00:00 to 2026-01-07 23:46:40.461686+00:00 (1m)
+2026-01-08 15:30:38,806 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767829480461&endTime=1767829600461&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:30:38,814 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:30:38,815 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:30:38,815 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:30:39,201 - agents.connectors.btc_data - WARNING - Error loading cache: Wrong number of dimensions. values.ndim > ndim [2 > 1]
+2026-01-08 15:30:39,202 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 20:39:35.078112+00:00 to 2026-01-07 23:59:35.078112+00:00 (1m)
+2026-01-08 15:30:39,202 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 20:39:35.078112+00:00 to 2026-01-07 23:59:35.078112+00:00 (1m)
+2026-01-08 15:30:40,128 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767818375078&endTime=1767830375078&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:30:40,134 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:30:40,135 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:30:49,076 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 23:59:35.078112+00:00 to 2026-01-08 00:01:35.078112+00:00 (1m)
+2026-01-08 15:30:49,077 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 23:59:35.078112+00:00 to 2026-01-08 00:01:35.078112+00:00 (1m)
+2026-01-08 15:30:50,017 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767830375078&endTime=1767830495078&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:30:50,026 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:30:50,026 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:30:50,027 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:30:50,413 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 20:54:27.720583+00:00 to 2026-01-08 00:14:27.720583+00:00 (1m)
+2026-01-08 15:30:50,413 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 20:54:27.720583+00:00 to 2026-01-08 00:14:27.720583+00:00 (1m)
+2026-01-08 15:30:51,363 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767819267720&endTime=1767831267720&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:30:51,374 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:30:51,375 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:30:57,773 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 00:14:27.720583+00:00 to 2026-01-08 00:16:27.720583+00:00 (1m)
+2026-01-08 15:30:57,773 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 00:14:27.720583+00:00 to 2026-01-08 00:16:27.720583+00:00 (1m)
+2026-01-08 15:30:58,692 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767831267720&endTime=1767831387720&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:30:58,698 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:30:58,698 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:30:58,698 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:30:59,081 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 21:09:23.840218+00:00 to 2026-01-08 00:29:23.840218+00:00 (1m)
+2026-01-08 15:30:59,081 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 21:09:23.840218+00:00 to 2026-01-08 00:29:23.840218+00:00 (1m)
+2026-01-08 15:31:00,003 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767820163840&endTime=1767832163840&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:31:00,010 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:31:00,010 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:31:06,350 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 00:29:23.840218+00:00 to 2026-01-08 00:31:23.840218+00:00 (1m)
+2026-01-08 15:31:06,351 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 00:29:23.840218+00:00 to 2026-01-08 00:31:23.840218+00:00 (1m)
+2026-01-08 15:31:07,275 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767832163840&endTime=1767832283840&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:31:07,280 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:31:07,281 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:31:07,281 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:31:07,665 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 21:24:21.280291+00:00 to 2026-01-08 00:44:21.280291+00:00 (1m)
+2026-01-08 15:31:07,665 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 21:24:21.280291+00:00 to 2026-01-08 00:44:21.280291+00:00 (1m)
+2026-01-08 15:31:08,854 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767821061280&endTime=1767833061280&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:31:08,860 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:31:08,861 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:31:15,334 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 00:44:21.280291+00:00 to 2026-01-08 00:46:21.280291+00:00 (1m)
+2026-01-08 15:31:15,334 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 00:44:21.280291+00:00 to 2026-01-08 00:46:21.280291+00:00 (1m)
+2026-01-08 15:31:16,260 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767833061280&endTime=1767833181280&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:31:16,266 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:31:16,267 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:31:16,267 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:31:16,651 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 21:39:21.834813+00:00 to 2026-01-08 00:59:21.834813+00:00 (1m)
+2026-01-08 15:31:16,651 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 21:39:21.834813+00:00 to 2026-01-08 00:59:21.834813+00:00 (1m)
+2026-01-08 15:31:17,655 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767821961834&endTime=1767833961834&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:31:17,661 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:31:17,661 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:31:23,951 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 00:59:21.834813+00:00 to 2026-01-08 01:01:21.834813+00:00 (1m)
+2026-01-08 15:31:23,951 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 00:59:21.834813+00:00 to 2026-01-08 01:01:21.834813+00:00 (1m)
+2026-01-08 15:31:25,631 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767833961834&endTime=1767834081834&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:31:25,640 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:31:25,641 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:31:25,641 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:31:26,027 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 21:54:18.720878+00:00 to 2026-01-08 01:14:18.720878+00:00 (1m)
+2026-01-08 15:31:26,027 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 21:54:18.720878+00:00 to 2026-01-08 01:14:18.720878+00:00 (1m)
+2026-01-08 15:31:28,010 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767822858720&endTime=1767834858720&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:31:28,016 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:31:28,016 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:31:34,322 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 01:14:18.720878+00:00 to 2026-01-08 01:16:18.720878+00:00 (1m)
+2026-01-08 15:31:34,323 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 01:14:18.720878+00:00 to 2026-01-08 01:16:18.720878+00:00 (1m)
+2026-01-08 15:31:35,252 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767834858720&endTime=1767834978720&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:31:35,260 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:31:35,261 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:31:35,261 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:31:35,261 - agents.backtesting.orderbook_backtester - INFO - Processed 20/76 markets...
+2026-01-08 15:31:35,648 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 22:09:15.854924+00:00 to 2026-01-08 01:29:15.854924+00:00 (1m)
+2026-01-08 15:31:35,648 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 22:09:15.854924+00:00 to 2026-01-08 01:29:15.854924+00:00 (1m)
+2026-01-08 15:31:36,618 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767823755854&endTime=1767835755854&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:31:36,626 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:31:36,627 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:31:42,976 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 01:29:15.854924+00:00 to 2026-01-08 01:31:15.854924+00:00 (1m)
+2026-01-08 15:31:42,976 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 01:29:15.854924+00:00 to 2026-01-08 01:31:15.854924+00:00 (1m)
+2026-01-08 15:31:43,949 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767835755854&endTime=1767835875854&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:31:43,957 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:31:43,958 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:31:43,958 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:31:44,344 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 22:24:10.093349+00:00 to 2026-01-08 01:44:10.093349+00:00 (1m)
+2026-01-08 15:31:44,344 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 22:24:10.093349+00:00 to 2026-01-08 01:44:10.093349+00:00 (1m)
+2026-01-08 15:31:45,314 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767824650093&endTime=1767836650093&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:31:45,321 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:31:45,321 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:31:51,749 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 01:44:10.093349+00:00 to 2026-01-08 01:46:10.093349+00:00 (1m)
+2026-01-08 15:31:51,749 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 01:44:10.093349+00:00 to 2026-01-08 01:46:10.093349+00:00 (1m)
+2026-01-08 15:31:52,678 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767836650093&endTime=1767836770093&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:31:52,687 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:31:52,687 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:31:52,688 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:31:53,077 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 22:39:08.700399+00:00 to 2026-01-08 01:59:08.700399+00:00 (1m)
+2026-01-08 15:31:53,077 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 22:39:08.700399+00:00 to 2026-01-08 01:59:08.700399+00:00 (1m)
+2026-01-08 15:31:54,011 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767825548700&endTime=1767837548700&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:31:54,017 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:31:54,017 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:32:02,167 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 01:59:08.700399+00:00 to 2026-01-08 02:01:08.700399+00:00 (1m)
+2026-01-08 15:32:02,167 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 01:59:08.700399+00:00 to 2026-01-08 02:01:08.700399+00:00 (1m)
+2026-01-08 15:32:03,115 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767837548700&endTime=1767837668700&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:32:03,120 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:32:03,121 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:32:03,121 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:32:03,505 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 22:55:18.625489+00:00 to 2026-01-08 02:15:18.625489+00:00 (1m)
+2026-01-08 15:32:03,505 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 22:55:18.625489+00:00 to 2026-01-08 02:15:18.625489+00:00 (1m)
+2026-01-08 15:32:04,426 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767826518625&endTime=1767838518625&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:32:04,433 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:32:04,433 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:32:10,812 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 02:15:18.625489+00:00 to 2026-01-08 02:17:18.625489+00:00 (1m)
+2026-01-08 15:32:10,812 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 02:15:18.625489+00:00 to 2026-01-08 02:17:18.625489+00:00 (1m)
+2026-01-08 15:32:11,783 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767838518625&endTime=1767838638625&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:32:11,789 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:32:11,789 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:32:11,789 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:32:12,172 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 23:09:10.855105+00:00 to 2026-01-08 02:29:10.855105+00:00 (1m)
+2026-01-08 15:32:12,172 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 23:09:10.855105+00:00 to 2026-01-08 02:29:10.855105+00:00 (1m)
+2026-01-08 15:32:13,126 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767827350855&endTime=1767839350855&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:32:13,132 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:32:13,133 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:32:19,548 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 02:29:10.855105+00:00 to 2026-01-08 02:31:10.855105+00:00 (1m)
+2026-01-08 15:32:19,548 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 02:29:10.855105+00:00 to 2026-01-08 02:31:10.855105+00:00 (1m)
+2026-01-08 15:32:20,680 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767839350855&endTime=1767839470855&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:32:20,685 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:32:20,686 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:32:20,686 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:32:21,069 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 23:25:07.235250+00:00 to 2026-01-08 02:45:07.235250+00:00 (1m)
+2026-01-08 15:32:21,069 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 23:25:07.235250+00:00 to 2026-01-08 02:45:07.235250+00:00 (1m)
+2026-01-08 15:32:21,994 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767828307235&endTime=1767840307235&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:32:22,000 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:32:22,000 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:32:28,318 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 02:45:07.235250+00:00 to 2026-01-08 02:47:07.235250+00:00 (1m)
+2026-01-08 15:32:28,318 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 02:45:07.235250+00:00 to 2026-01-08 02:47:07.235250+00:00 (1m)
+2026-01-08 15:32:29,258 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767840307235&endTime=1767840427235&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:32:29,263 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:32:29,264 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:32:29,264 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:32:29,648 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 23:40:07.922052+00:00 to 2026-01-08 03:00:07.922052+00:00 (1m)
+2026-01-08 15:32:29,648 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 23:40:07.922052+00:00 to 2026-01-08 03:00:07.922052+00:00 (1m)
+2026-01-08 15:32:30,840 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767829207922&endTime=1767841207922&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:32:30,850 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:32:30,850 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:32:37,236 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 03:00:07.922052+00:00 to 2026-01-08 03:02:07.922052+00:00 (1m)
+2026-01-08 15:32:37,236 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 03:00:07.922052+00:00 to 2026-01-08 03:02:07.922052+00:00 (1m)
+2026-01-08 15:32:38,191 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767841207922&endTime=1767841327922&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:32:38,199 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:32:38,200 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:32:38,200 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:32:38,596 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-07 23:55:00.203734+00:00 to 2026-01-08 03:15:00.203734+00:00 (1m)
+2026-01-08 15:32:38,596 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-07 23:55:00.203734+00:00 to 2026-01-08 03:15:00.203734+00:00 (1m)
+2026-01-08 15:32:39,531 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767830100203&endTime=1767842100203&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:32:39,537 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:32:39,538 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:32:45,925 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 03:15:00.203734+00:00 to 2026-01-08 03:17:00.203734+00:00 (1m)
+2026-01-08 15:32:45,925 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 03:15:00.203734+00:00 to 2026-01-08 03:17:00.203734+00:00 (1m)
+2026-01-08 15:32:46,863 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767842100203&endTime=1767842220203&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:32:46,871 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:32:46,872 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:32:46,872 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:32:47,260 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 00:09:54.618180+00:00 to 2026-01-08 03:29:54.618180+00:00 (1m)
+2026-01-08 15:32:47,260 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 00:09:54.618180+00:00 to 2026-01-08 03:29:54.618180+00:00 (1m)
+2026-01-08 15:32:48,229 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767830994618&endTime=1767842994618&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:32:48,240 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:32:48,241 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:32:54,645 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 03:29:54.618180+00:00 to 2026-01-08 03:31:54.618180+00:00 (1m)
+2026-01-08 15:32:54,646 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 03:29:54.618180+00:00 to 2026-01-08 03:31:54.618180+00:00 (1m)
+2026-01-08 15:32:55,572 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767842994618&endTime=1767843114618&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:32:55,578 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:32:55,578 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:32:55,578 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:32:55,960 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 00:24:48.513024+00:00 to 2026-01-08 03:44:48.513024+00:00 (1m)
+2026-01-08 15:32:55,960 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 00:24:48.513024+00:00 to 2026-01-08 03:44:48.513024+00:00 (1m)
+2026-01-08 15:32:56,883 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767831888513&endTime=1767843888513&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:32:56,889 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:32:56,890 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:33:03,245 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 03:44:48.513024+00:00 to 2026-01-08 03:46:48.513024+00:00 (1m)
+2026-01-08 15:33:03,245 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 03:44:48.513024+00:00 to 2026-01-08 03:46:48.513024+00:00 (1m)
+2026-01-08 15:33:04,210 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767843888513&endTime=1767844008513&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:33:04,220 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:33:04,221 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:33:04,221 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:33:04,221 - agents.backtesting.orderbook_backtester - INFO - Processed 30/76 markets...
+2026-01-08 15:33:04,609 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 00:39:42.729664+00:00 to 2026-01-08 03:59:42.729664+00:00 (1m)
+2026-01-08 15:33:04,609 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 00:39:42.729664+00:00 to 2026-01-08 03:59:42.729664+00:00 (1m)
+2026-01-08 15:33:05,569 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767832782729&endTime=1767844782729&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:33:05,579 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:33:05,579 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:33:12,404 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 03:59:42.729664+00:00 to 2026-01-08 04:01:42.729664+00:00 (1m)
+2026-01-08 15:33:12,404 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 03:59:42.729664+00:00 to 2026-01-08 04:01:42.729664+00:00 (1m)
+2026-01-08 15:33:13,350 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767844782729&endTime=1767844902729&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:33:13,360 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:33:13,361 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:33:13,361 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:33:13,747 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 00:54:42.871107+00:00 to 2026-01-08 04:14:42.871107+00:00 (1m)
+2026-01-08 15:33:13,748 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 00:54:42.871107+00:00 to 2026-01-08 04:14:42.871107+00:00 (1m)
+2026-01-08 15:33:14,683 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767833682871&endTime=1767845682871&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:33:14,694 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:33:14,695 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:33:21,068 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 04:14:42.871107+00:00 to 2026-01-08 04:16:42.871107+00:00 (1m)
+2026-01-08 15:33:21,068 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 04:14:42.871107+00:00 to 2026-01-08 04:16:42.871107+00:00 (1m)
+2026-01-08 15:33:21,996 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767845682871&endTime=1767845802871&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:33:22,002 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:33:22,002 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:33:22,003 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:33:22,387 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 01:09:40.348105+00:00 to 2026-01-08 04:29:40.348105+00:00 (1m)
+2026-01-08 15:33:22,387 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 01:09:40.348105+00:00 to 2026-01-08 04:29:40.348105+00:00 (1m)
+2026-01-08 15:33:23,774 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767834580348&endTime=1767846580348&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:33:23,782 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:33:23,783 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:33:30,221 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 04:29:40.348105+00:00 to 2026-01-08 04:31:40.348105+00:00 (1m)
+2026-01-08 15:33:30,221 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 04:29:40.348105+00:00 to 2026-01-08 04:31:40.348105+00:00 (1m)
+2026-01-08 15:33:31,165 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767846580348&endTime=1767846700348&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:33:31,174 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:33:31,175 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:33:31,175 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:33:31,565 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 01:24:41.805325+00:00 to 2026-01-08 04:44:41.805325+00:00 (1m)
+2026-01-08 15:33:31,565 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 01:24:41.805325+00:00 to 2026-01-08 04:44:41.805325+00:00 (1m)
+2026-01-08 15:33:32,510 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767835481805&endTime=1767847481805&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:33:32,516 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:33:32,516 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:33:38,887 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 04:44:41.805325+00:00 to 2026-01-08 04:46:41.805325+00:00 (1m)
+2026-01-08 15:33:38,887 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 04:44:41.805325+00:00 to 2026-01-08 04:46:41.805325+00:00 (1m)
+2026-01-08 15:33:39,827 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767847481805&endTime=1767847601805&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:33:39,836 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:33:39,837 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:33:39,837 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:33:40,162 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 01:39:36.683250+00:00 to 2026-01-08 04:59:36.683250+00:00 (1m)
+2026-01-08 15:33:40,162 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 01:39:36.683250+00:00 to 2026-01-08 04:59:36.683250+00:00 (1m)
+2026-01-08 15:33:41,132 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767836376683&endTime=1767848376683&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:33:41,142 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:33:41,143 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:33:47,559 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 04:59:36.683250+00:00 to 2026-01-08 05:01:36.683250+00:00 (1m)
+2026-01-08 15:33:47,559 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 04:59:36.683250+00:00 to 2026-01-08 05:01:36.683250+00:00 (1m)
+2026-01-08 15:33:48,488 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767848376683&endTime=1767848496683&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:33:48,494 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:33:48,495 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:33:48,495 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:33:48,878 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 01:54:37.736088+00:00 to 2026-01-08 05:14:37.736088+00:00 (1m)
+2026-01-08 15:33:48,878 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 01:54:37.736088+00:00 to 2026-01-08 05:14:37.736088+00:00 (1m)
+2026-01-08 15:33:49,845 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767837277736&endTime=1767849277736&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:33:49,853 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:33:49,853 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:33:56,397 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 05:14:37.736088+00:00 to 2026-01-08 05:16:37.736088+00:00 (1m)
+2026-01-08 15:33:56,397 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 05:14:37.736088+00:00 to 2026-01-08 05:16:37.736088+00:00 (1m)
+2026-01-08 15:33:57,335 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767849277736&endTime=1767849397736&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:33:57,344 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:33:57,345 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:33:57,345 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:33:57,732 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 02:09:41.615595+00:00 to 2026-01-08 05:29:41.615595+00:00 (1m)
+2026-01-08 15:33:57,732 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 02:09:41.615595+00:00 to 2026-01-08 05:29:41.615595+00:00 (1m)
+2026-01-08 15:33:58,697 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767838181615&endTime=1767850181615&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:33:58,707 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:33:58,707 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:34:05,191 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 05:29:41.615595+00:00 to 2026-01-08 05:31:41.615595+00:00 (1m)
+2026-01-08 15:34:05,192 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 05:29:41.615595+00:00 to 2026-01-08 05:31:41.615595+00:00 (1m)
+2026-01-08 15:34:06,111 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767850181615&endTime=1767850301615&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:34:06,116 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:34:06,117 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:34:06,117 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:34:06,501 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 02:24:36.567497+00:00 to 2026-01-08 05:44:36.567497+00:00 (1m)
+2026-01-08 15:34:06,501 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 02:24:36.567497+00:00 to 2026-01-08 05:44:36.567497+00:00 (1m)
+2026-01-08 15:34:07,422 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767839076567&endTime=1767851076567&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:34:07,429 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:34:07,429 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:34:13,830 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 05:44:36.567497+00:00 to 2026-01-08 05:46:36.567497+00:00 (1m)
+2026-01-08 15:34:13,830 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 05:44:36.567497+00:00 to 2026-01-08 05:46:36.567497+00:00 (1m)
+2026-01-08 15:34:14,798 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767851076567&endTime=1767851196567&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:34:14,804 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:34:14,804 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:34:14,804 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:34:15,187 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 02:39:33.359932+00:00 to 2026-01-08 05:59:33.359932+00:00 (1m)
+2026-01-08 15:34:15,187 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 02:39:33.359932+00:00 to 2026-01-08 05:59:33.359932+00:00 (1m)
+2026-01-08 15:34:16,120 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767839973359&endTime=1767851973359&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:34:16,133 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:34:16,134 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:34:23,114 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 05:59:33.359932+00:00 to 2026-01-08 06:01:33.359932+00:00 (1m)
+2026-01-08 15:34:23,114 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 05:59:33.359932+00:00 to 2026-01-08 06:01:33.359932+00:00 (1m)
+2026-01-08 15:34:24,056 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767851973359&endTime=1767852093359&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:34:24,064 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:34:24,065 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:34:24,065 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:34:24,452 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 02:54:28.574547+00:00 to 2026-01-08 06:14:28.574547+00:00 (1m)
+2026-01-08 15:34:24,452 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 02:54:28.574547+00:00 to 2026-01-08 06:14:28.574547+00:00 (1m)
+2026-01-08 15:34:25,827 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767840868574&endTime=1767852868574&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:34:25,837 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:34:25,838 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:34:32,385 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 06:14:28.574547+00:00 to 2026-01-08 06:16:28.574547+00:00 (1m)
+2026-01-08 15:34:32,385 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 06:14:28.574547+00:00 to 2026-01-08 06:16:28.574547+00:00 (1m)
+2026-01-08 15:34:33,320 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767852868574&endTime=1767852988574&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:34:33,328 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:34:33,329 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:34:33,329 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:34:33,329 - agents.backtesting.orderbook_backtester - INFO - Processed 40/76 markets...
+2026-01-08 15:34:33,715 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 03:09:27.359819+00:00 to 2026-01-08 06:29:27.359819+00:00 (1m)
+2026-01-08 15:34:33,715 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 03:09:27.359819+00:00 to 2026-01-08 06:29:27.359819+00:00 (1m)
+2026-01-08 15:34:34,686 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767841767359&endTime=1767853767359&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:34:34,692 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:34:34,693 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:34:41,155 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 06:29:27.359819+00:00 to 2026-01-08 06:31:27.359819+00:00 (1m)
+2026-01-08 15:34:41,155 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 06:29:27.359819+00:00 to 2026-01-08 06:31:27.359819+00:00 (1m)
+2026-01-08 15:34:42,081 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767853767359&endTime=1767853887359&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:34:42,090 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:34:42,090 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:34:42,091 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:34:42,477 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 03:24:29.067993+00:00 to 2026-01-08 06:44:29.067993+00:00 (1m)
+2026-01-08 15:34:42,477 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 03:24:29.067993+00:00 to 2026-01-08 06:44:29.067993+00:00 (1m)
+2026-01-08 15:34:43,413 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767842669067&endTime=1767854669067&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:34:43,423 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:34:43,424 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:34:49,743 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 06:44:29.067993+00:00 to 2026-01-08 06:46:29.067993+00:00 (1m)
+2026-01-08 15:34:49,743 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 06:44:29.067993+00:00 to 2026-01-08 06:46:29.067993+00:00 (1m)
+2026-01-08 15:34:50,675 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767854669067&endTime=1767854789067&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:34:50,683 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:34:50,684 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:34:50,684 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:34:51,068 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 03:39:24.264718+00:00 to 2026-01-08 06:59:24.264718+00:00 (1m)
+2026-01-08 15:34:51,068 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 03:39:24.264718+00:00 to 2026-01-08 06:59:24.264718+00:00 (1m)
+2026-01-08 15:34:52,036 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767843564264&endTime=1767855564264&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:34:52,042 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:34:52,043 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:34:58,428 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 06:59:24.264718+00:00 to 2026-01-08 07:01:24.264718+00:00 (1m)
+2026-01-08 15:34:58,428 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 06:59:24.264718+00:00 to 2026-01-08 07:01:24.264718+00:00 (1m)
+2026-01-08 15:34:59,409 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767855564264&endTime=1767855684264&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:34:59,414 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:34:59,415 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:34:59,415 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:34:59,737 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 03:54:20.865788+00:00 to 2026-01-08 07:14:20.865788+00:00 (1m)
+2026-01-08 15:34:59,737 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 03:54:20.865788+00:00 to 2026-01-08 07:14:20.865788+00:00 (1m)
+2026-01-08 15:35:01,445 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767844460865&endTime=1767856460865&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:35:01,451 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:35:01,451 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:35:07,887 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 07:14:20.865788+00:00 to 2026-01-08 07:16:20.865788+00:00 (1m)
+2026-01-08 15:35:07,887 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 07:14:20.865788+00:00 to 2026-01-08 07:16:20.865788+00:00 (1m)
+2026-01-08 15:35:08,828 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767856460865&endTime=1767856580865&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:35:08,836 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:35:08,837 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:35:08,838 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:35:09,160 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 04:09:21.879347+00:00 to 2026-01-08 07:29:21.879347+00:00 (1m)
+2026-01-08 15:35:09,160 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 04:09:21.879347+00:00 to 2026-01-08 07:29:21.879347+00:00 (1m)
+2026-01-08 15:35:10,082 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767845361879&endTime=1767857361879&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:35:10,092 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:35:10,093 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:35:16,470 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 07:29:21.879347+00:00 to 2026-01-08 07:31:21.879347+00:00 (1m)
+2026-01-08 15:35:16,470 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 07:29:21.879347+00:00 to 2026-01-08 07:31:21.879347+00:00 (1m)
+2026-01-08 15:35:17,393 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767857361879&endTime=1767857481879&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:35:17,399 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:35:17,400 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:35:17,400 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:35:17,786 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 04:24:38.791525+00:00 to 2026-01-08 07:44:38.791525+00:00 (1m)
+2026-01-08 15:35:17,787 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 04:24:38.791525+00:00 to 2026-01-08 07:44:38.791525+00:00 (1m)
+2026-01-08 15:35:19,239 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767846278791&endTime=1767858278791&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:35:19,249 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:35:19,250 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:35:25,612 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 07:44:38.791525+00:00 to 2026-01-08 07:46:38.791525+00:00 (1m)
+2026-01-08 15:35:25,612 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 07:44:38.791525+00:00 to 2026-01-08 07:46:38.791525+00:00 (1m)
+2026-01-08 15:35:27,070 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767858278791&endTime=1767858398791&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:35:27,075 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:35:27,076 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:35:27,076 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:35:27,459 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 04:39:36.782027+00:00 to 2026-01-08 07:59:36.782027+00:00 (1m)
+2026-01-08 15:35:27,459 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 04:39:36.782027+00:00 to 2026-01-08 07:59:36.782027+00:00 (1m)
+2026-01-08 15:35:28,410 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767847176782&endTime=1767859176782&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:35:28,418 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:35:28,419 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:35:37,126 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 07:59:36.782027+00:00 to 2026-01-08 08:01:36.782027+00:00 (1m)
+2026-01-08 15:35:37,126 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 07:59:36.782027+00:00 to 2026-01-08 08:01:36.782027+00:00 (1m)
+2026-01-08 15:35:38,063 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767859176782&endTime=1767859296782&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:35:38,071 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:35:38,072 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:35:38,072 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:35:38,459 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 04:54:40.192076+00:00 to 2026-01-08 08:14:40.192076+00:00 (1m)
+2026-01-08 15:35:38,459 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 04:54:40.192076+00:00 to 2026-01-08 08:14:40.192076+00:00 (1m)
+2026-01-08 15:35:39,393 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767848080192&endTime=1767860080192&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:35:39,403 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:35:39,404 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:35:45,741 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 08:14:40.192076+00:00 to 2026-01-08 08:16:40.192076+00:00 (1m)
+2026-01-08 15:35:45,741 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 08:14:40.192076+00:00 to 2026-01-08 08:16:40.192076+00:00 (1m)
+2026-01-08 15:35:46,662 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767860080192&endTime=1767860200192&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:35:46,667 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:35:46,668 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:35:46,668 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:35:47,051 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 05:09:39.263638+00:00 to 2026-01-08 08:29:39.263638+00:00 (1m)
+2026-01-08 15:35:47,051 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 05:09:39.263638+00:00 to 2026-01-08 08:29:39.263638+00:00 (1m)
+2026-01-08 15:35:47,979 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767848979263&endTime=1767860979263&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:35:47,989 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:35:47,990 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:35:54,285 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 08:29:39.263638+00:00 to 2026-01-08 08:31:39.263638+00:00 (1m)
+2026-01-08 15:35:54,285 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 08:29:39.263638+00:00 to 2026-01-08 08:31:39.263638+00:00 (1m)
+2026-01-08 15:35:55,271 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767860979263&endTime=1767861099263&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:35:55,279 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:35:55,280 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:35:55,280 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:35:55,666 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 05:24:34.181066+00:00 to 2026-01-08 08:44:34.181066+00:00 (1m)
+2026-01-08 15:35:55,666 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 05:24:34.181066+00:00 to 2026-01-08 08:44:34.181066+00:00 (1m)
+2026-01-08 15:35:56,602 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767849874181&endTime=1767861874181&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:35:56,612 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:35:56,612 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:36:02,932 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 08:44:34.181066+00:00 to 2026-01-08 08:46:34.181066+00:00 (1m)
+2026-01-08 15:36:02,932 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 08:44:34.181066+00:00 to 2026-01-08 08:46:34.181066+00:00 (1m)
+2026-01-08 15:36:03,887 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767861874181&endTime=1767861994181&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:36:03,893 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:36:03,894 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:36:03,894 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:36:03,894 - agents.backtesting.orderbook_backtester - INFO - Processed 50/76 markets...
+2026-01-08 15:36:04,278 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 05:39:30.380657+00:00 to 2026-01-08 08:59:30.380657+00:00 (1m)
+2026-01-08 15:36:04,278 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 05:39:30.380657+00:00 to 2026-01-08 08:59:30.380657+00:00 (1m)
+2026-01-08 15:36:05,197 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767850770380&endTime=1767862770380&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:36:05,203 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:36:05,204 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:36:11,572 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 08:59:30.380657+00:00 to 2026-01-08 09:01:30.380657+00:00 (1m)
+2026-01-08 15:36:11,572 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 08:59:30.380657+00:00 to 2026-01-08 09:01:30.380657+00:00 (1m)
+2026-01-08 15:36:12,532 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767862770380&endTime=1767862890380&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:36:12,537 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:36:12,538 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:36:12,538 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:36:12,922 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 05:54:31.802590+00:00 to 2026-01-08 09:14:31.802590+00:00 (1m)
+2026-01-08 15:36:12,922 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 05:54:31.802590+00:00 to 2026-01-08 09:14:31.802590+00:00 (1m)
+2026-01-08 15:36:13,884 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767851671802&endTime=1767863671802&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:36:13,890 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:36:13,891 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:36:20,367 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 09:14:31.802590+00:00 to 2026-01-08 09:16:31.802590+00:00 (1m)
+2026-01-08 15:36:20,367 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 09:14:31.802590+00:00 to 2026-01-08 09:16:31.802590+00:00 (1m)
+2026-01-08 15:36:21,327 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767863671802&endTime=1767863791802&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:36:21,332 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:36:21,333 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:36:21,333 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:36:21,716 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 06:09:31.809676+00:00 to 2026-01-08 09:29:31.809676+00:00 (1m)
+2026-01-08 15:36:21,716 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 06:09:31.809676+00:00 to 2026-01-08 09:29:31.809676+00:00 (1m)
+2026-01-08 15:36:22,710 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767852571809&endTime=1767864571809&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:36:22,720 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:36:22,720 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:36:29,051 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 09:29:31.809676+00:00 to 2026-01-08 09:31:31.809676+00:00 (1m)
+2026-01-08 15:36:29,051 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 09:29:31.809676+00:00 to 2026-01-08 09:31:31.809676+00:00 (1m)
+2026-01-08 15:36:29,982 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767864571809&endTime=1767864691809&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:36:29,988 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:36:29,989 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:36:29,989 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:36:30,372 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 06:24:30.337872+00:00 to 2026-01-08 09:44:30.337872+00:00 (1m)
+2026-01-08 15:36:30,372 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 06:24:30.337872+00:00 to 2026-01-08 09:44:30.337872+00:00 (1m)
+2026-01-08 15:36:31,306 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767853470337&endTime=1767865470337&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:36:31,315 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:36:31,316 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:36:37,677 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 09:44:30.337872+00:00 to 2026-01-08 09:46:30.337872+00:00 (1m)
+2026-01-08 15:36:37,677 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 09:44:30.337872+00:00 to 2026-01-08 09:46:30.337872+00:00 (1m)
+2026-01-08 15:36:38,605 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767865470337&endTime=1767865590337&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:36:38,613 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:36:38,614 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:36:38,614 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:36:38,998 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 06:39:29.405522+00:00 to 2026-01-08 09:59:29.405522+00:00 (1m)
+2026-01-08 15:36:38,998 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 06:39:29.405522+00:00 to 2026-01-08 09:59:29.405522+00:00 (1m)
+2026-01-08 15:36:39,953 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767854369405&endTime=1767866369405&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:36:39,959 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:36:39,960 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:36:46,304 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 09:59:29.405522+00:00 to 2026-01-08 10:01:29.405522+00:00 (1m)
+2026-01-08 15:36:46,304 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 09:59:29.405522+00:00 to 2026-01-08 10:01:29.405522+00:00 (1m)
+2026-01-08 15:36:47,225 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767866369405&endTime=1767866489405&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:36:47,230 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:36:47,231 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:36:47,231 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:36:47,618 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 06:54:26.518109+00:00 to 2026-01-08 10:14:26.518109+00:00 (1m)
+2026-01-08 15:36:47,618 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 06:54:26.518109+00:00 to 2026-01-08 10:14:26.518109+00:00 (1m)
+2026-01-08 15:36:48,850 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767855266518&endTime=1767867266518&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:36:48,857 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:36:48,857 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:36:55,176 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 10:14:26.518109+00:00 to 2026-01-08 10:16:26.518109+00:00 (1m)
+2026-01-08 15:36:55,176 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 10:14:26.518109+00:00 to 2026-01-08 10:16:26.518109+00:00 (1m)
+2026-01-08 15:36:56,104 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767867266518&endTime=1767867386518&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:36:56,110 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:36:56,111 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:36:56,111 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:36:56,505 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 07:09:21.396279+00:00 to 2026-01-08 10:29:21.396279+00:00 (1m)
+2026-01-08 15:36:56,506 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 07:09:21.396279+00:00 to 2026-01-08 10:29:21.396279+00:00 (1m)
+2026-01-08 15:36:57,446 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767856161396&endTime=1767868161396&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:36:57,458 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:36:57,459 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:37:03,876 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 10:29:21.396279+00:00 to 2026-01-08 10:31:21.396279+00:00 (1m)
+2026-01-08 15:37:03,876 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 10:29:21.396279+00:00 to 2026-01-08 10:31:21.396279+00:00 (1m)
+2026-01-08 15:37:04,878 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767868161396&endTime=1767868281396&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:37:04,887 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:37:04,887 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:37:04,888 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:37:05,286 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 07:24:18.067756+00:00 to 2026-01-08 10:44:18.067756+00:00 (1m)
+2026-01-08 15:37:05,287 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 07:24:18.067756+00:00 to 2026-01-08 10:44:18.067756+00:00 (1m)
+2026-01-08 15:37:06,215 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767857058067&endTime=1767869058067&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:37:06,221 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:37:06,222 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:37:12,621 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 10:44:18.067756+00:00 to 2026-01-08 10:46:18.067756+00:00 (1m)
+2026-01-08 15:37:12,621 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 10:44:18.067756+00:00 to 2026-01-08 10:46:18.067756+00:00 (1m)
+2026-01-08 15:37:13,578 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767869058067&endTime=1767869178067&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:37:13,584 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:37:13,584 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:37:13,585 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:37:13,970 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 07:39:16.686534+00:00 to 2026-01-08 10:59:16.686534+00:00 (1m)
+2026-01-08 15:37:13,970 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 07:39:16.686534+00:00 to 2026-01-08 10:59:16.686534+00:00 (1m)
+2026-01-08 15:37:15,637 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767857956686&endTime=1767869956686&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:37:15,644 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:37:15,644 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:37:23,229 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 10:59:16.686534+00:00 to 2026-01-08 11:01:16.686534+00:00 (1m)
+2026-01-08 15:37:23,229 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 10:59:16.686534+00:00 to 2026-01-08 11:01:16.686534+00:00 (1m)
+2026-01-08 15:37:24,156 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767869956686&endTime=1767870076686&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:37:24,163 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:37:24,164 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:37:24,164 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:37:24,547 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 07:54:11.655519+00:00 to 2026-01-08 11:14:11.655519+00:00 (1m)
+2026-01-08 15:37:24,548 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 07:54:11.655519+00:00 to 2026-01-08 11:14:11.655519+00:00 (1m)
+2026-01-08 15:37:25,505 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767858851655&endTime=1767870851655&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:37:25,510 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:37:25,511 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:37:31,904 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 11:14:11.655519+00:00 to 2026-01-08 11:16:11.655519+00:00 (1m)
+2026-01-08 15:37:31,904 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 11:14:11.655519+00:00 to 2026-01-08 11:16:11.655519+00:00 (1m)
+2026-01-08 15:37:33,310 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767870851655&endTime=1767870971655&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:37:33,319 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:37:33,320 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:37:33,320 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:37:33,321 - agents.backtesting.orderbook_backtester - INFO - Processed 60/76 markets...
+2026-01-08 15:37:33,704 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 08:10:08.037266+00:00 to 2026-01-08 11:30:08.037266+00:00 (1m)
+2026-01-08 15:37:33,704 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 08:10:08.037266+00:00 to 2026-01-08 11:30:08.037266+00:00 (1m)
+2026-01-08 15:37:35,124 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767859808037&endTime=1767871808037&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:37:35,130 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:37:35,131 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:37:41,627 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 11:30:08.037266+00:00 to 2026-01-08 11:32:08.037266+00:00 (1m)
+2026-01-08 15:37:41,627 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 11:30:08.037266+00:00 to 2026-01-08 11:32:08.037266+00:00 (1m)
+2026-01-08 15:37:43,504 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767871808037&endTime=1767871928037&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:37:43,512 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:37:43,513 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:37:43,513 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:37:43,900 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 08:25:03.254507+00:00 to 2026-01-08 11:45:03.254507+00:00 (1m)
+2026-01-08 15:37:43,900 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 08:25:03.254507+00:00 to 2026-01-08 11:45:03.254507+00:00 (1m)
+2026-01-08 15:37:44,872 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767860703254&endTime=1767872703254&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:37:44,881 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:37:44,882 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:37:51,189 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 11:45:03.254507+00:00 to 2026-01-08 11:47:03.254507+00:00 (1m)
+2026-01-08 15:37:51,190 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 11:45:03.254507+00:00 to 2026-01-08 11:47:03.254507+00:00 (1m)
+2026-01-08 15:37:52,118 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767872703254&endTime=1767872823254&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:37:52,124 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:37:52,125 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:37:52,125 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:37:52,510 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 08:40:00.729065+00:00 to 2026-01-08 12:00:00.729065+00:00 (1m)
+2026-01-08 15:37:52,510 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 08:40:00.729065+00:00 to 2026-01-08 12:00:00.729065+00:00 (1m)
+2026-01-08 15:37:53,477 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767861600729&endTime=1767873600729&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:37:53,483 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:37:53,484 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:38:00,058 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 12:00:00.729065+00:00 to 2026-01-08 12:02:00.729065+00:00 (1m)
+2026-01-08 15:38:00,058 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 12:00:00.729065+00:00 to 2026-01-08 12:02:00.729065+00:00 (1m)
+2026-01-08 15:38:01,011 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767873600729&endTime=1767873720729&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:38:01,021 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:38:01,021 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:38:01,022 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:38:01,409 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 08:55:00.424487+00:00 to 2026-01-08 12:15:00.424487+00:00 (1m)
+2026-01-08 15:38:01,409 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 08:55:00.424487+00:00 to 2026-01-08 12:15:00.424487+00:00 (1m)
+2026-01-08 15:38:02,349 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767862500424&endTime=1767874500424&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:38:02,359 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:38:02,360 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:38:08,973 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 12:15:00.424487+00:00 to 2026-01-08 12:17:00.424487+00:00 (1m)
+2026-01-08 15:38:08,973 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 12:15:00.424487+00:00 to 2026-01-08 12:17:00.424487+00:00 (1m)
+2026-01-08 15:38:09,952 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767874500424&endTime=1767874620424&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:38:09,959 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:38:09,960 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:38:09,961 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:38:10,346 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 09:09:58.056477+00:00 to 2026-01-08 12:29:58.056477+00:00 (1m)
+2026-01-08 15:38:10,346 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 09:09:58.056477+00:00 to 2026-01-08 12:29:58.056477+00:00 (1m)
+2026-01-08 15:38:11,321 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767863398056&endTime=1767875398056&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:38:11,330 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:38:11,331 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:38:18,152 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 12:29:58.056477+00:00 to 2026-01-08 12:31:58.056477+00:00 (1m)
+2026-01-08 15:38:18,153 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 12:29:58.056477+00:00 to 2026-01-08 12:31:58.056477+00:00 (1m)
+2026-01-08 15:38:19,108 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767875398056&endTime=1767875518056&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:38:19,116 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:38:19,116 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:38:19,117 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:38:19,500 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 09:24:55.310587+00:00 to 2026-01-08 12:44:55.310587+00:00 (1m)
+2026-01-08 15:38:19,501 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 09:24:55.310587+00:00 to 2026-01-08 12:44:55.310587+00:00 (1m)
+2026-01-08 15:38:20,435 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767864295310&endTime=1767876295310&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:38:20,443 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:38:20,444 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:38:27,032 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 12:44:55.310587+00:00 to 2026-01-08 12:46:55.310587+00:00 (1m)
+2026-01-08 15:38:27,032 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 12:44:55.310587+00:00 to 2026-01-08 12:46:55.310587+00:00 (1m)
+2026-01-08 15:38:27,965 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767876295310&endTime=1767876415310&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:38:27,973 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:38:27,974 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:38:27,974 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:38:28,359 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 09:39:52.756015+00:00 to 2026-01-08 12:59:52.756015+00:00 (1m)
+2026-01-08 15:38:28,360 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 09:39:52.756015+00:00 to 2026-01-08 12:59:52.756015+00:00 (1m)
+2026-01-08 15:38:29,325 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767865192756&endTime=1767877192756&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:38:29,334 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:38:29,334 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:38:38,489 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 12:59:52.756015+00:00 to 2026-01-08 13:01:52.756015+00:00 (1m)
+2026-01-08 15:38:38,489 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 12:59:52.756015+00:00 to 2026-01-08 13:01:52.756015+00:00 (1m)
+2026-01-08 15:38:39,475 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767877192756&endTime=1767877312756&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:38:39,482 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:38:39,486 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:38:39,487 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:38:39,876 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 09:54:48.760191+00:00 to 2026-01-08 13:14:48.760191+00:00 (1m)
+2026-01-08 15:38:39,876 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 09:54:48.760191+00:00 to 2026-01-08 13:14:48.760191+00:00 (1m)
+2026-01-08 15:38:40,834 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767866088760&endTime=1767878088760&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:38:40,854 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:38:40,854 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:38:50,225 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 13:14:48.760191+00:00 to 2026-01-08 13:16:48.760191+00:00 (1m)
+2026-01-08 15:38:50,225 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 13:14:48.760191+00:00 to 2026-01-08 13:16:48.760191+00:00 (1m)
+2026-01-08 15:38:51,179 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767878088760&endTime=1767878208760&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:38:51,185 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:38:51,186 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:38:51,186 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:38:51,571 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 10:09:51.820790+00:00 to 2026-01-08 13:29:51.820790+00:00 (1m)
+2026-01-08 15:38:51,571 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 10:09:51.820790+00:00 to 2026-01-08 13:29:51.820790+00:00 (1m)
+2026-01-08 15:38:52,498 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767866991820&endTime=1767878991820&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:38:52,509 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:38:52,510 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:38:59,021 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 13:29:51.820790+00:00 to 2026-01-08 13:31:51.820790+00:00 (1m)
+2026-01-08 15:38:59,021 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 13:29:51.820790+00:00 to 2026-01-08 13:31:51.820790+00:00 (1m)
+2026-01-08 15:38:59,939 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767878991820&endTime=1767879111820&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:38:59,945 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:38:59,946 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:38:59,946 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:39:00,332 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 10:24:50.916850+00:00 to 2026-01-08 13:44:50.916850+00:00 (1m)
+2026-01-08 15:39:00,333 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 10:24:50.916850+00:00 to 2026-01-08 13:44:50.916850+00:00 (1m)
+2026-01-08 15:39:01,296 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767867890916&endTime=1767879890916&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:39:01,305 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:39:01,306 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:39:07,701 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 13:44:50.916850+00:00 to 2026-01-08 13:46:50.916850+00:00 (1m)
+2026-01-08 15:39:07,701 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 13:44:50.916850+00:00 to 2026-01-08 13:46:50.916850+00:00 (1m)
+2026-01-08 15:39:08,644 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767879890916&endTime=1767880010916&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:39:08,653 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:39:08,654 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:39:08,654 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:39:08,655 - agents.backtesting.orderbook_backtester - INFO - Processed 70/76 markets...
+2026-01-08 15:39:09,040 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 10:39:50.672798+00:00 to 2026-01-08 13:59:50.672798+00:00 (1m)
+2026-01-08 15:39:09,041 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 10:39:50.672798+00:00 to 2026-01-08 13:59:50.672798+00:00 (1m)
+2026-01-08 15:39:09,983 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767868790672&endTime=1767880790672&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:39:09,993 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:39:09,993 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:39:16,501 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 13:59:50.672798+00:00 to 2026-01-08 14:01:50.672798+00:00 (1m)
+2026-01-08 15:39:16,501 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 13:59:50.672798+00:00 to 2026-01-08 14:01:50.672798+00:00 (1m)
+2026-01-08 15:39:17,474 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767880790672&endTime=1767880910672&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:39:17,482 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:39:17,483 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:39:17,483 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:39:17,869 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 10:54:47.990677+00:00 to 2026-01-08 14:14:47.990677+00:00 (1m)
+2026-01-08 15:39:17,869 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 10:54:47.990677+00:00 to 2026-01-08 14:14:47.990677+00:00 (1m)
+2026-01-08 15:39:18,810 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767869687990&endTime=1767881687990&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:39:18,819 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:39:18,820 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:39:25,264 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 14:14:47.990677+00:00 to 2026-01-08 14:16:47.990677+00:00 (1m)
+2026-01-08 15:39:25,264 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 14:14:47.990677+00:00 to 2026-01-08 14:16:47.990677+00:00 (1m)
+2026-01-08 15:39:26,191 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767881687990&endTime=1767881807990&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:39:26,197 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:39:26,198 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:39:26,198 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:39:26,596 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 11:09:46.538559+00:00 to 2026-01-08 14:29:46.538559+00:00 (1m)
+2026-01-08 15:39:26,596 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 11:09:46.538559+00:00 to 2026-01-08 14:29:46.538559+00:00 (1m)
+2026-01-08 15:39:27,546 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767870586538&endTime=1767882586538&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:39:27,553 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:39:27,553 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:39:34,008 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 14:29:46.538559+00:00 to 2026-01-08 14:31:46.538559+00:00 (1m)
+2026-01-08 15:39:34,009 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 14:29:46.538559+00:00 to 2026-01-08 14:31:46.538559+00:00 (1m)
+2026-01-08 15:39:35,262 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767882586538&endTime=1767882706538&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:39:35,268 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:39:35,269 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:39:35,269 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:39:35,654 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 11:24:46.591613+00:00 to 2026-01-08 14:44:46.591613+00:00 (1m)
+2026-01-08 15:39:35,654 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 11:24:46.591613+00:00 to 2026-01-08 14:44:46.591613+00:00 (1m)
+2026-01-08 15:39:36,587 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767871486591&endTime=1767883486591&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:39:36,594 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:39:36,594 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:39:43,280 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 14:44:46.591613+00:00 to 2026-01-08 14:46:46.591613+00:00 (1m)
+2026-01-08 15:39:43,280 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 14:44:46.591613+00:00 to 2026-01-08 14:46:46.591613+00:00 (1m)
+2026-01-08 15:39:44,212 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767883486591&endTime=1767883606591&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:39:44,221 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:39:44,221 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:39:44,222 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:39:44,608 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 11:39:45.258645+00:00 to 2026-01-08 14:59:45.258645+00:00 (1m)
+2026-01-08 15:39:44,608 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 11:39:45.258645+00:00 to 2026-01-08 14:59:45.258645+00:00 (1m)
+2026-01-08 15:39:45,543 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767872385258&endTime=1767884385258&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:39:45,551 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:39:45,551 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:39:52,222 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 14:59:45.258645+00:00 to 2026-01-08 15:01:45.258645+00:00 (1m)
+2026-01-08 15:39:52,223 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 14:59:45.258645+00:00 to 2026-01-08 15:01:45.258645+00:00 (1m)
+2026-01-08 15:39:53,165 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767884385258&endTime=1767884505258&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:39:53,172 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:39:53,173 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:39:53,173 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:39:53,537 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 11:54:46.136686+00:00 to 2026-01-08 15:14:46.136686+00:00 (1m)
+2026-01-08 15:39:53,538 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 11:54:46.136686+00:00 to 2026-01-08 15:14:46.136686+00:00 (1m)
+2026-01-08 15:39:54,474 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767873286136&endTime=1767885286136&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:39:54,484 - agents.connectors.btc_data - INFO - ✓ Fetched 200 candles from Binance
+2026-01-08 15:39:54,485 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:40:03,357 - agents.connectors.btc_data - INFO - Fetching BTC data: 2026-01-08 15:14:46.136686+00:00 to 2026-01-08 15:16:46.136686+00:00 (1m)
+2026-01-08 15:40:03,358 - agents.connectors.btc_data - INFO - Fetching BTC data from Binance: 2026-01-08 15:14:46.136686+00:00 to 2026-01-08 15:16:46.136686+00:00 (1m)
+2026-01-08 15:40:04,333 - httpx - INFO - HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=1767885286136&endTime=1767885406136&limit=1000 "HTTP/1.1 200 OK"
+2026-01-08 15:40:04,348 - agents.connectors.btc_data - INFO - ✓ Fetched 2 candles from Binance
+2026-01-08 15:40:04,348 - agents.connectors.btc_data - WARNING - Error saving cache: ('Input object was not a NumPy array', 'Conversion failed for column timestamp with type datetime64[ns, UTC]')
+2026-01-08 15:40:04,348 - agents.backtesting.market_fetcher - WARNING - Error enriching market with BTC data: Cannot subtract tz-naive and tz-aware datetime-like objects
+2026-01-08 15:40:04,349 - agents.backtesting.orderbook_backtester - INFO - ✓ Processed 75 markets successfully
+2026-01-08 15:40:04,350 - agents.backtesting.orderbook_backtester - INFO - 
+======================================================================
+2026-01-08 15:40:04,350 - agents.backtesting.orderbook_backtester - INFO - Backtest Results Summary
+2026-01-08 15:40:04,350 - agents.backtesting.orderbook_backtester - INFO - ======================================================================
+2026-01-08 15:40:04,351 - agents.backtesting.orderbook_backtester - INFO - 
+Win Rate: 50.67% (38/75)
+2026-01-08 15:40:04,351 - agents.backtesting.orderbook_backtester - INFO - 
+P&L Metrics:
+2026-01-08 15:40:04,351 - agents.backtesting.orderbook_backtester - INFO -   Total P&L: $-36.25
+2026-01-08 15:40:04,351 - agents.backtesting.orderbook_backtester - INFO -   Total Cost: $74.25
+2026-01-08 15:40:04,351 - agents.backtesting.orderbook_backtester - INFO -   Net Return: $-36.25
+2026-01-08 15:40:04,351 - agents.backtesting.orderbook_backtester - INFO -   Average P&L per trade: $-0.4833
+2026-01-08 15:40:04,351 - agents.backtesting.orderbook_backtester - INFO - 
+Return Metrics:
+2026-01-08 15:40:04,351 - agents.backtesting.orderbook_backtester - INFO -   Average Return: -48.82%
+2026-01-08 15:40:04,351 - agents.backtesting.orderbook_backtester - INFO -   Total Return: -48.82%
+2026-01-08 15:40:04,352 - agents.backtesting.orderbook_backtester - INFO -   Sharpe Ratio: -179.76
+2026-01-08 15:40:04,352 - agents.backtesting.orderbook_backtester - INFO - 
+Winning Trades:
+2026-01-08 15:40:04,352 - agents.backtesting.orderbook_backtester - INFO -   Average Win: $0.0100
+2026-01-08 15:40:04,352 - agents.backtesting.orderbook_backtester - INFO -   Average Win Return: 1.01%
+2026-01-08 15:40:04,352 - agents.backtesting.orderbook_backtester - INFO - 
+Losing Trades:
+2026-01-08 15:40:04,352 - agents.backtesting.orderbook_backtester - INFO -   Average Loss: $-0.9900
+2026-01-08 15:40:04,352 - agents.backtesting.orderbook_backtester - INFO -   Average Loss Return: -100.00%
+2026-01-08 15:40:04,352 - agents.backtesting.orderbook_backtester - INFO - 
+======================================================================
+2026-01-08 15:40:05,235 - agents.backtesting.orderbook_backtester - INFO - ✓ Saved results to backtest_chronos_all_markets.csv
+2026-01-08 15:40:05,238 - __main__ - INFO - 
+✓ Backtest completed successfully!
+2026-01-08 15:40:05,238 - __main__ - INFO - Total trades: 75
+2026-01-08 15:40:05,238 - __main__ - INFO - Results saved to: backtest_chronos_all_markets.csv

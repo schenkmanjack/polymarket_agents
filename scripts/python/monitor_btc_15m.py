@@ -39,9 +39,18 @@ logger = logging.getLogger(__name__)
 class BTC15mMonitor:
     """Monitor for new BTC 15-minute markets."""
     
-    def __init__(self, db: OrderbookDatabase, check_interval: float = 60.0):
+    def __init__(self, db: OrderbookDatabase, check_interval: float = 10.0, proactive: bool = True):
+        """
+        Initialize BTC 15-minute market monitor.
+        
+        Args:
+            db: OrderbookDatabase instance
+            check_interval: How often to check for new markets (seconds). Default 10s for proactive mode.
+            proactive: If True, use proactive detection (check future windows). Default True.
+        """
         self.db = db
         self.check_interval = check_interval
+        self.proactive = proactive
         self.monitored_event_slugs: Set[str] = set()
         self.monitored_token_ids: Set[str] = set()
         self.logger_service = None
@@ -51,17 +60,27 @@ class BTC15mMonitor:
         self.running = False
     
     async def _check_for_new_markets(self):
-        """Check for new BTC 15-minute markets."""
-        logger.info("Checking for new BTC updown 15-minute markets...")
+        """Check for new BTC 15-minute markets using proactive detection."""
+        logger.info("Checking for new BTC updown 15-minute markets (proactive mode)...")
         
-        # Try to get latest market (uses multiple detection approaches)
-        from agents.polymarket.btc_market_detector import get_latest_btc_15m_market
-        latest_market = get_latest_btc_15m_market()
+        # Use proactive detection (checks future windows first)
+        from agents.polymarket.btc_market_detector import (
+            get_latest_btc_15m_market_proactive,
+            get_latest_btc_15m_market,
+            get_all_active_btc_15m_markets
+        )
+        
+        if self.proactive:
+            # Proactive: check future windows first (catches markets immediately)
+            latest_market = get_latest_btc_15m_market_proactive()
+        else:
+            # Fallback to original detection
+            latest_market = get_latest_btc_15m_market()
         
         markets = []
         if latest_market:
             markets = [latest_market]
-            logger.info(f"Found latest BTC 15-minute market via detection")
+            logger.info(f"Found latest BTC 15-minute market via {'proactive' if self.proactive else 'standard'} detection")
         else:
             # Fallback: try getting all active markets
             markets = get_all_active_btc_15m_markets()
@@ -129,7 +148,8 @@ class BTC15mMonitor:
     async def _start_monitoring(self, token_ids: list, market_info: dict):
         """Start monitoring new tokens."""
         import os
-        has_wallet_key = bool(os.getenv("POLYGON_WALLET_PRIVATE_KEY"))
+        # Use separate wallet key for monitoring script (not trading script)
+        has_wallet_key = bool(os.getenv("POLYGON_WALLET_MONITORING_SCRIPT_PRIVATE_KEY"))
         
         # Try WebSocket first (lower latency) - now with API credentials
         # Fallback to polling if WebSocket fails
@@ -210,11 +230,11 @@ class BTC15mMonitor:
         # Use polling if WebSocket failed or no wallet key
         if not has_wallet_key:
             # No wallet key or WebSocket failed - use polling
-            if os.getenv("POLYGON_WALLET_PRIVATE_KEY"):
+            if os.getenv("POLYGON_WALLET_MONITORING_SCRIPT_PRIVATE_KEY"):
                 logger.warning("⚠ WebSocket failed - Using polling mode")
             else:
                 logger.warning("⚠ No wallet key - Using polling mode")
-                logger.info("  Add POLYGON_WALLET_PRIVATE_KEY to use WebSocket for better performance")
+                logger.info("  Add POLYGON_WALLET_MONITORING_SCRIPT_PRIVATE_KEY to use WebSocket for better performance")
             
             from agents.polymarket.orderbook_poller import OrderbookPoller
             
@@ -342,9 +362,11 @@ async def main():
     
     # Initialize database (will use DATABASE_URL from env if set, otherwise SQLite)
     # This will log which database it's connecting to
-    # Use btc_eth_table - single table for all BTC/ETH markets (simpler, no race conditions)
-    db = OrderbookDatabase(use_btc_eth_table=True)
-    monitor = BTC15mMonitor(db, check_interval=60.0)
+    # Use btc_15_min_table - dedicated table for proactive BTC 15-min logging
+    db = OrderbookDatabase(use_btc_15_min_table=True)
+    # Proactive mode: check every 10 seconds (instead of 60)
+    # This catches markets within seconds of creation, not minutes
+    monitor = BTC15mMonitor(db, check_interval=10.0, proactive=True)
     
     # Check and log balances before starting monitoring
     logger.info("")

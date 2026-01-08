@@ -53,21 +53,27 @@ class BTCPredictor:
         try:
             # Try loading via gluonts (preferred method)
             try:
-                from gluonts.torch.model.lag_llama import LagLlamaEstimator
-                import torch
+                # Check if lag_llama module exists in this version of gluonts
+                import gluonts.torch.model as torch_models
+                if hasattr(torch_models, 'lag_llama'):
+                    from gluonts.torch.model.lag_llama import LagLlamaEstimator
+                    import torch
+                    
+                    logger.info("Loading Lag-Llama via gluonts...")
+                    
+                    # Lag-Llama requires specific configuration
+                    # For now, use a simplified approach with default config
+                    # In production, you'd load from a checkpoint
+                    self.model = "lag-llama-gluonts"  # Mark as gluonts-based
+                    self.tokenizer = None
+                    logger.info("✓ Lag-Llama (gluonts) ready - will use estimator for predictions")
+                    return
+                else:
+                    logger.debug("Lag-Llama not available in this version of gluonts, trying transformers...")
+                    raise ImportError("Lag-Llama module not found in gluonts")
                 
-                logger.info("Loading Lag-Llama via gluonts...")
-                
-                # Lag-Llama requires specific configuration
-                # For now, use a simplified approach with default config
-                # In production, you'd load from a checkpoint
-                self.model = "lag-llama-gluonts"  # Mark as gluonts-based
-                self.tokenizer = None
-                logger.info("✓ Lag-Llama (gluonts) ready - will use estimator for predictions")
-                return
-                
-            except ImportError:
-                logger.debug("gluonts not available, trying transformers...")
+            except (ImportError, AttributeError) as e:
+                logger.debug(f"gluonts lag_llama not available ({e}), trying transformers...")
             
             # Fallback: Try transformers (may not work for Lag-Llama)
             from transformers import AutoModelForCausalLM
@@ -83,7 +89,8 @@ class BTCPredictor:
                 logger.info("✓ Lag-Llama loaded successfully")
             except Exception as e:
                 logger.warning(f"Could not load Lag-Llama via transformers: {e}")
-                logger.info("Lag-Llama may require gluonts package: pip install gluonts[torch]")
+                logger.info("Lag-Llama is not available in this setup.")
+                logger.info("Note: Lag-Llama requires a specific implementation that may not be available in current gluonts/transformers versions.")
                 raise
                 
         except ImportError:

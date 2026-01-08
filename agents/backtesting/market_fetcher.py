@@ -27,18 +27,28 @@ class HistoricalMarketFetcher:
     Can optionally use authenticated API access via wallet private key for better market access.
     """
     
-    def __init__(self, use_auth: bool = True):
+    def __init__(self, use_auth: bool = True, proxy: Optional[str] = None):
         """
         Initialize market fetcher.
         
         Args:
             use_auth: If True, try to use authenticated API access via wallet key (if available)
+            proxy: Optional proxy URL for VPN/routing. Supports:
+                   - HTTP/HTTPS: "http://user:pass@proxy.example.com:8080"
+                   - Oxylabs: "http://user-USERNAME:PASSWORD@isp.oxylabs.io:8001"
+                   - Or set HTTPS_PROXY/OXYLABS_* environment variables
         """
         self.gamma_url = "https://gamma-api.polymarket.com"
         self.gamma_events_endpoint = f"{self.gamma_url}/events"
         self.gamma_markets_endpoint = f"{self.gamma_url}/markets"
         self.clob_url = "https://clob.polymarket.com"
         self.clob_markets_endpoint = f"{self.clob_url}/markets"
+        
+        # Proxy configuration - use provided proxy or global config
+        if proxy is None:
+            from agents.utils.proxy_config import get_proxy
+            proxy = get_proxy()
+        self.proxy = proxy
         
         # Try to get authenticated API credentials if wallet key is available
         self.api_headers = None
@@ -239,7 +249,9 @@ class HistoricalMarketFetcher:
                 params["offset"] = offset
                 
                 try:
-                    response = httpx.get(self.gamma_events_endpoint, params=params, timeout=30.0)
+                    from agents.utils.proxy_config import get_proxy_dict
+                    proxies = get_proxy_dict() if self.proxy else None
+                    response = httpx.get(self.gamma_events_endpoint, params=params, timeout=30.0, proxies=proxies)
                     if response.status_code != 200:
                         break
                     
@@ -325,7 +337,9 @@ class HistoricalMarketFetcher:
     def _fetch_market_by_slug(self, slug: str) -> Optional[Dict]:
         """Fetch a specific market by its event slug."""
         try:
-            response = httpx.get(self.gamma_events_endpoint, params={"slug": slug}, timeout=30.0)
+            from agents.utils.proxy_config import get_proxy_dict
+            proxies = get_proxy_dict() if self.proxy else None
+            response = httpx.get(self.gamma_events_endpoint, params={"slug": slug}, timeout=30.0, proxies=proxies)
             if response.status_code == 200:
                 events = response.json()
                 if events and len(events) > 0:
@@ -398,7 +412,9 @@ class HistoricalMarketFetcher:
                 params["offset"] = offset
                 
                 try:
-                    response = httpx.get(self.gamma_events_endpoint, params=params, timeout=30.0)
+                    from agents.utils.proxy_config import get_proxy_dict
+                    proxies = get_proxy_dict() if self.proxy else None
+                    response = httpx.get(self.gamma_events_endpoint, params=params, timeout=30.0, proxies=proxies)
                     if response.status_code != 200:
                         logger.debug(f"Events API returned {response.status_code} for config {config_idx + 1}")
                         break
@@ -511,7 +527,9 @@ class HistoricalMarketFetcher:
             try:
                 params = {"limit": limit}
                 headers = self.api_headers if self.api_headers else None
-                response = httpx.get(self.clob_markets_endpoint, params=params, headers=headers, timeout=30.0)
+                from agents.utils.proxy_config import get_proxy_dict
+                proxies = get_proxy_dict() if self.proxy else None
+                response = httpx.get(self.clob_markets_endpoint, params=params, headers=headers, timeout=30.0, proxies=proxies)
                 if response.status_code == 200:
                     data = response.json()
                     markets = data.get("data", [])
@@ -554,7 +572,9 @@ class HistoricalMarketFetcher:
                 }
                 
                 try:
-                    response = httpx.get(self.gamma_markets_endpoint, params=params, timeout=30.0)
+                    from agents.utils.proxy_config import get_proxy_dict
+                    proxies = get_proxy_dict() if self.proxy else None
+                    response = httpx.get(self.gamma_markets_endpoint, params=params, timeout=30.0, proxies=proxies)
                     if response.status_code != 200:
                         break
                     

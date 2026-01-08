@@ -23,15 +23,17 @@ class OrderbookStream:
     RTDS_URL = "wss://ws-live-data.polymarket.com"
     CLOB_WS_URL = "wss://clob.polymarket.com/ws"  # Alternative endpoint
     
-    def __init__(self, on_orderbook_update: Optional[Callable] = None):
+    def __init__(self, on_orderbook_update: Optional[Callable] = None, api_credentials: Optional[Dict[str, str]] = None):
         """
         Initialize the orderbook stream.
         
         Args:
             on_orderbook_update: Callback function called when orderbook updates are received.
                                  Should accept (token_id, orderbook_data) as arguments.
+            api_credentials: Optional dict with 'api_key', 'api_secret', 'api_passphrase' for authentication.
         """
         self.on_orderbook_update = on_orderbook_update
+        self.api_credentials = api_credentials
         self.websocket = None
         self.running = False
         self.subscribed_tokens: set = set()
@@ -298,20 +300,33 @@ class OrderbookLogger:
     
     async def start(self):
         """Start logging orderbook updates."""
-        # Get API credentials from Polymarket if wallet key is available
+        # Get API credentials from Polymarket if monitoring script wallet key is available
         api_credentials = None
         import os
-        if os.getenv("POLYGON_WALLET_PRIVATE_KEY"):
+        # Use separate wallet key for monitoring script (not trading script)
+        monitoring_wallet_key = os.getenv("POLYGON_WALLET_MONITORING_SCRIPT_PRIVATE_KEY")
+        if monitoring_wallet_key:
             try:
-                from agents.polymarket.polymarket import Polymarket
-                pm = Polymarket()
-                if hasattr(pm, 'credentials') and pm.credentials:
-                    api_credentials = {
-                        "api_key": pm.credentials.api_key,
-                        "api_secret": pm.credentials.api_secret,
-                        "api_passphrase": pm.credentials.api_passphrase,
-                    }
-                    logger.info("✓ Using API credentials for WebSocket authentication")
+                # Temporarily set POLYGON_WALLET_PRIVATE_KEY to get credentials
+                # (Polymarket class reads from env var)
+                original_key = os.environ.get("POLYGON_WALLET_PRIVATE_KEY")
+                os.environ["POLYGON_WALLET_PRIVATE_KEY"] = monitoring_wallet_key
+                try:
+                    from agents.polymarket.polymarket import Polymarket
+                    pm = Polymarket()
+                    if hasattr(pm, 'credentials') and pm.credentials:
+                        api_credentials = {
+                            "api_key": pm.credentials.api_key,
+                            "api_secret": pm.credentials.api_secret,
+                            "api_passphrase": pm.credentials.api_passphrase,
+                        }
+                        logger.info("✓ Using API credentials for WebSocket authentication (monitoring script wallet)")
+                finally:
+                    # Restore original key (or remove if it wasn't set)
+                    if original_key:
+                        os.environ["POLYGON_WALLET_PRIVATE_KEY"] = original_key
+                    else:
+                        os.environ.pop("POLYGON_WALLET_PRIVATE_KEY", None)
             except Exception as e:
                 logger.warning(f"Could not get API credentials: {e}, trying without auth")
         
