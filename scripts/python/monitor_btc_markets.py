@@ -379,7 +379,7 @@ class BTCMarketsMonitor:
                     market_info=market_info,
                     track_top_n=0,  # Save all snapshots
                 )
-                new_poller_task = asyncio.create_task(new_poller.start())
+                new_poller_task = asyncio.create_task(new_poller.poll_loop())
                 
                 # Update instance variables
                 if market_type == "15m":
@@ -393,7 +393,10 @@ class BTCMarketsMonitor:
                 return True  # Success
             else:
                 # Add tokens to existing poller
-                poller.add_tokens(token_ids, market_info)
+                for token_id in token_ids:
+                    if token_id not in poller.token_ids:
+                        poller.token_ids.append(token_id)
+                poller.market_info.update(market_info)
                 logger.info(f"Added {len(token_ids)} tokens to existing {market_type} poller")
                 return True  # Success
         
