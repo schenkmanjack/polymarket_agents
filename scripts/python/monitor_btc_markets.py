@@ -115,18 +115,7 @@ class BTCMarketsMonitor:
             
             logger.info(f"Processing 15m market: ID={market_id}, slug={event_slug}, question={question}...")
             
-            # Skip if already monitoring
-            if event_slug in self.monitored_15m_event_slugs:
-                logger.info(f"  Already monitoring event {event_slug}, skipping")
-                continue
-            
-            # Only monitor markets that are currently running (within their actual time window)
-            from agents.polymarket.btc_market_detector import is_market_currently_running
-            if not is_market_currently_running(market):
-                logger.info(f"  Market {event_slug} is not currently running (may be future or past), skipping")
-                continue
-            
-            # Extract token IDs
+            # Extract token IDs first
             token_ids = get_token_ids_from_market(market)
             logger.info(f"  Extracted {len(token_ids)} token IDs: {token_ids}")
             
@@ -134,9 +123,34 @@ class BTCMarketsMonitor:
                 logger.warning(f"  No token IDs found for market {event_slug}")
                 continue
             
-            # Check if we're already monitoring any of these tokens
+            # Only monitor markets that are currently running (within their actual time window)
+            from agents.polymarket.btc_market_detector import is_market_currently_running
+            if not is_market_currently_running(market):
+                logger.info(f"  Market {event_slug} is not currently running (may be future or past), skipping")
+                # If market ended and was being monitored, clean it up
+                if event_slug in self.monitored_15m_event_slugs:
+                    logger.info(f"  Market {event_slug} has ended - removing from monitoring")
+                    self.monitored_15m_event_slugs.discard(event_slug)
+                    for token_id in token_ids:
+                        self.monitored_token_ids.discard(token_id)
+                continue
+            
+            # Check if already monitoring - verify both event slug AND tokens are actually monitored
+            if event_slug in self.monitored_15m_event_slugs:
+                # Check if tokens are actually in the monitored set
+                tokens_monitored = any(tid in self.monitored_token_ids for tid in token_ids)
+                if tokens_monitored:
+                    logger.info(f"  Already monitoring event {event_slug} (tokens active), skipping")
+                    continue
+                else:
+                    # Event slug marked but tokens not found - stale entry (e.g., from failed start)
+                    logger.warning(f"  Event {event_slug} marked as monitoring but tokens not found - clearing stale entry")
+                    self.monitored_15m_event_slugs.discard(event_slug)
+                    # Fall through to start monitoring
+            
+            # Check if we're already monitoring any of these tokens (by token ID)
             if any(tid in self.monitored_token_ids for tid in token_ids):
-                logger.info(f"  Already monitoring tokens {token_ids}, skipping")
+                logger.info(f"  Already monitoring some tokens for this market, skipping")
                 continue
             
             # Prepare for monitoring (store event slug and token IDs for tracking)
@@ -199,18 +213,7 @@ class BTCMarketsMonitor:
             
             logger.info(f"Processing 1h market: ID={market_id}, slug={event_slug}, question={question}...")
             
-            # Skip if already monitoring
-            if event_slug in self.monitored_1h_event_slugs:
-                logger.info(f"  Already monitoring event {event_slug}, skipping")
-                continue
-            
-            # Only monitor markets that are currently running (within their actual time window)
-            from agents.polymarket.btc_market_detector import is_market_currently_running
-            if not is_market_currently_running(market):
-                logger.info(f"  Market {event_slug} is not currently running (may be future or past), skipping")
-                continue
-            
-            # Extract token IDs
+            # Extract token IDs first
             token_ids = get_token_ids_from_market(market)
             logger.info(f"  Extracted {len(token_ids)} token IDs: {token_ids}")
             
@@ -218,9 +221,34 @@ class BTCMarketsMonitor:
                 logger.warning(f"  No token IDs found for market {event_slug}")
                 continue
             
-            # Check if we're already monitoring any of these tokens
+            # Only monitor markets that are currently running (within their actual time window)
+            from agents.polymarket.btc_market_detector import is_market_currently_running
+            if not is_market_currently_running(market):
+                logger.info(f"  Market {event_slug} is not currently running (may be future or past), skipping")
+                # If market ended and was being monitored, clean it up
+                if event_slug in self.monitored_1h_event_slugs:
+                    logger.info(f"  Market {event_slug} has ended - removing from monitoring")
+                    self.monitored_1h_event_slugs.discard(event_slug)
+                    for token_id in token_ids:
+                        self.monitored_token_ids.discard(token_id)
+                continue
+            
+            # Check if already monitoring - verify both event slug AND tokens are actually monitored
+            if event_slug in self.monitored_1h_event_slugs:
+                # Check if tokens are actually in the monitored set
+                tokens_monitored = any(tid in self.monitored_token_ids for tid in token_ids)
+                if tokens_monitored:
+                    logger.info(f"  Already monitoring event {event_slug} (tokens active), skipping")
+                    continue
+                else:
+                    # Event slug marked but tokens not found - stale entry (e.g., from failed start)
+                    logger.warning(f"  Event {event_slug} marked as monitoring but tokens not found - clearing stale entry")
+                    self.monitored_1h_event_slugs.discard(event_slug)
+                    # Fall through to start monitoring
+            
+            # Check if we're already monitoring any of these tokens (by token ID)
             if any(tid in self.monitored_token_ids for tid in token_ids):
-                logger.info(f"  Already monitoring tokens {token_ids}, skipping")
+                logger.info(f"  Already monitoring some tokens for this market, skipping")
                 continue
             
             # Prepare for monitoring (store event slug and token IDs for tracking)
