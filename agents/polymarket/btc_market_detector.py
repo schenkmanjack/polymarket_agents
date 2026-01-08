@@ -190,10 +190,60 @@ def get_market_by_event_slug(slug: str) -> Optional[Dict]:
     return None
 
 
+def _parse_datetime_safe(date_str_or_obj) -> Optional[datetime]:
+    """Safely parse a datetime string, handling microsecond precision issues."""
+    if date_str_or_obj is None:
+        return None
+    
+    try:
+        if isinstance(date_str_or_obj, str):
+            # Handle microsecond precision issues
+            date_str = date_str_or_obj.replace("Z", "+00:00")
+            
+            # Fix invalid microsecond precision - Python's fromisoformat expects exactly 0-6 digits
+            if "." in date_str:
+                # Split on decimal point
+                parts = date_str.split(".", 1)
+                if len(parts) == 2:
+                    # Find where timezone starts (+ or -)
+                    decimal_part = parts[1]
+                    tz_pos = -1
+                    for i, char in enumerate(decimal_part):
+                        if char in ['+', '-']:
+                            tz_pos = i
+                            break
+                    
+                    if tz_pos > 0:
+                        # Extract decimal seconds and timezone
+                        seconds_part = decimal_part[:tz_pos]
+                        tz_part = decimal_part[tz_pos:]
+                        
+                        # Normalize to 6 digits: pad if less, truncate if more
+                        if len(seconds_part) > 6:
+                            seconds_part = seconds_part[:6]
+                        elif len(seconds_part) < 6:
+                            seconds_part = seconds_part.ljust(6, '0')
+                        
+                        date_str = parts[0] + "." + seconds_part + tz_part
+            
+            dt = datetime.fromisoformat(date_str)
+        else:
+            dt = date_str_or_obj
+        
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        
+        return dt
+    except Exception as e:
+        logger.debug(f"Error parsing datetime: {e}, input: {date_str_or_obj}")
+        return None
+
+
 def is_market_currently_running(market: Dict) -> bool:
     """
-    Check if market is currently running (between startDate and endDate).
-    More strict than is_market_active - ensures market has actually started.
+    Check if market is currently running (between actual start and end times).
+    For 15-minute markets, uses timestamp from slug (actual window start).
+    For 1-hour markets, uses endDate and calculates start from it.
     
     Args:
         market: Market dict
@@ -203,61 +253,160 @@ def is_market_currently_running(market: Dict) -> bool:
     """
     now_utc = datetime.now(timezone.utc)
     
-    # Check start date - market must have started
-    start_date = market.get("startDate") or market.get("startDateIso")
-    if start_date:
-        try:
-            if isinstance(start_date, str):
-                # Handle microsecond precision issues (truncate to 6 digits)
-                date_str = start_date.replace("Z", "+00:00")
-                # Fix invalid microsecond precision
-                if "." in date_str and "+" in date_str:
-                    parts = date_str.split(".")
-                    if len(parts) == 2:
-                        decimal_part = parts[1].split("+")[0]
-                        if len(decimal_part) > 6:
-                            date_str = parts[0] + "." + decimal_part[:6] + "+" + parts[1].split("+")[1]
-                start_dt = datetime.fromisoformat(date_str)
-            else:
-                start_dt = start_date
-            if start_dt.tzinfo is None:
-                start_dt = start_dt.replace(tzinfo=timezone.utc)
+    # For 15-minute markets, extract actual start time from slug timestamp
+    event_slug = market.get("_event_slug", "")
+    if event_slug and "btc-updown-15m-" in event_slug:
+        # Extract timestamp from slug: btc-updown-15m-{timestamp}
+        timestamp = extract_timestamp_from_slug(event_slug)
+        if timestamp:
+            # Timestamp is the START of the 15-minute window (in UTC)
+            start_dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+            # End is 15 minutes later
+            end_dt = start_dt.replace(second=0, microsecond=0) + timedelta(minutes=15)
             
+            # Check if we're within the actual window
             if now_utc < start_dt:
-                # Market hasn't started yet
-                return False
-        except Exception as e:
-            logger.debug(f"Error parsing start_date: {e}")
-            # If we can't parse, assume it's started
+                return False  # Market hasn't started yet
+            if now_utc >= end_dt:
+                return False  # Market has ended
+            
+            return True
     
-    # Check end date - market must not have ended
+    # For 1-hour markets, use endDate and calculate start (1 hour before)
+    # Or use startDate if it's actually the market start time
     end_date = market.get("endDate") or market.get("endDateIso")
     if end_date:
-        try:
-            if isinstance(end_date, str):
-                # Handle microsecond precision issues (truncate to 6 digits)
-                date_str = end_date.replace("Z", "+00:00")
-                # Fix invalid microsecond precision
-                if "." in date_str and "+" in date_str:
-                    parts = date_str.split(".")
-                    if len(parts) == 2:
-                        decimal_part = parts[1].split("+")[0]
-                        if len(decimal_part) > 6:
-                            date_str = parts[0] + "." + decimal_part[:6] + "+" + parts[1].split("+")[1]
-                end_dt = datetime.fromisoformat(date_str)
-            else:
-                end_dt = end_date
-            if end_dt.tzinfo is None:
-                end_dt = end_dt.replace(tzinfo=timezone.utc)
+        end_dt = _parse_datetime_safe(end_date)
+        if end_dt:
+            # For 1-hour markets, start is 1 hour before end
+            start_dt = end_dt - timedelta(hours=1)
             
+            if now_utc < start_dt:
+                return False  # Market hasn't started yet
             if now_utc >= end_dt:
-                # Market has ended
-                return False
-        except Exception as e:
-            logger.debug(f"Error parsing end_date: {e}")
-            # If we can't parse, assume it's still active
+                return False  # Market has ended
+            
+            return True
+    
+    # Fallback: use startDate/endDate if available
+    start_date = market.get("startDate") or market.get("startDateIso")
+    if start_date:
+        start_dt = _parse_datetime_safe(start_date)
+        if start_dt and now_utc < start_dt:
+            return False
+    
+    if end_date:
+        end_dt = _parse_datetime_safe(end_date)
+        if end_dt and now_utc >= end_dt:
+            return False
     
     return True
+
+
+def is_market_still_trading(market: Dict) -> bool:
+    """
+    Check if market is still actively trading (not resolved).
+    A market can be "currently running" but already resolved (prices at extremes).
+    
+    Args:
+        market: Market dict
+        
+    Returns:
+        True if market appears to still be trading (not resolved)
+    """
+    try:
+        from agents.polymarket.market_finder import get_token_ids_from_market
+        import httpx
+        
+        token_ids = get_token_ids_from_market(market)
+        if not token_ids:
+            logger.debug("No token IDs found for market")
+            return False
+        
+        # Check orderbook for first token to see if market is resolved
+        token_id = token_ids[0]
+        clob_url = f"https://clob.polymarket.com/book?token_id={token_id}"
+        
+        try:
+            response = httpx.get(clob_url, timeout=5.0)
+        except Exception as e:
+            logger.debug(f"HTTP error checking orderbook: {e}")
+            # If we can't check, be conservative and assume it's resolved (skip it)
+            return False
+        
+        if response.status_code != 200:
+            logger.debug(f"Orderbook API returned {response.status_code}")
+            # If we can't check, be conservative and assume it's resolved (skip it)
+            return False
+        
+        try:
+            book = response.json()
+        except Exception as e:
+            logger.debug(f"Error parsing orderbook JSON: {e}")
+            return False
+        
+        bids = book.get("bids", [])
+        asks = book.get("asks", [])
+        
+        if not bids or not asks:
+            logger.debug("No bids or asks in orderbook")
+            return False
+        
+        # Handle different orderbook formats
+        try:
+            if isinstance(bids, list) and len(bids) > 0:
+                if isinstance(bids[0], (list, tuple)) and len(bids[0]) >= 2:
+                    # Format: [[price, size], ...]
+                    best_bid = float(bids[0][0])
+                    best_ask = float(asks[0][0]) if asks and isinstance(asks[0], (list, tuple)) and len(asks[0]) >= 2 else None
+                elif isinstance(bids[0], dict):
+                    # Format: [{"price": "0.01", "size": "..."}, ...] - CLOB API format
+                    best_bid = float(bids[0].get("price", 0))
+                    best_ask = float(asks[0].get("price", 0)) if asks and isinstance(asks[0], dict) else None
+                else:
+                    logger.debug(f"Unexpected bids format: {type(bids[0])}")
+                    return False
+            elif isinstance(bids, dict):
+                # Format: {"price": size, ...}
+                best_bid = float(max(bids.keys())) if bids else None
+                best_ask = float(min(asks.keys())) if asks and isinstance(asks, dict) else None
+            else:
+                logger.debug(f"Unexpected bids type: {type(bids)}")
+                return False
+        except (ValueError, TypeError, IndexError, KeyError) as e:
+            logger.debug(f"Error extracting prices: {e}")
+            return False
+        
+        if best_bid is None or best_ask is None:
+            logger.debug("Could not extract prices from orderbook")
+            return False
+        
+        # Market is resolved if:
+        # 1. Ask price is very low (<= 0.02) - YES side won
+        # 2. Bid price is very high (>= 0.98) - NO side won  
+        # 3. Spread is huge (ask - bid > 0.95) - market resolved
+        spread = best_ask - best_bid
+        
+        if best_ask <= 0.02:
+            # Market resolved - YES side won (ask at 0.01)
+            logger.debug(f"Market resolved: ask at {best_ask} (YES won)")
+            return False
+        elif best_bid >= 0.98:
+            # Market resolved - NO side won (bid at 0.99)
+            logger.debug(f"Market resolved: bid at {best_bid} (NO won)")
+            return False
+        elif spread > 0.95:
+            # Market resolved - huge spread indicates resolution
+            logger.debug(f"Market resolved: huge spread {spread} (bid={best_bid}, ask={best_ask})")
+            return False
+        
+        # Market appears to still be trading
+        logger.debug(f"Market still trading: bid={best_bid}, ask={best_ask}, spread={spread:.4f}")
+        return True
+    except Exception as e:
+        logger.warning(f"Error checking if market is still trading: {e}", exc_info=True)
+        # If we can't check, be conservative and assume it's resolved (skip it)
+        return False
 
 
 def get_latest_btc_15m_market_proactive() -> Optional[Dict]:

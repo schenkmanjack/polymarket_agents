@@ -120,10 +120,10 @@ class BTCMarketsMonitor:
                 logger.info(f"  Already monitoring event {event_slug}, skipping")
                 continue
             
-            # Only monitor markets that are currently running (between startDate and endDate)
+            # Only monitor markets that are currently running (within their actual time window)
             from agents.polymarket.btc_market_detector import is_market_currently_running
             if not is_market_currently_running(market):
-                logger.info(f"  Market {event_slug} is not currently running (may be future or stale), skipping")
+                logger.info(f"  Market {event_slug} is not currently running (may be future or past), skipping")
                 continue
             
             # Extract token IDs
@@ -190,10 +190,10 @@ class BTCMarketsMonitor:
                 logger.info(f"  Already monitoring event {event_slug}, skipping")
                 continue
             
-            # Only monitor markets that are currently running (between startDate and endDate)
+            # Only monitor markets that are currently running (within their actual time window)
             from agents.polymarket.btc_market_detector import is_market_currently_running
             if not is_market_currently_running(market):
-                logger.info(f"  Market {event_slug} is not currently running (may be future or stale), skipping")
+                logger.info(f"  Market {event_slug} is not currently running (may be future or past), skipping")
                 continue
             
             # Extract token IDs
