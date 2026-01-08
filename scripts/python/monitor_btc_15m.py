@@ -101,9 +101,10 @@ class BTC15mMonitor:
                 logger.info(f"  Already monitoring event {event_slug}, skipping")
                 continue
             
-            # Check if market is still active
-            if not is_market_active(market):
-                logger.info(f"  Market {event_slug} is not active, skipping")
+            # Check if market is currently running (between startDate and endDate)
+            from agents.polymarket.btc_market_detector import is_market_currently_running
+            if not is_market_currently_running(market):
+                logger.info(f"  Market {event_slug} is not currently running (may be future or stale), skipping")
                 continue
             
             # Extract token IDs

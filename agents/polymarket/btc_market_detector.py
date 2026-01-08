@@ -1,11 +1,11 @@
 """
-Detector for new BTC updown 15-minute markets.
+Detector for new BTC updown 15-minute and 1-hour markets.
 Uses event slug pattern matching since API filtering might hide these markets.
 """
 import httpx
 import logging
 from typing import List, Optional, Dict
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import re
 
 logger = logging.getLogger(__name__)
@@ -190,13 +190,83 @@ def get_market_by_event_slug(slug: str) -> Optional[Dict]:
     return None
 
 
+def is_market_currently_running(market: Dict) -> bool:
+    """
+    Check if market is currently running (between startDate and endDate).
+    More strict than is_market_active - ensures market has actually started.
+    
+    Args:
+        market: Market dict
+        
+    Returns:
+        True if market is currently in its active window
+    """
+    now_utc = datetime.now(timezone.utc)
+    
+    # Check start date - market must have started
+    start_date = market.get("startDate") or market.get("startDateIso")
+    if start_date:
+        try:
+            if isinstance(start_date, str):
+                # Handle microsecond precision issues (truncate to 6 digits)
+                date_str = start_date.replace("Z", "+00:00")
+                # Fix invalid microsecond precision
+                if "." in date_str and "+" in date_str:
+                    parts = date_str.split(".")
+                    if len(parts) == 2:
+                        decimal_part = parts[1].split("+")[0]
+                        if len(decimal_part) > 6:
+                            date_str = parts[0] + "." + decimal_part[:6] + "+" + parts[1].split("+")[1]
+                start_dt = datetime.fromisoformat(date_str)
+            else:
+                start_dt = start_date
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=timezone.utc)
+            
+            if now_utc < start_dt:
+                # Market hasn't started yet
+                return False
+        except Exception as e:
+            logger.debug(f"Error parsing start_date: {e}")
+            # If we can't parse, assume it's started
+    
+    # Check end date - market must not have ended
+    end_date = market.get("endDate") or market.get("endDateIso")
+    if end_date:
+        try:
+            if isinstance(end_date, str):
+                # Handle microsecond precision issues (truncate to 6 digits)
+                date_str = end_date.replace("Z", "+00:00")
+                # Fix invalid microsecond precision
+                if "." in date_str and "+" in date_str:
+                    parts = date_str.split(".")
+                    if len(parts) == 2:
+                        decimal_part = parts[1].split("+")[0]
+                        if len(decimal_part) > 6:
+                            date_str = parts[0] + "." + decimal_part[:6] + "+" + parts[1].split("+")[1]
+                end_dt = datetime.fromisoformat(date_str)
+            else:
+                end_dt = end_date
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=timezone.utc)
+            
+            if now_utc >= end_dt:
+                # Market has ended
+                return False
+        except Exception as e:
+            logger.debug(f"Error parsing end_date: {e}")
+            # If we can't parse, assume it's still active
+    
+    return True
+
+
 def get_latest_btc_15m_market_proactive() -> Optional[Dict]:
     """
-    Proactive detection: Check future windows first, then current.
-    This catches markets immediately when they're created, not after they've been running.
+    Proactive detection: Prioritize CURRENT window (offset 0), then future windows.
+    Only returns markets that are currently running (between startDate and endDate).
     
     Returns:
-        Market dict for the latest BTC updown 15-minute market, or None
+        Market dict for the CURRENT BTC updown 15-minute market, or None
     """
     import time
     from datetime import datetime, timezone
@@ -208,9 +278,9 @@ def get_latest_btc_15m_market_proactive() -> Optional[Dict]:
     # Round down to nearest 15-minute mark (900 seconds = 15 minutes)
     window_start_timestamp = (current_timestamp // 900) * 900
     
-    # PROACTIVE: Check future windows first [+1, +2, 0, -1, -2]
-    # This prioritizes upcoming markets over old ones
-    for window_offset in [1, 2, 0, -1, -2]:
+    # PRIORITY: Check CURRENT window first (offset 0), then future windows [+1, +2], then past [-1, -2]
+    # This ensures we monitor the market that's actually running RIGHT NOW
+    for window_offset in [0, 1, 2, -1, -2]:
         test_timestamp = window_start_timestamp + (window_offset * 900)
         slug = f"btc-updown-15m-{test_timestamp}"
         
@@ -218,12 +288,13 @@ def get_latest_btc_15m_market_proactive() -> Optional[Dict]:
         market = get_market_by_event_slug(slug)
         
         if market:
-            # Verify it's still active (or will be active soon)
-            if is_market_active(market):
-                logger.info(f"Found active market using proactive slug construction: {slug} (window {window_offset})")
+            # CRITICAL: Only return markets that are CURRENTLY RUNNING
+            # (between startDate and endDate, and we're past startDate)
+            if is_market_currently_running(market):
+                logger.info(f"Found CURRENTLY RUNNING market: {slug} (window {window_offset})")
                 return market
             else:
-                logger.debug(f"Market {slug} found but not active")
+                logger.debug(f"Market {slug} found but not currently running (may be future or past)")
     
     return None
 
@@ -354,4 +425,184 @@ def is_market_active(market: Dict) -> bool:
         return datetime.now(end_dt.tzinfo) < end_dt
     except:
         return True  # Assume active if can't parse
+
+
+# ============================================================================
+# BTC 1-HOUR MARKET DETECTION
+# ============================================================================
+
+def get_market_by_slug(slug: str) -> Optional[Dict]:
+    """
+    Fetch a specific market by slug (works for both 15m and 1h markets).
+    
+    Args:
+        slug: Event slug (e.g., 'bitcoin-up-or-down-january-8-4pm-et')
+    
+    Returns:
+        Market dict or None
+    """
+    events_url = "https://gamma-api.polymarket.com/events"
+    response = httpx.get(events_url, params={"slug": slug, "limit": 1}, timeout=10.0)
+    
+    if response.status_code == 200:
+        events = response.json()
+        if events:
+            event = events[0]
+            markets = event.get("markets", [])
+            if markets:
+                market = markets[0]
+                market_id = market.get("id")
+                
+                # Fetch full market details to ensure we have clobTokenIds
+                if market_id:
+                    markets_url = "https://gamma-api.polymarket.com/markets"
+                    market_response = httpx.get(markets_url, params={"id": market_id, "limit": 1}, timeout=10.0)
+                    if market_response.status_code == 200:
+                        full_markets = market_response.json()
+                        if full_markets:
+                            full_market = full_markets[0]
+                            market.update(full_market)
+                            logger.debug(f"Fetched full market details for ID={market_id}")
+                
+                market["_event_slug"] = event.get("slug")
+                market["_event_title"] = event.get("title")
+                logger.debug(f"Found market via slug {slug}: ID={market.get('id')}, clobTokenIds={market.get('clobTokenIds')}")
+                return market
+    
+    return None
+
+
+def get_latest_btc_1h_market_proactive() -> Optional[Dict]:
+    """
+    Proactive detection for BTC 1-hour markets.
+    Prioritizes CURRENT hour (offset 0), then future hours.
+    Only returns markets that are currently running (between startDate and endDate).
+    
+    Returns:
+        Market dict for the CURRENT BTC updown 1-hour market, or None
+    """
+    now_utc = datetime.now(timezone.utc)
+    
+    # PRIORITY: Check CURRENT hour first (offset 0), then future hours [+1, +2]
+    # This ensures we monitor the market that's actually running RIGHT NOW
+    for hour_offset in [0, 1, 2]:
+        test_time = now_utc + timedelta(hours=hour_offset)
+        
+        # Format: "bitcoin-up-or-down-january-8-4pm-et"
+        month_name = test_time.strftime("%B").lower()  # january, february, etc.
+        day = test_time.day
+        hour_12 = int(test_time.strftime("%I").lstrip("0") or "12")  # 1-12
+        am_pm = test_time.strftime("%p").lower()  # am/pm
+        
+        # Construct slug
+        slug = f"bitcoin-up-or-down-{month_name}-{day}-{hour_12}{am_pm}-et"
+        
+        logger.debug(f"Trying BTC 1h slug for hour {hour_offset}: {slug}")
+        market = get_market_by_slug(slug)
+        
+        if market:
+            # CRITICAL: Only return markets that are CURRENTLY RUNNING
+            # (between startDate and endDate, and we're past startDate)
+            if is_market_currently_running(market):
+                logger.info(f"Found CURRENTLY RUNNING BTC 1h market: {slug} (hour {hour_offset})")
+                return market
+            else:
+                logger.debug(f"Market {slug} found but not currently running (may be future or past)")
+    
+    return None
+
+
+def get_latest_btc_1h_market() -> Optional[Dict]:
+    """
+    Get the most recent BTC 1-hour market.
+    Tries proactive detection first, then falls back to searching.
+    
+    Returns:
+        Market dict for the latest BTC updown 1-hour market, or None
+    """
+    # Try proactive detection first
+    market = get_latest_btc_1h_market_proactive()
+    if market:
+        return market
+    
+    # Fallback: search Events API
+    events_url = "https://gamma-api.polymarket.com/events"
+    response = httpx.get(events_url, params={"active": True, "limit": 500}, timeout=30.0)
+    
+    if response.status_code == 200:
+        events = response.json()
+        
+        # Filter for BTC 1-hour markets
+        btc_1h_events = []
+        for event in events:
+            slug = (event.get("slug") or "").lower()
+            title = (event.get("title") or "").lower()
+            
+            # Check for BTC updown 1-hour pattern
+            is_btc = "bitcoin" in title or "btc" in title or "btc" in slug
+            is_updown = ("up" in title and "down" in title) or "up-or-down" in slug
+            
+            # Check for 1-hour pattern (hourly time windows like "4pm-5pm" or "4-5pm")
+            is_1h = (
+                "up-or-down" in slug or
+                re.search(r'\d{1,2}(pm|am)-\d{1,2}(pm|am)', title) or
+                re.search(r'\d{1,2}-\d{1,2}(pm|am)', title)
+            )
+            
+            if is_btc and is_updown and is_1h:
+                btc_1h_events.append(event)
+        
+        if btc_1h_events:
+            # Sort by ID (higher = newer) and get latest
+            latest_event = max(btc_1h_events, key=lambda e: int(e.get("id", 0)))
+            markets = latest_event.get("markets", [])
+            if markets:
+                market = markets[0]
+                market["_event_slug"] = latest_event.get("slug")
+                market["_event_title"] = latest_event.get("title")
+                logger.info(f"Found latest BTC 1h market via Events API: {latest_event.get('slug')}")
+                return market
+    
+    return None
+
+
+def get_all_active_btc_1h_markets() -> List[Dict]:
+    """
+    Get all active BTC 1-hour markets.
+    
+    Returns:
+        List of market dicts for active BTC updown 1-hour markets
+    """
+    events_url = "https://gamma-api.polymarket.com/events"
+    response = httpx.get(events_url, params={"active": True, "limit": 500}, timeout=30.0)
+    
+    if response.status_code != 200:
+        return []
+    
+    events = response.json()
+    
+    all_markets = []
+    for event in events:
+        slug = (event.get("slug") or "").lower()
+        title = (event.get("title") or "").lower()
+        
+        # Check for BTC updown 1-hour pattern
+        is_btc = "bitcoin" in title or "btc" in title or "btc" in slug
+        is_updown = ("up" in title and "down" in title) or "up-or-down" in slug
+        
+        # Check for 1-hour pattern
+        is_1h = (
+            "up-or-down" in slug or
+            re.search(r'\d{1,2}(pm|am)-\d{1,2}(pm|am)', title) or
+            re.search(r'\d{1,2}-\d{1,2}(pm|am)', title)
+        )
+        
+        if is_btc and is_updown and is_1h:
+            markets = event.get("markets", [])
+            for market in markets:
+                market["_event_slug"] = event.get("slug")
+                market["_event_title"] = event.get("title")
+                all_markets.append(market)
+    
+    return all_markets
 
