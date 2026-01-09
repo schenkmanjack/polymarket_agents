@@ -150,11 +150,16 @@ class BTC1HourOrderbookSnapshot(Base):
     market_id = Column(String, nullable=False, index=True)  # Polymarket market ID (required)
     timestamp = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
     
-    # Best bid/ask
+    # Best bid/ask (from orderbook - may be stale/wide spread)
     best_bid_price = Column(Float, nullable=True)
     best_bid_size = Column(Float, nullable=True)
     best_ask_price = Column(Float, nullable=True)
     best_ask_size = Column(Float, nullable=True)
+    
+    # Realistic prices (actual trading prices - avoids stale orderbook issue)
+    outcome_price = Column(Float, nullable=True, index=True)  # From Gamma API (what website shows)
+    last_trade_price = Column(Float, nullable=True, index=True)  # From CLOB API (most recent trade)
+    market_price = Column(Float, nullable=True, index=True)  # Calculated: outcome_price > last_trade_price > mid_price
     
     # Spread metrics
     spread = Column(Float, nullable=True)
@@ -257,10 +262,14 @@ class OrderbookDatabase:
         # Create btc_15_min_table if requested
         if self.use_btc_15_min_table:
             BTC15MinOrderbookSnapshot.__table__.create(self.engine, checkfirst=True)
+            # Migrate existing table to add new columns if they don't exist
+            self._migrate_btc_15_min_table()
         
         # Create btc_1_hour_table if requested
         if self.use_btc_1_hour_table:
             BTC1HourOrderbookSnapshot.__table__.create(self.engine, checkfirst=True)
+            # Migrate existing table to add new columns if they don't exist
+            self._migrate_btc_1_hour_table()
         # Per-table locks for creation (prevents race conditions)
         self._table_locks = {}
     
@@ -321,6 +330,112 @@ class OrderbookDatabase:
                 logger.info(f"✓ Migration complete for {table_name}")
             else:
                 logger.debug(f"Table {table_name} already has all required columns")
+        except Exception as e:
+            logger.warning(f"Migration check failed (non-critical): {e}")
+            # Don't raise - allow script to continue
+    
+    def _migrate_btc_15_min_table(self):
+        """Add missing realistic price columns to btc_15_min_table if they don't exist (migration)."""
+        from sqlalchemy import inspect
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        try:
+            inspector = inspect(self.engine)
+            table_name = "btc_15_min_table"
+            
+            if table_name not in inspector.get_table_names():
+                logger.debug(f"Table {table_name} doesn't exist yet, will be created with all columns")
+                return
+            
+            # Get existing columns
+            existing_columns = [col['name'] for col in inspector.get_columns(table_name)]
+            columns_to_add = []
+            
+            # Check which realistic price columns are missing
+            if 'outcome_price' not in existing_columns:
+                columns_to_add.append('outcome_price')
+            if 'last_trade_price' not in existing_columns:
+                columns_to_add.append('last_trade_price')
+            if 'market_price' not in existing_columns:
+                columns_to_add.append('market_price')
+            
+            # Add missing columns
+            if columns_to_add:
+                logger.info(f"Migrating {table_name}: Adding {len(columns_to_add)} realistic price column(s)...")
+                with self.engine.begin() as conn:
+                    for col_name in columns_to_add:
+                        try:
+                            # PostgreSQL uses DOUBLE PRECISION, SQLite uses REAL
+                            if 'postgresql' in str(self.engine.url).lower():
+                                conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN {col_name} DOUBLE PRECISION'))
+                            else:
+                                conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN {col_name} REAL'))
+                            
+                            logger.info(f"  ✓ Added column: {col_name}")
+                        except Exception as e:
+                            error_str = str(e).lower()
+                            if 'duplicate' in error_str or 'already exists' in error_str or 'duplicate column' in error_str:
+                                logger.debug(f"  Column {col_name} already exists (skipping)")
+                            else:
+                                logger.warning(f"  Failed to add column {col_name}: {e}")
+                
+                logger.info(f"✓ Migration complete for {table_name}")
+            else:
+                logger.debug(f"Table {table_name} already has all realistic price columns")
+        except Exception as e:
+            logger.warning(f"Migration check failed (non-critical): {e}")
+            # Don't raise - allow script to continue
+    
+    def _migrate_btc_1_hour_table(self):
+        """Add missing realistic price columns to btc_1_hour_table if they don't exist (migration)."""
+        from sqlalchemy import inspect
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        try:
+            inspector = inspect(self.engine)
+            table_name = "btc_1_hour_table"
+            
+            if table_name not in inspector.get_table_names():
+                logger.debug(f"Table {table_name} doesn't exist yet, will be created with all columns")
+                return
+            
+            # Get existing columns
+            existing_columns = [col['name'] for col in inspector.get_columns(table_name)]
+            columns_to_add = []
+            
+            # Check which realistic price columns are missing
+            if 'outcome_price' not in existing_columns:
+                columns_to_add.append('outcome_price')
+            if 'last_trade_price' not in existing_columns:
+                columns_to_add.append('last_trade_price')
+            if 'market_price' not in existing_columns:
+                columns_to_add.append('market_price')
+            
+            # Add missing columns
+            if columns_to_add:
+                logger.info(f"Migrating {table_name}: Adding {len(columns_to_add)} realistic price column(s)...")
+                with self.engine.begin() as conn:
+                    for col_name in columns_to_add:
+                        try:
+                            # PostgreSQL uses DOUBLE PRECISION, SQLite uses REAL
+                            if 'postgresql' in str(self.engine.url).lower():
+                                conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN {col_name} DOUBLE PRECISION'))
+                            else:
+                                conn.execute(text(f'ALTER TABLE {table_name} ADD COLUMN {col_name} REAL'))
+                            
+                            logger.info(f"  ✓ Added column: {col_name}")
+                        except Exception as e:
+                            error_str = str(e).lower()
+                            if 'duplicate' in error_str or 'already exists' in error_str or 'duplicate column' in error_str:
+                                logger.debug(f"  Column {col_name} already exists (skipping)")
+                            else:
+                                logger.warning(f"  Failed to add column {col_name}: {e}")
+                
+                logger.info(f"✓ Migration complete for {table_name}")
+            else:
+                logger.debug(f"Table {table_name} already has all realistic price columns")
         except Exception as e:
             logger.warning(f"Migration check failed (non-critical): {e}")
             # Don't raise - allow script to continue
@@ -588,6 +703,25 @@ class OrderbookDatabase:
                 time_delta = market_end_date - current_timestamp
                 time_remaining_seconds = time_delta.total_seconds()
             
+            # Extract realistic prices from metadata (if available)
+            outcome_price = None
+            last_trade_price = None
+            market_price = None
+            if metadata:
+                outcome_price = metadata.get("outcome_price")
+                last_trade_price = metadata.get("last_trade_price")
+                market_price = metadata.get("market_price")
+            
+            # Ensure realistic prices are in metadata for JSON storage
+            if metadata is None:
+                metadata = {}
+            if outcome_price is not None:
+                metadata["outcome_price"] = outcome_price
+            if last_trade_price is not None:
+                metadata["last_trade_price"] = last_trade_price
+            if market_price is not None:
+                metadata["market_price"] = market_price
+            
             # Create snapshot with appropriate fields
             snapshot_data = {
                 "token_id": token_id,
@@ -597,6 +731,10 @@ class OrderbookDatabase:
                 "best_bid_size": best_bid_size,
                 "best_ask_price": best_ask_price,
                 "best_ask_size": best_ask_size,
+                # Realistic prices (dedicated columns for easy querying)
+                "outcome_price": outcome_price,
+                "last_trade_price": last_trade_price,
+                "market_price": market_price,
                 "spread": spread,
                 "spread_bps": spread_bps,
                 "bids": bids,

@@ -271,20 +271,6 @@ class OrderbookLogger:
                 elif "ethereum" in question_lower or "eth" in question_lower:
                     asset_type = "ETH"
             
-            # Save to database
-            snapshot = self.db.save_snapshot(
-                token_id=token_id,
-                bids=bids,
-                asks=asks,
-                market_id=market_meta.get("market_id"),
-                market_question=market_meta.get("market_question"),
-                outcome=market_meta.get("outcome"),
-                metadata={"source": "rtds", "raw_data": orderbook_data},
-                market_start_date=market_meta.get("market_start_date"),
-                market_end_date=market_meta.get("market_end_date"),
-                asset_type=asset_type,
-            )
-            
             # Get market info for outcome_price
             market_meta = self.market_info.get(token_id, {})
             outcome_price = market_meta.get("outcome_price")
@@ -308,6 +294,29 @@ class OrderbookLogger:
                 best_ask = asks[0][0] if asks else None
                 if best_bid and best_ask:
                     market_price = (best_bid + best_ask) / 2
+            
+            # Prepare metadata with realistic prices
+            metadata = {
+                "source": "rtds",
+                "raw_data": orderbook_data,
+                "outcome_price": outcome_price,  # From Gamma API (what website shows)
+                "last_trade_price": last_trade_price,  # From CLOB API (most recent trade)
+                "market_price": market_price,  # Calculated: outcome_price > last_trade_price > mid_price
+            }
+            
+            # Save to database
+            snapshot = self.db.save_snapshot(
+                token_id=token_id,
+                bids=bids,
+                asks=asks,
+                market_id=market_meta.get("market_id"),
+                market_question=market_meta.get("market_question"),
+                outcome=market_meta.get("outcome"),
+                metadata=metadata,
+                market_start_date=market_meta.get("market_start_date"),
+                market_end_date=market_meta.get("market_end_date"),
+                asset_type=asset_type,
+            )
             
             # Log periodically (every 10th update) to avoid log spam
             self._update_count[token_id] = self._update_count.get(token_id, 0) + 1

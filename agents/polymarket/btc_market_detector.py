@@ -621,10 +621,33 @@ def get_market_by_slug(slug: str) -> Optional[Dict]:
     return None
 
 
+def _construct_1h_slug_from_utc(utc_time: datetime) -> str:
+    """
+    Construct 1-hour market slug from UTC time (similar to 15-minute timestamp approach).
+    Converts UTC to ET and formats as human-readable slug.
+    
+    Args:
+        utc_time: UTC datetime
+        
+    Returns:
+        Slug string like "bitcoin-up-or-down-january-8-7pm-et"
+    """
+    import pytz
+    et_tz = pytz.timezone("US/Eastern")
+    et_time = utc_time.astimezone(et_tz)
+    
+    month_name = et_time.strftime("%B").lower()
+    day = et_time.day
+    hour_12 = int(et_time.strftime("%I").lstrip("0") or "12")
+    am_pm = et_time.strftime("%p").lower()
+    
+    return f"bitcoin-up-or-down-{month_name}-{day}-{hour_12}{am_pm}-et"
+
+
 def get_latest_btc_1h_market_proactive() -> Optional[Dict]:
     """
-    Proactive detection for BTC 1-hour markets.
-    Prioritizes CURRENT hour (offset 0), then future hours.
+    Proactive detection for BTC 1-hour markets (similar strategy to 15-minute markets).
+    Calculates hour windows and tries offsets, prioritizing CURRENT hour.
     Only returns markets that are currently running (between startDate and endDate).
     
     Returns:
@@ -632,28 +655,26 @@ def get_latest_btc_1h_market_proactive() -> Optional[Dict]:
     """
     now_utc = datetime.now(timezone.utc)
     
-    # PRIORITY: Check CURRENT hour first (offset 0), then future hours [+1, +2]
+    # Round down to nearest hour (like 15-minute rounds to 15-minute marks)
+    hour_start_utc = now_utc.replace(minute=0, second=0, microsecond=0)
+    
+    # PRIORITY: Check CURRENT hour first (offset 0), then future hours [+1, +2], then past [-1]
     # This ensures we monitor the market that's actually running RIGHT NOW
-    for hour_offset in [0, 1, 2]:
-        test_time = now_utc + timedelta(hours=hour_offset)
+    # Similar to 15-minute markets which check [0, 1, 2, -1, -2] windows
+    for hour_offset in [0, 1, 2, -1]:
+        test_time_utc = hour_start_utc + timedelta(hours=hour_offset)
         
-        # Format: "bitcoin-up-or-down-january-8-4pm-et"
-        month_name = test_time.strftime("%B").lower()  # january, february, etc.
-        day = test_time.day
-        hour_12 = int(test_time.strftime("%I").lstrip("0") or "12")  # 1-12
-        am_pm = test_time.strftime("%p").lower()  # am/pm
+        # Construct slug from UTC time (handles timezone conversion internally)
+        slug = _construct_1h_slug_from_utc(test_time_utc)
         
-        # Construct slug
-        slug = f"bitcoin-up-or-down-{month_name}-{day}-{hour_12}{am_pm}-et"
-        
-        logger.debug(f"Trying BTC 1h slug for hour {hour_offset}: {slug}")
+        logger.debug(f"Trying BTC 1h slug for hour offset {hour_offset}: {slug}")
         market = get_market_by_slug(slug)
         
         if market:
             # CRITICAL: Only return markets that are CURRENTLY RUNNING
             # (between startDate and endDate, and we're past startDate)
             if is_market_currently_running(market):
-                logger.info(f"Found CURRENTLY RUNNING BTC 1h market: {slug} (hour {hour_offset})")
+                logger.info(f"Found CURRENTLY RUNNING BTC 1h market: {slug} (hour offset {hour_offset})")
                 return market
             else:
                 logger.debug(f"Market {slug} found but not currently running (may be future or past)")
