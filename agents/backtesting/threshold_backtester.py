@@ -17,6 +17,17 @@ import numpy as np
 import pandas as pd
 
 from agents.backtesting.market_fetcher import HistoricalMarketFetcher
+from agents.backtesting.backtesting_utils import (
+    parse_market_dates,
+    enrich_market_from_api,
+    parse_outcome_price,
+    group_snapshots_by_outcome,
+    get_highest_bid_from_orderbook,
+    get_lowest_ask_from_orderbook,
+    calculate_metrics,
+    get_markets_with_orderbooks as get_markets_with_orderbooks_util,
+    walk_orderbook_upward_from_bid,
+)
 from agents.polymarket.orderbook_db import OrderbookDatabase
 from agents.polymarket.orderbook_query import OrderbookQuery
 
@@ -28,17 +39,32 @@ class ThresholdBacktester:
     Backtest threshold-based strategy: buy when one side reaches threshold.
     
     For each market:
-    1. Monitor YES and NO best_ask prices at every snapshot
-    2. When one side reaches threshold, place limit buy at threshold + margin
-    3. Check if limit order would fill (limit_price >= best_ask at some point)
+    1. Monitor YES and NO highest bid prices from bids column at every snapshot
+    2. When one side reaches threshold, place limit BID order at threshold + margin
+    3. Check if BID order would fill (bid_price >= lowest_ask and bid_price >= highest_bid)
     4. Calculate ROI based on outcome prices
     """
     
-    def __init__(self, proxy: Optional[str] = None):
-        """Initialize threshold backtester."""
+    def __init__(self, proxy: Optional[str] = None, use_15m_table: bool = True, use_1h_table: bool = True):
+        """
+        Initialize threshold backtester.
+        
+        Args:
+            proxy: Optional proxy URL for API calls
+            use_15m_table: If True, query btc_15_min_table (default: True)
+            use_1h_table: If True, query btc_1_hour_table (default: True)
+        """
         self.market_fetcher = HistoricalMarketFetcher(proxy=proxy)
-        self.orderbook_db = OrderbookDatabase(use_btc_eth_table=True)
-        self.orderbook_query = OrderbookQuery(db=self.orderbook_db)
+        self.use_15m_table = use_15m_table
+        self.use_1h_table = use_1h_table
+        
+        # Initialize database connections for the tables we'll use
+        self.orderbook_db_15m = OrderbookDatabase(use_btc_15_min_table=True) if use_15m_table else None
+        self.orderbook_db_1h = OrderbookDatabase(use_btc_1_hour_table=True) if use_1h_table else None
+        
+        # For querying snapshots, we'll use the appropriate db based on market type
+        # Default to 15m table for OrderbookQuery (will be overridden per-market)
+        self.orderbook_query = OrderbookQuery(db=self.orderbook_db_15m or self.orderbook_db_1h)
     
     def get_markets_with_orderbooks(
         self,
@@ -46,82 +72,17 @@ class ThresholdBacktester:
         end_date: Optional[datetime] = None,
         max_markets: Optional[int] = None
     ) -> List[Dict]:
-        """Get markets that have orderbook data recorded."""
-        from sqlalchemy import text
-        
-        db = self.orderbook_db
-        markets_by_id = {}
-        
-        with db.get_session() as session:
-            query = """
-                SELECT market_id,
-                       COUNT(*) as snapshot_count,
-                       MIN(timestamp) as first_snapshot,
-                       MAX(timestamp) as last_snapshot
-                FROM btc_eth_table
-            """
-            
-            conditions = []
-            if start_date:
-                conditions.append(f"timestamp >= '{start_date.isoformat()}'")
-            if end_date:
-                conditions.append(f"timestamp <= '{end_date.isoformat()}'")
-            
-            if conditions:
-                query += " WHERE " + " AND ".join(conditions)
-            
-            query += " GROUP BY market_id ORDER BY first_snapshot"
-            
-            result = session.execute(text(query))
-            
-            for row in result:
-                market_id = str(row[0])
-                snapshot_count = row[1]
-                first_snapshot = row[2]
-                last_snapshot = row[3]
-                
-                markets_by_id[market_id] = {
-                    "id": market_id,
-                    "first_snapshot": first_snapshot,
-                    "last_snapshot": last_snapshot,
-                    "_snapshot_count": snapshot_count,
-                }
-        
-        if not markets_by_id:
-            logger.warning("No markets with orderbook data found in database")
-            return []
-        
-        # Enrich with market data from API
-        markets = []
-        for market_id, market_data in markets_by_id.items():
-            try:
-                import httpx
-                from agents.utils.proxy_config import get_proxy_dict
-                url = f"{self.market_fetcher.gamma_markets_endpoint}/{market_id}"
-                proxies = get_proxy_dict()
-                response = httpx.get(url, proxies=proxies, timeout=10.0)
-                if response.status_code == 200:
-                    market_info = response.json()
-                    if isinstance(market_info, list) and len(market_info) > 0:
-                        market_info = market_info[0]
-                    market_data.update(market_info)
-            except Exception as e:
-                logger.debug(f"Could not fetch market {market_id} details: {e}")
-            
-            market_data["_market_start_time"] = market_data["first_snapshot"]
-            markets.append(market_data)
-        
-        markets.sort(key=lambda m: m.get("_market_start_time", datetime.min.replace(tzinfo=timezone.utc)))
-        
-        if start_date:
-            markets = [m for m in markets if m.get("_market_start_time", datetime.min.replace(tzinfo=timezone.utc)) >= start_date]
-        if end_date:
-            markets = [m for m in markets if m.get("_market_start_time", datetime.min.replace(tzinfo=timezone.utc)) <= end_date]
-        if max_markets:
-            markets = markets[:max_markets]
-        
-        logger.info(f"Found {len(markets)} markets with orderbook data")
-        return markets
+        """Get markets that have orderbook data recorded from btc_15_min_table and/or btc_1_hour_table."""
+        return get_markets_with_orderbooks_util(
+            use_15m_table=self.use_15m_table,
+            use_1h_table=self.use_1h_table,
+            orderbook_db_15m=self.orderbook_db_15m,
+            orderbook_db_1h=self.orderbook_db_1h,
+            market_fetcher=self.market_fetcher,
+            start_date=start_date,
+            end_date=end_date,
+            max_markets=max_markets
+        )
     
     def process_market(
         self,
@@ -171,8 +132,20 @@ class ThresholdBacktester:
             except Exception as e:
                 logger.debug(f"Could not parse endDate: {e}")
         
+        # Determine which database to use based on market type
+        market_type = market.get("_market_type", "15m")
+        if market_type == "1h" and self.orderbook_db_1h:
+            # Use 1-hour table
+            query_db = OrderbookQuery(db=self.orderbook_db_1h)
+        elif market_type == "15m" and self.orderbook_db_15m:
+            # Use 15-minute table
+            query_db = OrderbookQuery(db=self.orderbook_db_15m)
+        else:
+            # Fallback to default
+            query_db = self.orderbook_query
+        
         # Get all snapshots for this market, sorted by timestamp
-        snapshots = self.orderbook_query.get_snapshots(
+        snapshots = query_db.get_snapshots(
             market_id=market_id,
             start_time=market_start,  # Only get snapshots from market start
             end_time=market_end,  # Only get snapshots until market end
@@ -202,68 +175,55 @@ class ThresholdBacktester:
             return None
         
         # Group snapshots by outcome (Outcome 1 = YES/up, Outcome 2 = NO/down)
-        outcome1_snapshots = []
-        outcome2_snapshots = []
+        yes_snapshots, no_snapshots = group_snapshots_by_outcome(snapshots)
         
-        for snapshot in snapshots:
-            outcome = snapshot.outcome or ""
-            outcome_lower = outcome.lower()
-            if "outcome 1" in outcome_lower or outcome == "1":
-                outcome1_snapshots.append(snapshot)
-            elif "outcome 2" in outcome_lower or outcome == "2":
-                outcome2_snapshots.append(snapshot)
-            elif "yes" in outcome_lower:
-                outcome1_snapshots.append(snapshot)  # Fallback: YES = Outcome 1
-            elif "no" in outcome_lower:
-                outcome2_snapshots.append(snapshot)  # Fallback: NO = Outcome 2
-        
-        if not outcome1_snapshots or not outcome2_snapshots:
+        if not yes_snapshots or not no_snapshots:
             logger.debug(f"Market {market_id}: Missing Outcome 1 or Outcome 2 snapshots")
             return None
         
-        # For BTC markets: Outcome 1 = YES (up), Outcome 2 = NO (down)
-        yes_snapshots = outcome1_snapshots
-        no_snapshots = outcome2_snapshots
-        
-        # Monitor both sides: check when threshold is reached
+        # Monitor both sides: check when threshold is reached using HIGHEST BID from bids column
         trigger_side = None
         trigger_time = None
         trigger_price = None
         
-        # Check YES side
+        # Check YES side - trigger when highest bid >= threshold
         for snapshot in yes_snapshots:
-            if snapshot.best_ask_price and snapshot.best_ask_price >= threshold:
+            highest_bid = get_highest_bid_from_orderbook(snapshot)
+            if highest_bid is not None and highest_bid >= threshold:
                 trigger_side = "YES"
                 trigger_time = snapshot.timestamp
-                trigger_price = snapshot.best_ask_price
+                trigger_price = highest_bid
                 break
         
-        # Check NO side (only if YES didn't trigger)
+        # Check NO side (only if YES didn't trigger) - trigger when highest bid >= threshold
         if trigger_side is None:
             for snapshot in no_snapshots:
-                if snapshot.best_ask_price and snapshot.best_ask_price >= threshold:
+                highest_bid = get_highest_bid_from_orderbook(snapshot)
+                if highest_bid is not None and highest_bid >= threshold:
                     trigger_side = "NO"
                     trigger_time = snapshot.timestamp
-                    trigger_price = snapshot.best_ask_price
+                    trigger_price = highest_bid
                     break
         
         if trigger_side is None:
             return None  # Threshold never reached
         
-        # Calculate limit order price
-        limit_price = threshold + margin
-        if limit_price > 0.99:
-            limit_price = 0.99  # Cap at 99%
+        # Calculate BID order price (we're buying/placing a bid order)
+        bid_price = threshold + margin
+        if bid_price > 0.99:
+            bid_price = 0.99  # Cap at 99%
         
-        # Determine which token to buy
+        # Determine which token to place bid order on
         if trigger_side == "YES":
             buy_token_snapshots = yes_snapshots
         else:
             buy_token_snapshots = no_snapshots
         
-        # Check if limit order would fill
-        # For low margins, use a time window (e.g., 1 minute) to be more realistic
-        # For high margins, order likely fills immediately
+        # Check if BID order would fill
+        # Conditions:
+        # 1. threshold + margin (our bid price) should NOT be less than the lowest ask (i.e., >= lowest_ask)
+        # 2. Our bid should be >= some ask price (so we can buy from someone)
+        # 3. Our bid should be the highest bid (or would get filled, meaning no other bidder outcompetes us)
         order_filled = False
         fill_time = None
         
@@ -277,14 +237,53 @@ class ThresholdBacktester:
         
         fill_deadline = trigger_time + fill_window
         
+        # Skip a few timesteps after trigger to check if order fills
+        # Start checking after trigger (not immediately)
         for snapshot in buy_token_snapshots:
-            if snapshot.timestamp < trigger_time:
-                continue  # Only check after trigger
+            if snapshot.timestamp <= trigger_time:
+                continue  # Skip trigger snapshot and earlier
             
             if snapshot.timestamp > fill_deadline:
                 break  # Past fill window
             
-            if snapshot.best_ask_price and snapshot.best_ask_price <= limit_price:
+            # Get bids and asks from orderbook
+            bids = snapshot.bids if hasattr(snapshot, 'bids') and snapshot.bids else []
+            asks = snapshot.asks if hasattr(snapshot, 'asks') and snapshot.asks else []
+            
+            if not isinstance(bids, list) or len(bids) == 0:
+                continue
+            if not isinstance(asks, list) or len(asks) == 0:
+                continue
+            
+            # Get lowest ask price
+            lowest_ask = get_lowest_ask_from_orderbook(snapshot)
+            
+            if lowest_ask is None:
+                continue
+            
+            # Condition 1: Our bid price should NOT be less than the lowest ask
+            # (i.e., threshold + margin >= lowest_ask)
+            if bid_price < lowest_ask:
+                continue  # Our bid is too low, skip
+            
+            # Condition 2: Our bid should be >= some ask price (so we can buy from someone)
+            if bid_price < lowest_ask:
+                continue  # Already checked above, but double-check
+            
+            # Condition 3: Our bid should be the highest bid (or would get filled)
+            # Get highest bid from orderbook
+            highest_bid = get_highest_bid_from_orderbook(snapshot)
+            
+            if highest_bid is None:
+                continue
+            
+            # Check if order fills:
+            # - Our bid >= lowest ask (we can buy)
+            # - Our bid is the highest bid (or at least competitive - if there's a higher bid, 
+            #   we'd still get filled if there's enough ask volume at prices <= our bid)
+            # For simplicity, check if our bid >= highest bid (we're the highest) OR
+            # if our bid >= lowest ask (we'd get filled even if not highest, as long as we're competitive)
+            if bid_price >= highest_bid or bid_price >= lowest_ask:
                 order_filled = True
                 fill_time = snapshot.timestamp
                 break
@@ -292,62 +291,20 @@ class ThresholdBacktester:
         if not order_filled:
             return None  # Order never filled
         
-        # Get outcome prices (can be dict, list, or JSON string)
-        outcome_prices_raw = market.get("outcomePrices", {})
-        if not outcome_prices_raw:
-            # Try to fetch from API
-            try:
-                import httpx
-                from agents.utils.proxy_config import get_proxy_dict
-                url = f"{self.market_fetcher.gamma_markets_endpoint}/{market_id}"
-                proxies = get_proxy_dict()
-                response = httpx.get(url, proxies=proxies, timeout=10.0)
-                if response.status_code == 200:
-                    market_info = response.json()
-                    if isinstance(market_info, list) and len(market_info) > 0:
-                        market_info = market_info[0]
-                    outcome_prices_raw = market_info.get("outcomePrices", {})
-            except Exception as e:
-                logger.debug(f"Could not fetch outcome prices for market {market_id}: {e}")
+        # Parse outcome price
+        outcome_price = parse_outcome_price(
+            market.get("outcomePrices", {}),
+            trigger_side,
+            market_id=market_id,
+            market_fetcher=self.market_fetcher
+        )
         
-        if not outcome_prices_raw:
+        if outcome_price is None:
             return None
         
-        # Parse if it's a JSON string
-        if isinstance(outcome_prices_raw, str):
-            try:
-                import json
-                outcome_prices_raw = json.loads(outcome_prices_raw)
-            except (json.JSONDecodeError, ValueError):
-                logger.debug(f"Could not parse outcomePrices JSON string: {outcome_prices_raw}")
-                return None
-        
-        # Parse outcome prices (can be list ["0", "1"] or dict {"Yes": 1, "No": 0})
-        outcome_price = 0.0
-        if isinstance(outcome_prices_raw, list) and len(outcome_prices_raw) >= 2:
-            # List format: [outcome1_price, outcome2_price]
-            # Outcome 1 = YES, Outcome 2 = NO
-            if trigger_side == "YES":
-                try:
-                    outcome_price = float(outcome_prices_raw[0])
-                except (ValueError, TypeError):
-                    outcome_price = 0.0
-            else:  # NO
-                try:
-                    outcome_price = float(outcome_prices_raw[1])
-                except (ValueError, TypeError):
-                    outcome_price = 0.0
-        elif isinstance(outcome_prices_raw, dict):
-            # Dict format: {"Yes": 1, "No": 0}
-            if trigger_side == "YES":
-                outcome_price = outcome_prices_raw.get("Yes", 0.0)
-            else:
-                outcome_price = outcome_prices_raw.get("No", 0.0)
-        else:
-            return None
-        
-        # ROI = (outcome_price - limit_price) / limit_price
-        roi = (outcome_price - limit_price) / limit_price if limit_price > 0 else 0.0
+        # ROI = (outcome_price - bid_price) / bid_price
+        # We place a BID order at bid_price, so if outcome_price > bid_price, we profit
+        roi = (outcome_price - bid_price) / bid_price if bid_price > 0 else 0.0
         
         # Determine win/loss
         is_win = roi > 0
@@ -359,7 +316,7 @@ class ThresholdBacktester:
             "trigger_side": trigger_side,
             "trigger_time": trigger_time,
             "trigger_price": trigger_price,
-            "limit_price": limit_price,
+            "limit_price": bid_price,  # This is the bid price we place
             "fill_time": fill_time,
             "outcome_price": outcome_price,
             "roi": roi,
@@ -378,34 +335,22 @@ class ThresholdBacktester:
             return None
         
         # Get market active period (startDate to endDate)
-        market_start = None
-        market_end = None
+        market_start, market_end = parse_market_dates(market)
         
-        start_date_str = market.get("startDate") or market.get("startDateIso")
-        end_date_str = market.get("endDate") or market.get("endDateIso")
-        
-        if start_date_str:
-            try:
-                if isinstance(start_date_str, str):
-                    start_str = start_date_str.replace("Z", "+00:00")
-                    market_start = datetime.fromisoformat(start_str)
-                    if market_start.tzinfo is None:
-                        market_start = market_start.replace(tzinfo=timezone.utc)
-            except Exception as e:
-                logger.debug(f"Could not parse startDate: {e}")
-        
-        if end_date_str:
-            try:
-                if isinstance(end_date_str, str):
-                    end_str = end_date_str.replace("Z", "+00:00")
-                    market_end = datetime.fromisoformat(end_str)
-                    if market_end.tzinfo is None:
-                        market_end = market_end.replace(tzinfo=timezone.utc)
-            except Exception as e:
-                logger.debug(f"Could not parse endDate: {e}")
+        # Determine which database to use based on market type
+        market_type = market.get("_market_type", "15m")
+        if market_type == "1h" and self.orderbook_db_1h:
+            # Use 1-hour table
+            query_db = OrderbookQuery(db=self.orderbook_db_1h)
+        elif market_type in ("15m", "both") and self.orderbook_db_15m:
+            # Use 15-minute table (or prefer 15m if found in both)
+            query_db = OrderbookQuery(db=self.orderbook_db_15m)
+        else:
+            # Fallback to default
+            query_db = self.orderbook_query
         
         # Get all snapshots for this market (only during active period)
-        snapshots = self.orderbook_query.get_snapshots(
+        snapshots = query_db.get_snapshots(
             market_id=market_id,
             start_time=market_start,  # Only get snapshots from market start
             end_time=market_end,  # Only get snapshots until market end
@@ -434,45 +379,18 @@ class ThresholdBacktester:
             return None
         
         # Group snapshots by outcome (Outcome 1 = YES/up, Outcome 2 = NO/down)
-        outcome1_snapshots = []
-        outcome2_snapshots = []
+        yes_snapshots, no_snapshots = group_snapshots_by_outcome(snapshots)
         
-        for snapshot in snapshots:
-            outcome = snapshot.outcome or ""
-            outcome_lower = outcome.lower()
-            if "outcome 1" in outcome_lower or outcome == "1":
-                outcome1_snapshots.append(snapshot)
-            elif "outcome 2" in outcome_lower or outcome == "2":
-                outcome2_snapshots.append(snapshot)
-            elif "yes" in outcome_lower:
-                outcome1_snapshots.append(snapshot)  # Fallback: YES = Outcome 1
-            elif "no" in outcome_lower:
-                outcome2_snapshots.append(snapshot)  # Fallback: NO = Outcome 2
-        
-        if not outcome1_snapshots or not outcome2_snapshots:
+        if not yes_snapshots or not no_snapshots:
             return None
-        
-        # For BTC markets: Outcome 1 = YES (up), Outcome 2 = NO (down)
-        yes_snapshots = outcome1_snapshots
-        no_snapshots = outcome2_snapshots
         
         # Get outcome prices (can be dict, list, or JSON string)
         outcome_prices_raw = market.get("outcomePrices", {})
         if not outcome_prices_raw:
             # Try to fetch from API
-            try:
-                import httpx
-                from agents.utils.proxy_config import get_proxy_dict
-                url = f"{self.market_fetcher.gamma_markets_endpoint}/{market_id}"
-                proxies = get_proxy_dict()
-                response = httpx.get(url, proxies=proxies, timeout=10.0)
-                if response.status_code == 200:
-                    market_info = response.json()
-                    if isinstance(market_info, list) and len(market_info) > 0:
-                        market_info = market_info[0]
-                    outcome_prices_raw = market_info.get("outcomePrices", {})
-            except Exception as e:
-                logger.debug(f"Could not fetch outcome prices for market {market_id}: {e}")
+            market_info = enrich_market_from_api(market_id, self.market_fetcher)
+            if market_info:
+                outcome_prices_raw = market_info.get("outcomePrices", {})
         
         # Parse if it's a JSON string
         if isinstance(outcome_prices_raw, str):
@@ -494,7 +412,8 @@ class ThresholdBacktester:
         self,
         market_data: Dict,
         threshold: float,
-        margin: float
+        margin: float,
+        dollar_amount: float = 100.0
     ) -> Optional[Dict]:
         """
         Process market with pre-fetched snapshots (faster for grid search).
@@ -503,6 +422,7 @@ class ThresholdBacktester:
             market_data: Pre-processed market data from _preprocess_market_snapshots
             threshold: Threshold percentage
             margin: Margin percentage
+            dollar_amount: Dollar amount to bet
         
         Returns:
             Dict with trade results or None
@@ -515,45 +435,51 @@ class ThresholdBacktester:
         if not outcome_prices_raw:
             return None
         
-        # Monitor both sides: check when threshold is reached
+        # Monitor both sides: check when threshold is reached using HIGHEST BID from bids column
         trigger_side = None
         trigger_time = None
         trigger_price = None
         
-        # Check YES side
+        # Check YES side - trigger when highest bid >= threshold
         for snapshot in yes_snapshots:
-            if snapshot.best_ask_price and snapshot.best_ask_price >= threshold:
+            highest_bid = get_highest_bid_from_orderbook(snapshot)
+            if highest_bid is not None and highest_bid >= threshold:
                 trigger_side = "YES"
                 trigger_time = snapshot.timestamp
-                trigger_price = snapshot.best_ask_price
+                trigger_price = highest_bid
                 break
         
-        # Check NO side (only if YES didn't trigger)
+        # Check NO side (only if YES didn't trigger) - trigger when highest bid >= threshold
         if trigger_side is None:
             for snapshot in no_snapshots:
-                if snapshot.best_ask_price and snapshot.best_ask_price >= threshold:
+                highest_bid = get_highest_bid_from_orderbook(snapshot)
+                if highest_bid is not None and highest_bid >= threshold:
                     trigger_side = "NO"
                     trigger_time = snapshot.timestamp
-                    trigger_price = snapshot.best_ask_price
+                    trigger_price = highest_bid
                     break
         
         if trigger_side is None:
             return None  # Threshold never reached
         
-        # Calculate limit order price
-        limit_price = threshold + margin
-        if limit_price > 0.99:
-            limit_price = 0.99
+        # Calculate BID order price (we're buying/placing a bid order)
+        bid_price = threshold + margin
+        if bid_price > 0.99:
+            bid_price = 0.99
         
-        # Determine which token to buy
+        # Determine which token to place bid order on
         if trigger_side == "YES":
             buy_token_snapshots = yes_snapshots
         else:
             buy_token_snapshots = no_snapshots
         
-        # Check if limit order would fill
+        # Check if BID order would fill by walking the orderbook upward from bid_price
+        # Conservative: only consider asks at or above bid_price, walk upward to spend dollar_amount
         order_filled = False
         fill_time = None
+        weighted_avg_fill_price = None
+        filled_shares = 0.0
+        dollars_spent = 0.0
         
         if margin < 0.02:
             fill_window = timedelta(minutes=1)
@@ -562,56 +488,67 @@ class ThresholdBacktester:
         
         fill_deadline = trigger_time + fill_window
         
+        # Skip a few timesteps after trigger to check if order fills
+        # Start checking after trigger (not immediately)
         for snapshot in buy_token_snapshots:
-            if snapshot.timestamp < trigger_time:
-                continue
+            if snapshot.timestamp <= trigger_time:
+                continue  # Skip trigger snapshot and earlier
             
             if snapshot.timestamp > fill_deadline:
-                break
+                break  # Past fill window
             
-            if snapshot.best_ask_price and snapshot.best_ask_price <= limit_price:
+            # Walk orderbook upward from bid_price to spend dollar_amount
+            # Only considers asks >= bid_price (conservative assumption)
+            result = walk_orderbook_upward_from_bid(
+                snapshot, 
+                bid_price, 
+                dollar_amount
+            )
+            
+            if result[0] is not None and result[1] > 0:
+                # Order can fill (at least partially)
+                avg_price, filled, spent = result
                 order_filled = True
                 fill_time = snapshot.timestamp
+                weighted_avg_fill_price = avg_price
+                filled_shares = filled
+                dollars_spent = spent
                 break
         
-        if not order_filled:
+        if not order_filled or weighted_avg_fill_price is None:
             return None
         
         # Parse outcome prices based on trigger side
-        outcome_price = 0.0
-        if isinstance(outcome_prices_raw, list) and len(outcome_prices_raw) >= 2:
-            # List format: [outcome1_price, outcome2_price]
-            # Outcome 1 = YES, Outcome 2 = NO
-            if trigger_side == "YES":
-                try:
-                    outcome_price = float(outcome_prices_raw[0])
-                except (ValueError, TypeError):
-                    outcome_price = 0.0
-            else:  # NO
-                try:
-                    outcome_price = float(outcome_prices_raw[1])
-                except (ValueError, TypeError):
-                    outcome_price = 0.0
-        elif isinstance(outcome_prices_raw, dict):
-            # Dict format: {"Yes": 1, "No": 0}
-            if trigger_side == "YES":
-                outcome_price = outcome_prices_raw.get("Yes", 0.0)
-            else:
-                outcome_price = outcome_prices_raw.get("No", 0.0)
-        else:
+        outcome_price = parse_outcome_price(
+            outcome_prices_raw,
+            trigger_side,
+            market_id=market_id,
+            market_fetcher=self.market_fetcher
+        )
+        
+        if outcome_price is None:
             return None
         
-        roi = (outcome_price - limit_price) / limit_price if limit_price > 0 else 0.0
+        # Calculate ROI using weighted average fill price (conservative - may be higher than bid_price)
+        roi = (outcome_price - weighted_avg_fill_price) / weighted_avg_fill_price if weighted_avg_fill_price > 0 else 0.0
         is_win = roi > 0
+        
+        # Calculate fill rate (what % of dollar amount spent)
+        fill_rate = dollars_spent / dollar_amount if dollar_amount > 0 else 0.0
         
         return {
             "market_id": market_id,
             "threshold": threshold,
             "margin": margin,
+            "dollar_amount": dollar_amount,
             "trigger_side": trigger_side,
             "trigger_time": trigger_time,
             "trigger_price": trigger_price,
-            "limit_price": limit_price,
+            "bid_price": bid_price,  # The bid price we place
+            "fill_price": weighted_avg_fill_price,  # Weighted average fill price (>= bid_price)
+            "filled_shares": filled_shares,
+            "dollars_spent": dollars_spent,
+            "fill_rate": fill_rate,
             "fill_time": fill_time,
             "outcome_price": outcome_price,
             "roi": roi,
@@ -626,10 +563,14 @@ class ThresholdBacktester:
         threshold_step: float = 0.01,
         margin_min: float = 0.01,
         margin_max: Optional[float] = None,
-        margin_step: float = 0.01
+        margin_step: float = 0.01,
+        min_dollar_amount: float = 1.0,
+        max_dollar_amount: float = 1000.0,
+        dollar_amount_interval: float = 50.0,
+        return_individual_trades: bool = False
     ) -> pd.DataFrame:
         """
-        Run grid search over threshold and margin parameters.
+        Run grid search over threshold, margin, and dollar_amount parameters.
         
         Optimized: Pre-fetches snapshots once per market instead of per parameter combination.
         
@@ -648,9 +589,11 @@ class ThresholdBacktester:
         results = []
         
         threshold_values = np.arange(threshold_min, threshold_max + threshold_step/2, threshold_step)
+        dollar_amount_values = np.arange(min_dollar_amount, max_dollar_amount + dollar_amount_interval/2, dollar_amount_interval)
         
         logger.info(f"Running grid search on {len(markets)} markets")
         logger.info(f"Threshold range: {threshold_min:.2f} to {threshold_max:.2f} (step {threshold_step:.2f})")
+        logger.info(f"Dollar amount range: ${min_dollar_amount:.0f} to ${max_dollar_amount:.0f} (step ${dollar_amount_interval:.0f})")
         
         # Pre-process all markets (fetch snapshots once)
         logger.info("Pre-processing markets (fetching snapshots)...")
@@ -676,11 +619,17 @@ class ThresholdBacktester:
                 continue
             
             margin_values = np.arange(margin_min, max_margin + margin_step/2, margin_step)
-            total_combinations += len(margin_values)
+            total_combinations += len(margin_values) * len(dollar_amount_values)
         
-        logger.info(f"Total parameter combinations: {total_combinations}")
+        print(f"Total parameter combinations: {total_combinations}", flush=True)
+        
+        # Store individual trades if requested
+        individual_trades_dict = {} if return_individual_trades else None
         
         combination_count = 0
+        import time
+        start_time = time.time()
+        
         for threshold in threshold_values:
             if margin_max is None:
                 max_margin = 0.99 - threshold
@@ -693,45 +642,58 @@ class ThresholdBacktester:
             margin_values = np.arange(margin_min, max_margin + margin_step/2, margin_step)
             
             for margin in margin_values:
-                combination_count += 1
-                if combination_count % 100 == 0:
-                    logger.info(f"Progress: {combination_count}/{total_combinations} combinations")
-                
-                # Process all markets with this parameter combination
-                trades = []
-                for market_data in processed_markets:
-                    trade_result = self.process_market_with_snapshots(market_data, threshold, margin)
-                    if trade_result:
-                        trades.append(trade_result)
-                
-                if not trades:
-                    continue  # Skip if no trades executed
-                
-                # Calculate metrics
-                rois = [t["roi"] for t in trades]
-                wins = sum(1 for t in trades if t["is_win"])
-                losses = len(trades) - wins
-                
-                avg_roi = np.mean(rois)
-                sharpe_ratio = np.mean(rois) / np.std(rois) if np.std(rois) > 0 else 0.0
-                win_rate = wins / len(trades) if trades else 0.0
-                
-                results.append({
-                    "threshold": threshold,
-                    "margin": margin,
-                    "limit_price": threshold + margin,
-                    "num_trades": len(trades),
-                    "wins": wins,
-                    "losses": losses,
-                    "win_rate": win_rate,
-                    "avg_roi": avg_roi,
-                    "sharpe_ratio": sharpe_ratio,
-                    "total_roi": sum(rois),
-                })
+                for dollar_amount in dollar_amount_values:
+                    combination_count += 1
+                    
+                    # Print progress more frequently (every 10 combinations or every threshold)
+                    if combination_count % 10 == 0 or combination_count == 1:
+                        elapsed = time.time() - start_time
+                        if combination_count > 1:
+                            avg_time_per_comb = elapsed / combination_count
+                            remaining_comb = total_combinations - combination_count
+                            eta_seconds = avg_time_per_comb * remaining_comb
+                            eta_minutes = eta_seconds / 60
+                            print(f"Progress: {combination_count}/{total_combinations} combinations ({combination_count*100/total_combinations:.1f}%) | "
+                                  f"Threshold: {threshold:.3f}, Margin: {margin:.3f}, Dollar: ${dollar_amount:.0f} | "
+                                  f"ETA: {eta_minutes:.1f} min", flush=True)
+                        else:
+                            print(f"Progress: {combination_count}/{total_combinations} combinations | "
+                                  f"Threshold: {threshold:.3f}, Margin: {margin:.3f}, Dollar: ${dollar_amount:.0f}", flush=True)
+                    
+                    # Process all markets with this parameter combination
+                    trades = []
+                    for market_data in processed_markets:
+                        trade_result = self.process_market_with_snapshots(market_data, threshold, margin, dollar_amount)
+                        if trade_result:
+                            trades.append(trade_result)
+                    
+                    if not trades:
+                        continue  # Skip if no trades executed
+                    
+                    # Calculate metrics
+                    metrics = calculate_metrics(trades)
+                    
+                    results.append({
+                        "threshold": threshold,
+                        "margin": margin,
+                        "dollar_amount": dollar_amount,
+                        "limit_price": threshold + margin,  # This is the bid price
+                        **metrics,
+                    })
+                    
+                    # Store individual ROI values if requested
+                    if return_individual_trades:
+                        key = (threshold, margin, dollar_amount)
+                        roi_values = [t.get("roi", 0.0) for t in trades]
+                        individual_trades_dict[key] = roi_values
         
         df = pd.DataFrame(results)
         if not df.empty:
-            df = df.sort_values(["threshold", "margin"])
+            df = df.sort_values(["threshold", "margin", "dollar_amount"])
+        
+        # Store individual trades in a custom attribute if requested
+        if return_individual_trades:
+            df.attrs['individual_trades'] = individual_trades_dict
         
         return df
     
@@ -761,33 +723,12 @@ class ThresholdBacktester:
             if trade_result:
                 trades.append(trade_result)
         
-        if not trades:
-            return {
-                "threshold": threshold,
-                "margin": margin,
-                "num_trades": 0,
-                "wins": 0,
-                "losses": 0,
-                "win_rate": 0.0,
-                "avg_roi": 0.0,
-                "sharpe_ratio": 0.0,
-                "total_roi": 0.0,
-            }
-        
-        rois = [t["roi"] for t in trades]
-        wins = sum(1 for t in trades if t["is_win"])
-        losses = len(trades) - wins
+        metrics = calculate_metrics(trades)
         
         return {
             "threshold": threshold,
             "margin": margin,
-            "num_trades": len(trades),
-            "wins": wins,
-            "losses": losses,
-            "win_rate": wins / len(trades),
-            "avg_roi": np.mean(rois),
-            "sharpe_ratio": np.mean(rois) / np.std(rois) if np.std(rois) > 0 else 0.0,
-            "total_roi": sum(rois),
+            **metrics,
             "trades": trades,
         }
 

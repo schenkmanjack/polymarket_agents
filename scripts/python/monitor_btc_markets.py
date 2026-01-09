@@ -439,6 +439,70 @@ class BTCMarketsMonitor:
         logger.error(f"Failed to start monitoring for {market_type} markets")
         return False
     
+    async def _check_health(self):
+        """Check if poller/logger tasks are still running and restart if needed."""
+        # Check 15m logger task
+        if self.logger_task_15m and self.logger_task_15m.done():
+            logger.error("⚠ 15m logger task has stopped! Will restart on next market check...")
+            try:
+                exception = self.logger_task_15m.exception()
+                if exception:
+                    logger.error(f"15m logger task exception: {exception}", exc_info=True)
+            except Exception:
+                pass
+            # Clear the stopped service and monitoring state
+            self.logger_service_15m = None
+            self.logger_task_15m = None
+            # Clear event slugs so markets get re-detected and restarted
+            self.monitored_15m_event_slugs.clear()
+            logger.info("Cleared 15m monitoring state - will restart on next check")
+        
+        # Check 1h logger task
+        if self.logger_task_1h and self.logger_task_1h.done():
+            logger.error("⚠ 1h logger task has stopped! Will restart on next market check...")
+            try:
+                exception = self.logger_task_1h.exception()
+                if exception:
+                    logger.error(f"1h logger task exception: {exception}", exc_info=True)
+            except Exception:
+                pass
+            # Clear the stopped service and monitoring state
+            self.logger_service_1h = None
+            self.logger_task_1h = None
+            # Clear event slugs so markets get re-detected and restarted
+            self.monitored_1h_event_slugs.clear()
+            logger.info("Cleared 1h monitoring state - will restart on next check")
+        
+        # Check 15m poller task
+        if self.poller_task_15m and self.poller_task_15m.done():
+            logger.error("⚠ 15m poller task has stopped! Will restart on next market check...")
+            try:
+                exception = self.poller_task_15m.exception()
+                if exception:
+                    logger.error(f"15m poller task exception: {exception}", exc_info=True)
+            except Exception:
+                pass
+            self.poller_15m = None
+            self.poller_task_15m = None
+            # Clear event slugs so markets get re-detected and restarted
+            self.monitored_15m_event_slugs.clear()
+            logger.info("Cleared 15m poller state - will restart on next check")
+        
+        # Check 1h poller task
+        if self.poller_task_1h and self.poller_task_1h.done():
+            logger.error("⚠ 1h poller task has stopped! Will restart on next market check...")
+            try:
+                exception = self.poller_task_1h.exception()
+                if exception:
+                    logger.error(f"1h poller task exception: {exception}", exc_info=True)
+            except Exception:
+                pass
+            self.poller_1h = None
+            self.poller_task_1h = None
+            # Clear event slugs so markets get re-detected and restarted
+            self.monitored_1h_event_slugs.clear()
+            logger.info("Cleared 1h poller state - will restart on next check")
+    
     async def run(self):
         """Main monitoring loop."""
         self.running = True
@@ -450,6 +514,9 @@ class BTCMarketsMonitor:
         
         while self.running:
             try:
+                # Check health of running tasks first
+                await self._check_health()
+                # Then check for new markets
                 await self._check_for_new_markets()
             except Exception as e:
                 logger.error(f"Error checking for markets: {e}", exc_info=True)
