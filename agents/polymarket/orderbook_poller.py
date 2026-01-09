@@ -142,6 +142,7 @@ class OrderbookPoller:
         try:
             bids, asks = [], []
             http_status = None  # Initialize http_status
+            last_trade_price = None  # Initialize last_trade_price
             
             # Prefer Polymarket client if wallet key is available (more reliable)
             if self.polymarket and self.polymarket.private_key:
@@ -150,6 +151,12 @@ class OrderbookPoller:
                     orderbook = self.polymarket.get_orderbook(token_id)
                     bids = [[float(bid.price), float(bid.size)] for bid in orderbook.bids]
                     asks = [[float(ask.price), float(ask.size)] for ask in orderbook.asks]
+                    # Try to get last_trade_price from orderbook object if available
+                    if hasattr(orderbook, 'last_trade_price') and orderbook.last_trade_price:
+                        try:
+                            last_trade_price = float(orderbook.last_trade_price)
+                        except:
+                            pass
                     logger.debug(f"Got {len(bids)} bids, {len(asks)} asks via Polymarket client")
                     # Success - http_status remains None (not a 404)
                 except Exception as e:
