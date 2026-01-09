@@ -106,11 +106,16 @@ class BTC15MinOrderbookSnapshot(Base):
     market_id = Column(String, nullable=False, index=True)  # Polymarket market ID (required)
     timestamp = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
     
-    # Best bid/ask
+    # Best bid/ask (from orderbook - may be stale/wide spread)
     best_bid_price = Column(Float, nullable=True)
     best_bid_size = Column(Float, nullable=True)
     best_ask_price = Column(Float, nullable=True)
     best_ask_size = Column(Float, nullable=True)
+    
+    # Realistic prices (actual trading prices - avoids stale orderbook issue)
+    outcome_price = Column(Float, nullable=True, index=True)  # From Gamma API (what website shows)
+    last_trade_price = Column(Float, nullable=True, index=True)  # From CLOB API (most recent trade)
+    market_price = Column(Float, nullable=True, index=True)  # Calculated: outcome_price > last_trade_price > mid_price
     
     # Spread metrics
     spread = Column(Float, nullable=True)
