@@ -14,6 +14,13 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv not installed, skip (Railway sets env vars directly)
+
 from agents.polymarket.orderbook_db import OrderbookDatabase
 from agents.polymarket.orderbook_stream import OrderbookLogger
 from agents.polymarket.orderbook_poller import OrderbookPoller

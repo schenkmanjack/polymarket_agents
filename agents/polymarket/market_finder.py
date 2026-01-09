@@ -261,16 +261,38 @@ def get_market_info_for_logging(market: dict) -> dict:
         except Exception as e:
             pass  # If parsing fails, leave as None
     
+    # Parse outcomePrices if available (what the website shows)
+    outcome_prices = None
+    outcome_prices_raw = market.get("outcomePrices")
+    if outcome_prices_raw:
+        try:
+            if isinstance(outcome_prices_raw, str):
+                import json
+                outcome_prices = json.loads(outcome_prices_raw)
+            elif isinstance(outcome_prices_raw, list):
+                outcome_prices = outcome_prices_raw
+        except:
+            pass
+    
     # Create mapping of token_id -> market info
     market_info = {}
     for i, token_id in enumerate(token_ids):
         outcome = outcomes[i] if i < len(outcomes) else f"Outcome {i+1}"
+        # Get outcome price for this token (YES = index 0, NO = index 1)
+        outcome_price = None
+        if outcome_prices and isinstance(outcome_prices, list) and i < len(outcome_prices):
+            try:
+                outcome_price = float(outcome_prices[i])
+            except:
+                pass
+        
         market_info[token_id] = {
             "market_id": market_id,
             "market_question": question,
             "outcome": outcome,
             "market_start_date": start_date,
             "market_end_date": end_date,
+            "outcome_price": outcome_price,  # Price from Gamma API (what website shows)
         }
     
     return market_info

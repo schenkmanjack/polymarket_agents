@@ -68,13 +68,17 @@ class OrderbookPoller:
                 data = response.json()
                 bids = [[float(b["price"]), float(b["size"])] for b in data.get("bids", [])]
                 asks = [[float(a["price"]), float(a["size"])] for a in data.get("asks", [])]
-                return bids, asks, None  # Return status code as third element
+                # Extract last_trade_price if available (this is the actual market price)
+                last_trade_price = data.get("last_trade_price")
+                if last_trade_price is not None:
+                    last_trade_price = float(last_trade_price)
+                return bids, asks, None, last_trade_price  # Return last_trade_price as 4th element
             else:
                 # Return status code so caller can detect 404
-                return [], [], response.status_code
+                return [], [], response.status_code, None
         except Exception as e:
             logger.error(f"Error fetching orderbook directly: {e}")
-            return [], [], None
+            return [], [], None, None
     
     def _orderbook_changed(self, bids: list, asks: list, last_bids: list, last_asks: list) -> bool:
         """
@@ -175,11 +179,11 @@ class OrderbookPoller:
                     
                     logger.warning(f"Polymarket client failed for {token_id[:20]}...: {e}, trying direct HTTP")
                     # Fallback to direct HTTP
-                    bids, asks, http_status = self._fetch_orderbook_direct(token_id)
+                    bids, asks, http_status, last_trade_price = self._fetch_orderbook_direct(token_id)
             else:
                 # No wallet key - use direct HTTP
                 logger.debug(f"Fetching orderbook via direct HTTP for {token_id[:20]}...")
-                bids, asks, http_status = self._fetch_orderbook_direct(token_id)
+                bids, asks, http_status, last_trade_price = self._fetch_orderbook_direct(token_id)
             
             # Check for 404 errors (market ended) from direct HTTP
             if http_status == 404:
@@ -243,8 +247,31 @@ class OrderbookPoller:
                 elif "ethereum" in question_lower or "eth" in question_lower:
                     asset_type = "ETH"
             
+            # Calculate market price (actual trading price)
+            # Priority: 1) outcome_price from Gamma API (what website shows), 2) last_trade_price, 3) mid price
+            market_price = None
+            outcome_price = market_meta.get("outcome_price")  # From Gamma API (what website shows)
+            
+            if outcome_price is not None:
+                market_price = outcome_price
+            elif last_trade_price is not None:
+                market_price = last_trade_price
+            elif bids and asks:
+                best_bid = bids[0][0] if bids else None
+                best_ask = asks[0][0] if asks else None
+                if best_bid and best_ask:
+                    market_price = (best_bid + best_ask) / 2
+            
             # Save to database asynchronously (non-blocking)
             # This allows polling to continue without waiting for DB write
+            metadata = {
+                "source": "polling",
+                "poll_interval": self.poll_interval,
+                "last_trade_price": last_trade_price,
+                "outcome_price": outcome_price,  # From Gamma API (what website shows)
+                "market_price": market_price,  # Actual trading price (outcome_price > last_trade_price > mid price)
+            }
+            
             snapshot = await self.db.save_snapshot_async(
                 token_id=token_id,
                 bids=bids,
@@ -252,7 +279,7 @@ class OrderbookPoller:
                 market_id=market_meta.get("market_id"),
                 market_question=market_meta.get("market_question"),
                 outcome=market_meta.get("outcome"),
-                metadata={"source": "polling", "poll_interval": self.poll_interval},
+                metadata=metadata,
                 market_start_date=market_meta.get("market_start_date"),
                 market_end_date=market_meta.get("market_end_date"),
                 asset_type=asset_type,
@@ -263,13 +290,52 @@ class OrderbookPoller:
                 self._save_count = {}
             self._save_count[token_id] = self._save_count.get(token_id, 0) + 1
             
-            best_bid = bids[0][0] if bids else None
-            best_ask = asks[0][0] if asks else None
+            # Get best bid/ask from top of orderbook (may be stale)
+            best_bid_raw = bids[0][0] if bids else None
+            best_ask_raw = asks[0][0] if asks else None
+            
+            # Find best bid/ask near actual market price (like UI does)
+            from agents.polymarket.orderbook_utils import get_best_bid_ask_near_price
+            
+            reference_price = outcome_price or last_trade_price or market_price
+            best_bid_near, best_ask_near = None, None
+            if reference_price and bids and asks:
+                # Convert bids/asks to dict format if needed
+                bids_dict = [{"price": str(b[0]), "size": str(b[1])} for b in bids] if isinstance(bids[0], list) else bids
+                asks_dict = [{"price": str(a[0]), "size": str(a[1])} for a in asks] if isinstance(asks[0], list) else asks
+                best_bid_near, best_ask_near = get_best_bid_ask_near_price(
+                    bids_dict, asks_dict, reference_price, max_spread_pct=0.15
+                )
             
             # Log every save (since we're saving full orderbook every 0.5s for HFT)
             # Log every 10th save to avoid spam, but always log first few
+            # Show meaningful prices: outcome_price > market_price > last_trade_price > bid/ask
+            price_parts = []
+            
+            if outcome_price is not None:
+                price_parts.append(f"Outcome: {outcome_price:.4f} (website)")
+            if market_price is not None:
+                price_parts.append(f"Market: {market_price:.4f}")
+            if last_trade_price is not None:
+                price_parts.append(f"LastTrade: {last_trade_price:.4f}")
+            
+            # Show best bid/ask near market price (like UI shows)
+            if best_bid_near and best_ask_near:
+                spread = best_ask_near - best_bid_near
+                price_parts.append(f"Bid/Ask: {best_bid_near:.4f}/{best_ask_near:.4f} (near market)")
+                if best_bid_raw and best_ask_raw and (abs(best_bid_raw - best_bid_near) > 0.1 or abs(best_ask_raw - best_ask_near) > 0.1):
+                    price_parts.append(f"[raw: {best_bid_raw:.2f}/{best_ask_raw:.2f}]")
+            elif best_bid_raw and best_ask_raw:
+                spread = best_ask_raw - best_bid_raw
+                if spread > 0.1:
+                    price_parts.append(f"Bid/Ask: {best_bid_raw:.2f}/{best_ask_raw:.2f} (wide spread!)")
+                else:
+                    price_parts.append(f"Bid/Ask: {best_bid_raw:.4f}/{best_ask_raw:.4f}")
+            
+            price_info = " | ".join(price_parts) if price_parts else "No price data"
+            
             if self._save_count[token_id] <= 5 or self._save_count[token_id] % 10 == 0:
-                logger.info(f"✓ Saved orderbook snapshot #{self._save_count[token_id]} (DB ID: {snapshot.id}) for token {token_id[:20]}... | Bid: {best_bid}, Ask: {best_ask} | Levels: {len(bids)} bids, {len(asks)} asks")
+                logger.info(f"✓ Saved orderbook snapshot #{self._save_count[token_id]} (DB ID: {snapshot.id}) for token {token_id[:20]}... | {price_info} | Levels: {len(bids)} bids, {len(asks)} asks")
             
         except Exception as e:
             logger.error(f"❌ Error fetching/saving orderbook for {token_id[:20]}...: {e}", exc_info=True)

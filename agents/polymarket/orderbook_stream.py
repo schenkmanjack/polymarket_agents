@@ -285,12 +285,76 @@ class OrderbookLogger:
                 asset_type=asset_type,
             )
             
+            # Get market info for outcome_price
+            market_meta = self.market_info.get(token_id, {})
+            outcome_price = market_meta.get("outcome_price")
+            
+            # Extract last_trade_price from orderbook_data if available
+            last_trade_price = orderbook_data.get("last_trade_price")
+            if last_trade_price:
+                try:
+                    last_trade_price = float(last_trade_price)
+                except:
+                    last_trade_price = None
+            
+            # Calculate market price
+            market_price = None
+            if outcome_price is not None:
+                market_price = outcome_price
+            elif last_trade_price is not None:
+                market_price = last_trade_price
+            elif bids and asks:
+                best_bid = bids[0][0] if bids else None
+                best_ask = asks[0][0] if asks else None
+                if best_bid and best_ask:
+                    market_price = (best_bid + best_ask) / 2
+            
             # Log periodically (every 10th update) to avoid log spam
             self._update_count[token_id] = self._update_count.get(token_id, 0) + 1
             if self._update_count[token_id] % 10 == 1:
-                best_bid = bids[0][0] if bids else None
-                best_ask = asks[0][0] if asks else None
-                logger.info(f"✓ Saved orderbook snapshot #{self._update_count[token_id]} (DB ID: {snapshot.id}) for token {token_id[:20]}... | Bid: {best_bid}, Ask: {best_ask}")
+                # Get best bid/ask from top of orderbook (may be stale)
+                best_bid_raw = bids[0][0] if bids else None
+                best_ask_raw = asks[0][0] if asks else None
+                
+                # Find best bid/ask near actual market price (like UI does)
+                from agents.polymarket.orderbook_utils import get_best_bid_ask_near_price
+                
+                reference_price = outcome_price or last_trade_price or market_price
+                best_bid_near, best_ask_near = None, None
+                if reference_price and bids and asks:
+                    # Convert to dict format if needed
+                    bids_dict = bids if isinstance(bids[0], dict) else [{"price": str(b[0]), "size": str(b[1])} for b in bids]
+                    asks_dict = asks if isinstance(asks[0], dict) else [{"price": str(a[0]), "size": str(a[1])} for a in asks]
+                    best_bid_near, best_ask_near = get_best_bid_ask_near_price(
+                        bids_dict, asks_dict, reference_price, max_spread_pct=0.15
+                    )
+                
+                # Show meaningful prices: outcome_price > market_price > last_trade_price > bid/ask
+                price_parts = []
+                
+                if outcome_price is not None:
+                    price_parts.append(f"Outcome: {outcome_price:.4f} (website)")
+                if market_price is not None:
+                    price_parts.append(f"Market: {market_price:.4f}")
+                if last_trade_price is not None:
+                    price_parts.append(f"LastTrade: {last_trade_price:.4f}")
+                
+                # Show best bid/ask near market price (like UI shows)
+                if best_bid_near and best_ask_near:
+                    spread = best_ask_near - best_bid_near
+                    price_parts.append(f"Bid/Ask: {best_bid_near:.4f}/{best_ask_near:.4f} (near market)")
+                    if best_bid_raw and best_ask_raw and (abs(best_bid_raw - best_bid_near) > 0.1 or abs(best_ask_raw - best_ask_near) > 0.1):
+                        price_parts.append(f"[raw: {best_bid_raw:.2f}/{best_ask_raw:.2f}]")
+                elif best_bid_raw and best_ask_raw:
+                    spread = best_ask_raw - best_bid_raw
+                    if spread > 0.1:
+                        price_parts.append(f"Bid/Ask: {best_bid_raw:.2f}/{best_ask_raw:.2f} (wide spread!)")
+                    else:
+                        price_parts.append(f"Bid/Ask: {best_bid_raw:.4f}/{best_ask_raw:.4f}")
+                
+                price_info = " | ".join(price_parts) if price_parts else "No price data"
+                
+                logger.info(f"✓ Saved orderbook snapshot #{self._update_count[token_id]} (DB ID: {snapshot.id}) for token {token_id[:20]}... | {price_info}")
             
         except Exception as e:
             logger.error(f"❌ Error saving orderbook update for {token_id}: {e}", exc_info=True)
