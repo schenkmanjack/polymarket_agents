@@ -194,12 +194,18 @@ def get_highest_bid_from_orderbook(snapshot) -> Optional[float]:
     """
     Get the highest bid price from an orderbook snapshot's bids column.
     
+    Uses pre-computed value if available (performance optimization).
+    
     Args:
-        snapshot: Orderbook snapshot object with 'bids' attribute
+        snapshot: Orderbook snapshot object with 'bids' attribute or '_highest_bid' pre-computed value
         
     Returns:
         Highest bid price or None if not found
     """
+    # Use pre-computed value if available (performance optimization)
+    if hasattr(snapshot, '_highest_bid') and snapshot._highest_bid is not None:
+        return snapshot._highest_bid
+    
     bids = snapshot.bids if hasattr(snapshot, 'bids') and snapshot.bids else []
     if not isinstance(bids, list) or len(bids) == 0:
         return None
@@ -221,12 +227,18 @@ def get_lowest_ask_from_orderbook(snapshot) -> Optional[float]:
     """
     Get the lowest ask price from an orderbook snapshot's asks column.
     
+    Uses pre-computed value if available (performance optimization).
+    
     Args:
-        snapshot: Orderbook snapshot object with 'asks' attribute
+        snapshot: Orderbook snapshot object with 'asks' attribute or '_lowest_ask' pre-computed value
         
     Returns:
         Lowest ask price or None if not found
     """
+    # Use pre-computed value if available (performance optimization)
+    if hasattr(snapshot, '_lowest_ask') and snapshot._lowest_ask is not None:
+        return snapshot._lowest_ask
+    
     asks = snapshot.asks if hasattr(snapshot, 'asks') and snapshot.asks else []
     if not isinstance(asks, list) or len(asks) == 0:
         return None
@@ -247,35 +259,41 @@ def get_lowest_ask_from_orderbook(snapshot) -> Optional[float]:
 def walk_orderbook_upward_from_bid(
     snapshot, 
     bid_price: float, 
-    dollar_amount: float
+    dollar_amount: float,
+    max_price: float = 0.99
 ) -> Tuple[Optional[float], float, float]:
     """
     Walk the orderbook upward from bid_price to spend dollar_amount.
-    Only considers asks at or above bid_price (conservative assumption).
+    Only considers asks at or above bid_price, walking up to max_price (default 0.99).
+    
+    This simulates a limit order that fills by accepting worse prices up to the limit.
+    If there's insufficient liquidity even at max_price, returns partial fill.
     
     Args:
         snapshot: Orderbook snapshot object with 'asks' attribute
         bid_price: The bid price we're placing (start walking from here)
         dollar_amount: Dollar amount we want to spend
+        max_price: Maximum price to accept (default 0.99, the Polymarket maximum)
         
     Returns:
         Tuple of (weighted_average_fill_price, filled_shares, dollars_spent)
         - weighted_average_fill_price: None if no fill possible, otherwise the weighted avg price
         - filled_shares: Number of shares actually filled
-        - dollars_spent: Actual dollars spent (may be less than dollar_amount if insufficient liquidity)
+        - dollars_spent: Actual dollars spent (may be less than dollar_amount if insufficient liquidity even at max_price)
     """
     asks = snapshot.asks if hasattr(snapshot, 'asks') and snapshot.asks else []
     if not isinstance(asks, list) or len(asks) == 0:
         return None, 0.0, 0.0
     
-    # Filter asks: only consider those >= bid_price (walk upward, ignore below)
+    # Filter asks: only consider those >= bid_price and <= max_price (walk upward within limit)
     eligible_asks = []
     for ask in asks:
         if isinstance(ask, (list, tuple)) and len(ask) >= 2:
             try:
                 ask_price = float(ask[0])
                 ask_size = float(ask[1])
-                if ask_price >= bid_price:  # Only consider asks at or above our bid
+                # Only consider asks at or above our bid, but not above max_price
+                if bid_price <= ask_price <= max_price:
                     eligible_asks.append((ask_price, ask_size))
             except (ValueError, TypeError):
                 continue
@@ -468,10 +486,12 @@ def calculate_metrics(trades: List[Dict]) -> Dict:
     Calculate performance metrics from a list of trade results.
     
     Args:
-        trades: List of trade dicts, each with at least 'roi' and optionally 'is_win'
+        trades: List of trade dicts, each with at least 'roi' and optionally 'is_win', 'fill_rate', 'dollar_amount'
         
     Returns:
-        Dict with metrics: num_trades, wins, losses, win_rate, avg_roi, sharpe_ratio, total_roi
+        Dict with metrics: num_trades, wins, losses, win_rate, avg_roi, sharpe_ratio, total_roi,
+                          avg_fill_rate, min_fill_rate (if fill_rate available),
+                          kelly_fraction, kelly_roi (Kelly optimal sizing metrics)
     """
     if not trades:
         return {
@@ -494,7 +514,7 @@ def calculate_metrics(trades: List[Dict]) -> Dict:
     win_rate = wins / len(trades) if trades else 0.0
     total_roi = sum(rois)
     
-    return {
+    result = {
         "num_trades": len(trades),
         "wins": wins,
         "losses": losses,
@@ -503,6 +523,36 @@ def calculate_metrics(trades: List[Dict]) -> Dict:
         "sharpe_ratio": sharpe_ratio,
         "total_roi": total_roi,
     }
+    
+    # Add fill rate metrics if available (shows liquidity constraints)
+    fill_rates = [t.get("fill_rate") for t in trades if "fill_rate" in t]
+    if fill_rates:
+        result["avg_fill_rate"] = np.mean(fill_rates)
+        result["min_fill_rate"] = np.min(fill_rates)
+    
+    # Calculate Kelly metrics (optimal bet sizing)
+    try:
+        # Get bet size from trades if available, otherwise use default
+        bet_size = trades[0].get("dollar_amount", 4000.0) if trades else 4000.0
+        
+        kelly_fraction = calculate_kelly_fraction(trades, bet_size=bet_size)
+        if kelly_fraction is not None:
+            result["kelly_fraction"] = kelly_fraction
+            
+            # Calculate Kelly ROI (expected ROI at Kelly optimal sizing)
+            kelly_roi = calculate_kelly_roi(trades, bet_size=bet_size)
+            if kelly_roi is not None:
+                result["kelly_roi"] = kelly_roi
+        else:
+            result["kelly_fraction"] = None
+            result["kelly_roi"] = None
+    except Exception as e:
+        # If Kelly calculation fails, set to None
+        logger.debug(f"Kelly calculation failed: {e}")
+        result["kelly_fraction"] = None
+        result["kelly_roi"] = None
+    
+    return result
 
 
 def calculate_kelly_fraction(trades: List[Dict], bet_size: float = 4000.0) -> Optional[float]:

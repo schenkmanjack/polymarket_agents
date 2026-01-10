@@ -241,6 +241,9 @@ def create_interactive_heatmap(
     elif metric == 'win_rate':
         fmt_str = '.1%'  # Percentage format for win rate
         hover_template = 'Threshold: %{y}<br>Margin: %{x}<br>Win Rate: %{z:.1%}<extra></extra>'
+    elif metric == 'kelly_roi':
+        fmt_str = '.2%'  # Percentage format for Kelly ROI
+        hover_template = 'Threshold: %{y}<br>Margin: %{x}<br>Kelly ROI: %{z:.2%}<extra></extra>'
     else:
         fmt_str = '.2f'
         hover_template = 'Threshold: %{y}<br>Margin: %{x}<br>Value: %{z:.2f}<extra></extra>'
@@ -263,6 +266,8 @@ def create_interactive_heatmap(
                     hover_row.append(f"Threshold: {original_thresholds[i]:.3f}<br>Margin: {original_margins[j]:.3f}<br>Avg ROI: {val:.2%}")
                 elif metric == 'win_rate':
                     hover_row.append(f"Threshold: {original_thresholds[i]:.3f}<br>Margin: {original_margins[j]:.3f}<br>Win Rate: {val:.1%}")
+                elif metric == 'kelly_roi':
+                    hover_row.append(f"Threshold: {original_thresholds[i]:.3f}<br>Margin: {original_margins[j]:.3f}<br>Kelly ROI: {val:.2%}")
                 else:
                     hover_row.append(f"Threshold: {original_thresholds[i]:.3f}<br>Margin: {original_margins[j]:.3f}<br>Value: {val:.2f}")
             else:
@@ -922,7 +927,13 @@ def run_grid_search_for_market_type(
     html_files = []
     if PLOTTING_AVAILABLE:
         print(f"\nGenerating heatmap visualizations...")
-        for metric in ["avg_roi", "win_rate"]:
+        metrics_to_visualize = ["avg_roi", "win_rate"]
+        
+        # Add Kelly ROI if available in results
+        if "kelly_roi" in results_df.columns:
+            metrics_to_visualize.append("kelly_roi")
+        
+        for metric in metrics_to_visualize:
             result = create_heatmap(results_df, metric, market_type, output_dir=output_dir)
             if result:
                 if isinstance(result, tuple):

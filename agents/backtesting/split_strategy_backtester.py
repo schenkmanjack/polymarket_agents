@@ -448,6 +448,19 @@ class SplitStrategyBacktester:
         """
         Run grid search over threshold, margin, and dollar_amount parameters.
         
+        Args:
+            threshold_min: Minimum threshold (default: 0.30)
+            threshold_max: Maximum threshold (default: 0.50)
+            threshold_step: Threshold increment (default: 0.01)
+            margin_min: Minimum margin (default: 0.01)
+            margin_step: Margin increment (default: 0.01)
+            min_dollar_amount: Minimum dollar amount to test (default: 1.0)
+            max_dollar_amount: Maximum dollar amount to test (default: 1000.0)
+            dollar_amount_interval: Dollar amount increment (default: 50.0)
+            start_date: Optional start date filter
+            end_date: Optional end date filter
+            max_markets: Optional maximum number of markets to test
+        
         Returns:
             Tuple of (results DataFrame, individual_trades dict)
         """

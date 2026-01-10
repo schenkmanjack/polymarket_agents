@@ -631,6 +631,102 @@ class ThresholdTrader:
         if not all_trades_to_check:
             return
         
+        # First, check fills/trades to see if any orders have been filled
+        # This is more reliable than get_order_status for filled orders
+        # Note: get_order() has a known issue (py-clob-client #217) where it doesn't return filled orders
+        try:
+            fills = self.pm.get_trades()
+            if fills:
+                for fill in fills:
+                    # Try multiple field names for order ID (taker_order_id is the actual field name)
+                    fill_order_id = (
+                        fill.get("taker_order_id") or 
+                        fill.get("orderID") or 
+                        fill.get("order_id") or 
+                        fill.get("id")
+                    )
+                    if fill_order_id in all_trades_to_check:
+                        trade_id = all_trades_to_check[fill_order_id]
+                        trade = self.db.get_trade_by_id(trade_id)
+                        if trade and not trade.filled_shares:
+                            # Order was filled - extract fill details
+                            # The 'size' field contains the filled shares
+                            # The 'price' field contains the fill price
+                            filled_shares = fill.get("size")
+                            fill_price = fill.get("price")
+                            
+                            # Convert to float if they're strings
+                            if filled_shares:
+                                filled_shares = float(filled_shares)
+                            else:
+                                filled_shares = trade.order_size  # Fallback to order size
+                            
+                            if fill_price:
+                                fill_price = float(fill_price)
+                            else:
+                                fill_price = trade.order_price  # Fallback to order price
+                            
+                            dollars_spent = filled_shares * fill_price
+                            
+                            from agents.backtesting.backtesting_utils import calculate_polymarket_fee
+                            fee = calculate_polymarket_fee(fill_price, dollars_spent)
+                            
+                            self.db.update_trade_fill(
+                                trade_id=trade_id,
+                                filled_shares=filled_shares,
+                                fill_price=fill_price,
+                                dollars_spent=dollars_spent,
+                                fee=fee,
+                                order_status="filled",
+                            )
+                            self.open_trades.pop(fill_order_id, None)
+                            self.orders_not_found.pop(fill_order_id, None)
+                            logger.info(f"Order {fill_order_id} filled (found in trades): {filled_shares} shares at ${fill_price:.4f}")
+                            # Remove from all_trades_to_check so we don't check it again below
+                            all_trades_to_check.pop(fill_order_id, None)
+        except Exception as e:
+            logger.debug(f"Could not check fills/trades: {e}")
+        
+        # Also check open orders - if order is NOT in open orders, it's likely filled
+        try:
+            open_orders = self.pm.get_open_orders()
+            open_order_ids = set()
+            if open_orders:
+                for o in open_orders:
+                    oid = o.get("orderID") or o.get("order_id") or o.get("id")
+                    if oid:
+                        open_order_ids.add(oid)
+            
+            # Check orders that are NOT in open orders list
+            for order_id, trade_id in list(all_trades_to_check.items()):
+                if order_id not in open_order_ids:
+                    # Order is not in open orders - check if we already marked it as filled
+                    trade = self.db.get_trade_by_id(trade_id)
+                    if trade and not trade.filled_shares and trade.order_status == "open":
+                        # Not filled yet in DB - mark as filled
+                        logger.info(f"Order {order_id} not in open orders - marking as filled")
+                        # Use order_size as filled_shares (best guess)
+                        if trade.order_size:
+                            from agents.backtesting.backtesting_utils import calculate_polymarket_fee
+                            dollars_spent = trade.order_size * trade.order_price
+                            fee = calculate_polymarket_fee(trade.order_price, dollars_spent)
+                            self.db.update_trade_fill(
+                                trade_id=trade_id,
+                                filled_shares=trade.order_size,
+                                fill_price=trade.order_price,
+                                dollars_spent=dollars_spent,
+                                fee=fee,
+                                order_status="filled",
+                            )
+                            self.open_trades.pop(order_id, None)
+                            self.orders_not_found.pop(order_id, None)
+                            logger.info(f"Order {order_id} marked as filled (not in open orders): {trade.order_size} shares")
+                            # Remove from all_trades_to_check so we don't check it again below
+                            all_trades_to_check.pop(order_id, None)
+        except Exception as e:
+            logger.debug(f"Could not check open orders: {e}")
+        
+        # Now check individual order statuses for orders that are still open
         for order_id, trade_id in list(all_trades_to_check.items()):
             try:
                 order_status = self.pm.get_order_status(order_id)
@@ -646,46 +742,9 @@ class ThresholdTrader:
                             f"will retry on next check"
                         )
                         continue
-                    
-                    # Max retries reached - check if it's in open orders
-                    trade = self.db.get_trade_by_id(trade_id)
-                    if trade and trade.order_status == "open":
-                        logger.warning(
-                            f"Order {order_id} not found in API after {self.max_order_not_found_retries} retries - "
-                            f"checking open orders list"
-                        )
-                        # Try to get from open orders to see if it's still there
-                        try:
-                            open_orders = self.pm.get_open_orders()
-                            if open_orders:
-                                order_ids = [o.get("orderID") or o.get("order_id") for o in open_orders]
-                                if order_id not in order_ids:
-                                    # Order is not in open orders - likely filled or cancelled
-                                    logger.info(f"Order {order_id} not in open orders - marking as filled")
-                                    # Update with order_size as filled_shares (best guess)
-                                    if trade.order_size:
-                                        from agents.backtesting.backtesting_utils import calculate_polymarket_fee
-                                        dollars_spent = trade.order_size * trade.order_price
-                                        fee = calculate_polymarket_fee(trade.order_price, dollars_spent)
-                                        self.db.update_trade_fill(
-                                            trade_id=trade_id,
-                                            filled_shares=trade.order_size,
-                                            fill_price=trade.order_price,
-                                            dollars_spent=dollars_spent,
-                                            fee=fee,
-                                            order_status="filled",
-                                        )
-                                        self.open_trades.pop(order_id, None)
-                                        self.orders_not_found.pop(order_id, None)  # Clear retry count
-                                else:
-                                    # Order is in open orders but get_order_status failed - keep retrying
-                                    logger.warning(f"Order {order_id} is in open orders but status check failed - will retry")
-                                    continue
-                        except Exception as e:
-                            logger.warning(f"Could not check open orders: {e} - will retry")
-                            continue
                     else:
-                        # Trade not found or already resolved - remove from tracking
+                        # Max retries reached - already checked fills and open orders above
+                        # If still not found, remove from tracking
                         self.open_trades.pop(order_id, None)
                         self.orders_not_found.pop(order_id, None)
                     continue
@@ -710,7 +769,7 @@ class ThresholdTrader:
                 is_cancelled = status in ["cancelled", "CANCELLED", "canceled", "CANCELED"]
                 
                 if is_filled or is_cancelled:
-                    if is_filled:
+                    if is_filled and not trade.filled_shares:
                         # Update trade with fill information
                         filled_shares = float(filled_amount) if filled_amount else trade.order_size
                         fill_price = trade.order_price  # Use order price as fill price (limit order)
