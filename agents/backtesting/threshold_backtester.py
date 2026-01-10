@@ -604,10 +604,6 @@ class ThresholdBacktester:
         # This is realistic as orderbook snapshots may only record top N levels.
         fill_rate = dollars_spent / dollar_amount if dollar_amount > 0 else 0.0
         
-        # Reject trades with insufficient liquidity (fill rate below minimum)
-        if fill_rate < min_fill_rate:
-            return None  # Insufficient liquidity - trade would not execute in practice
-        
         # Parse outcome prices based on trigger side
         outcome_price = parse_outcome_price(
             outcome_prices_raw,

@@ -558,10 +558,44 @@ class TradeDatabase:
             session.close()
     
     def has_bet_on_market(self, market_slug: str) -> bool:
-        """Check if we've already bet on this market."""
+        """
+        Check if ANY deployment (current or previous) has already bet on this market.
+        
+        This prevents duplicate orders when:
+        - Script is redeployed and restarted
+        - Multiple deployments are running simultaneously
+        - Same deployment checks the same market multiple times
+        
+        Checks across ALL deployments for the specified market only.
+        Other markets' positions are not considered.
+        
+        Args:
+            market_slug: Market slug to check (only checks this specific market)
+        
+        Returns:
+            True if there's an active position (open order or unresolved filled order) in this market
+            from ANY deployment (current or previous)
+        """
         session = self.SessionLocal()
         try:
-            count = session.query(RealTradeThreshold).filter_by(market_slug=market_slug).count()
+            # Check for active positions: open orders OR filled orders where market hasn't resolved
+            # Check across ALL deployments for this specific market only
+            query = session.query(RealTradeThreshold).filter(
+                RealTradeThreshold.market_slug == market_slug,  # Only this market
+                RealTradeThreshold.order_id.isnot(None),  # Order was placed
+                RealTradeThreshold.order_status.notin_(["cancelled", "failed"]),  # Not cancelled/failed
+                # Either: order is still open, OR order is filled but market hasn't resolved
+                (
+                    (RealTradeThreshold.order_status.in_(["open", "partial"])) |
+                    (
+                        (RealTradeThreshold.order_status == "filled") &
+                        (RealTradeThreshold.market_resolved_at.is_(None))
+                    )
+                )
+            )
+            # No deployment_id filter - check ALL deployments for this market
+            
+            count = query.count()
             return count > 0
         finally:
             session.close()

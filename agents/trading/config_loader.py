@@ -50,6 +50,7 @@ class TradingConfig:
             'kelly_scale_factor',
             'market_type',
             'initial_principal',
+            'dollar_bet_limit',
         ]
         
         for field in required_fields:
@@ -97,6 +98,10 @@ class TradingConfig:
         if not isinstance(initial_principal, (int, float)) or initial_principal <= 0.0:
             raise ValueError(f"initial_principal must be a positive float, got {initial_principal}")
         
+        dollar_bet_limit = self.config['dollar_bet_limit']
+        if not isinstance(dollar_bet_limit, (int, float)) or dollar_bet_limit <= 0.0:
+            raise ValueError(f"dollar_bet_limit must be a positive float, got {dollar_bet_limit}")
+        
         logger.info("✓ Config validation passed")
     
     @property
@@ -135,14 +140,20 @@ class TradingConfig:
     def initial_principal(self) -> float:
         return float(self.config['initial_principal'])
     
+    @property
+    def dollar_bet_limit(self) -> float:
+        return float(self.config['dollar_bet_limit'])
+    
     def get_amount_invested(self, principal: float) -> float:
         """
-        Calculate amount to invest based on Kelly sizing.
+        Calculate amount to invest based on Kelly sizing, capped by dollar_bet_limit.
         
         Args:
             principal: Current principal amount
             
         Returns:
-            Amount to invest
+            Amount to invest (capped at dollar_bet_limit)
         """
-        return principal * self.kelly_fraction * self.kelly_scale_factor
+        kelly_amount = principal * self.kelly_fraction * self.kelly_scale_factor
+        # Cap at dollar_bet_limit even if Kelly suggests more
+        return min(kelly_amount, self.dollar_bet_limit)

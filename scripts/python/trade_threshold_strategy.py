@@ -211,6 +211,16 @@ class ThresholdTrader:
             # Track open sell orders
             if trade.sell_order_id and trade.sell_order_status in ["open", "partial"]:
                 self.open_sell_orders[trade.sell_order_id] = trade.id
+            
+            # If buy order is filled but no sell order exists, place initial sell order at 0.99
+            if (trade.order_status == "filled" and 
+                trade.filled_shares and trade.filled_shares > 0 and 
+                not trade.sell_order_id):
+                logger.info(
+                    f"Found filled buy order without sell order for trade {trade.id} - "
+                    f"placing initial sell order at $0.99"
+                )
+                await self._place_initial_sell_order(trade)
     
     async def _market_detection_loop(self):
         """Continuously detect new markets (like monitor_btc_markets.py)."""
@@ -352,8 +362,21 @@ class ThresholdTrader:
             # Continue anyway - let the order fail if balance is insufficient
         
         for market_slug, market_info in list(self.monitored_markets.items()):
-            # Skip if already bet on
+            # Skip if already bet on (check both memory and database)
             if market_slug in self.markets_with_bets:
+                continue
+            
+            # Also check database to prevent duplicate orders across ALL deployments for THIS market
+            # This prevents duplicate orders when:
+            # - Script is redeployed and restarted
+            # - Multiple deployments are running simultaneously
+            # Only checks the CURRENT market - other markets' positions don't matter
+            if self.db.has_bet_on_market(market_slug):
+                logger.info(
+                    f"Market {market_slug} already has an active bet (open order or unresolved position) "
+                    f"in database from ANY deployment, skipping to prevent duplicate orders"
+                )
+                self.markets_with_bets.add(market_slug)  # Add to memory set
                 continue
             
             # Skip if market is not active
@@ -392,6 +415,10 @@ class ThresholdTrader:
                     continue
                 
                 logger.info(f"Threshold triggered for {market_slug}: {side} side, lowest_ask={lowest_ask:.4f}")
+                
+                # Mark market as bet on IMMEDIATELY to prevent buying both YES and NO
+                # This prevents race condition where both sides trigger in same loop iteration
+                self.markets_with_bets.add(market_slug)
                 
                 # Place order
                 await self._place_order(market_slug, market_info, side, lowest_ask)
@@ -448,9 +475,78 @@ class ThresholdTrader:
         except Exception as e:
             logger.error(f"Error checking early sell condition for trade {trade.id}: {e}", exc_info=True)
     
-    async def _place_early_sell_order(self, trade: RealTradeThreshold, sell_price: float):
-        """Place an early sell order (stop-loss)."""
+    async def _place_initial_sell_order(self, trade: RealTradeThreshold):
+        """Place initial sell order at 0.99 immediately when buy order fills."""
         try:
+            # Skip if already have a sell order
+            if trade.sell_order_id:
+                logger.debug(f"Trade {trade.id} already has sell order {trade.sell_order_id}, skipping")
+                return
+            
+            # Skip if no filled shares
+            if not trade.filled_shares or trade.filled_shares <= 0:
+                logger.warning(f"Trade {trade.id} has no filled shares, cannot place sell order")
+                return
+            
+            logger.info(
+                f"Placing initial sell order at $0.99 for {trade.filled_shares} shares "
+                f"(trade {trade.id})"
+            )
+            
+            sell_order_response = self.pm.execute_order(
+                price=0.99,
+                size=trade.filled_shares,
+                side=SELL,
+                token_id=trade.token_id,
+            )
+            
+            if sell_order_response:
+                sell_order_id = self.pm.extract_order_id(sell_order_response)
+                if sell_order_id:
+                    # Log sell order to database
+                    self.db.update_sell_order(
+                        trade_id=trade.id,
+                        sell_order_id=sell_order_id,
+                        sell_order_price=0.99,
+                        sell_order_size=trade.filled_shares,
+                        sell_order_status="open",
+                    )
+                    # Track in memory
+                    self.open_sell_orders[sell_order_id] = trade.id
+                    logger.info(
+                        f"✓ Initial sell order placed at $0.99: order_id={sell_order_id}, "
+                        f"size={trade.filled_shares} shares"
+                    )
+                else:
+                    logger.warning(f"Initial sell order placed but could not extract order ID")
+            else:
+                logger.warning(f"Failed to place initial sell order for trade {trade.id}")
+        except Exception as e:
+            logger.error(f"Error placing initial sell order for trade {trade.id}: {e}", exc_info=True)
+    
+    async def _place_early_sell_order(self, trade: RealTradeThreshold, sell_price: float):
+        """Place an early sell order (stop-loss), canceling the 0.99 order first if it exists."""
+        try:
+            # If there's an existing sell order at 0.99, cancel it first
+            if trade.sell_order_id and trade.sell_order_status == "open":
+                logger.info(
+                    f"Canceling existing sell order {trade.sell_order_id} at $0.99 "
+                    f"before placing early sell at ${sell_price:.4f}"
+                )
+                cancel_response = self.pm.cancel_order(trade.sell_order_id)
+                if cancel_response:
+                    logger.info(f"✓ Canceled sell order {trade.sell_order_id}")
+                    # Remove from tracking
+                    self.open_sell_orders.pop(trade.sell_order_id, None)
+                    # Update database to mark as cancelled
+                    self.db.update_sell_order_fill(
+                        trade_id=trade.id,
+                        sell_order_status="cancelled",
+                    )
+                else:
+                    logger.warning(f"Failed to cancel sell order {trade.sell_order_id}, proceeding anyway")
+            
+            # Place new early sell order
             sell_order_response = self.pm.execute_order(
                 price=sell_price,
                 size=trade.filled_shares,
@@ -502,6 +598,15 @@ class ThresholdTrader:
             order_price = 0.99  # Cap at 0.99
         
         amount_invested = self.config.get_amount_invested(self.principal)
+        
+        # Log if bet limit is capping the Kelly-calculated amount
+        kelly_amount = self.principal * self.config.kelly_fraction * self.config.kelly_scale_factor
+        if amount_invested < kelly_amount:
+            logger.info(
+                f"Bet size capped by dollar_bet_limit: Kelly suggests ${kelly_amount:.2f}, "
+                f"but limited to ${amount_invested:.2f} (dollar_bet_limit=${self.config.dollar_bet_limit:.2f})"
+            )
+        
         order_size = int(amount_invested / order_price)  # Round down to whole shares
         
         # Calculate actual order value
@@ -600,9 +705,9 @@ class ThresholdTrader:
             order_status="open",
         )
         
-        # Track order and market
+        # Track order (market already marked as bet on BEFORE placing order to prevent buying both YES and NO)
         self.open_trades[order_id] = trade_id
-        self.markets_with_bets.add(market_slug)
+        # Note: markets_with_bets.add() is called in _check_orderbooks_for_triggers BEFORE _place_order
         logger.info(f"Order placed: order_id={order_id}, trade_id={trade_id}")
     
     async def _order_status_loop(self):
@@ -702,6 +807,13 @@ class ThresholdTrader:
                             self.open_trades.pop(fill_order_id, None)
                             self.orders_not_found.pop(fill_order_id, None)
                             logger.info(f"Order {fill_order_id} filled (found in trades): {filled_shares} shares at ${fill_price:.4f}")
+                            
+                            # Reload trade from database to get updated filled_shares
+                            trade = self.db.get_trade_by_id(trade_id)
+                            if trade:
+                                # Immediately place sell order at 0.99 when buy fills
+                                await self._place_initial_sell_order(trade)
+                            
                             # Remove from all_trades_to_check so we don't check it again below
                             all_trades_to_check.pop(fill_order_id, None)
         except Exception as e:
@@ -741,6 +853,13 @@ class ThresholdTrader:
                             self.open_trades.pop(order_id, None)
                             self.orders_not_found.pop(order_id, None)
                             logger.info(f"Order {order_id} marked as filled (not in open orders): {trade.order_size} shares")
+                            
+                            # Reload trade from database to get updated filled_shares
+                            trade = self.db.get_trade_by_id(trade_id)
+                            if trade:
+                                # Immediately place sell order at 0.99 when buy fills
+                                await self._place_initial_sell_order(trade)
+                            
                             # Remove from all_trades_to_check so we don't check it again below
                             all_trades_to_check.pop(order_id, None)
         except Exception as e:
@@ -809,6 +928,12 @@ class ThresholdTrader:
                             order_status="filled",
                         )
                         logger.info(f"Order {order_id} filled: {filled_shares} shares")
+                        
+                        # Reload trade from database to get updated filled_shares
+                        trade = self.db.get_trade_by_id(trade_id)
+                        if trade:
+                            # Immediately place sell order at 0.99 when buy fills
+                            await self._place_initial_sell_order(trade)
                     
                     # Remove from open trades and clear retry count
                     self.open_trades.pop(order_id, None)
@@ -863,6 +988,97 @@ class ThresholdTrader:
         
         if not all_sell_orders_to_check:
             return
+        
+        # First, check fills/trades to see if any sell orders have been filled
+        # This is more reliable than get_order_status for filled orders
+        try:
+            fills = self.pm.get_trades()
+            if fills:
+                for fill in fills:
+                    # Try multiple field names for order ID (taker_order_id is the actual field name)
+                    fill_order_id = (
+                        fill.get("taker_order_id") or 
+                        fill.get("orderID") or 
+                        fill.get("order_id") or 
+                        fill.get("id")
+                    )
+                    if fill_order_id in all_sell_orders_to_check:
+                        trade_id = all_sell_orders_to_check[fill_order_id]
+                        trade = self.db.get_trade_by_id(trade_id)
+                        if trade and trade.sell_order_status == "open":
+                            # Sell order was filled - extract fill details
+                            filled_shares = fill.get("size")
+                            fill_price_from_record = fill.get("price")
+                            
+                            # Convert to float if they're strings
+                            if filled_shares:
+                                filled_shares = float(filled_shares)
+                            else:
+                                filled_shares = trade.sell_order_size  # Fallback to order size
+                            
+                            # Use the actual fill price from the fill record
+                            if fill_price_from_record:
+                                sell_price = float(fill_price_from_record)
+                            else:
+                                sell_price = trade.sell_order_price or 0.99  # Fallback to order price
+                            
+                            sell_dollars_received = filled_shares * sell_price
+                            
+                            from agents.backtesting.backtesting_utils import calculate_polymarket_fee
+                            sell_fee = calculate_polymarket_fee(sell_price, sell_dollars_received)
+                            
+                            self.db.update_sell_order_fill(
+                                trade_id=trade_id,
+                                sell_order_status="filled",
+                                sell_dollars_received=sell_dollars_received,
+                                sell_fee=sell_fee,
+                            )
+                            
+                            # Update principal now that sell order filled
+                            net_proceeds = sell_dollars_received - sell_fee - (trade.dollars_spent or 0) - (trade.fee or 0)
+                            new_principal = self.principal + net_proceeds
+                            self.principal = new_principal
+                            
+                            # Update trade with final principal
+                            if trade.market_resolved_at:
+                                # Market already resolved - update with outcome info
+                                self.db.update_trade_outcome(
+                                    trade_id=trade_id,
+                                    outcome_price=trade.outcome_price,
+                                    payout=sell_dollars_received,
+                                    net_payout=net_proceeds,
+                                    roi=net_proceeds / ((trade.dollars_spent or 0) + (trade.fee or 0)) if (trade.dollars_spent or 0) + (trade.fee or 0) > 0 else 0.0,
+                                    is_win=trade.is_win,
+                                    principal_after=new_principal,
+                                    winning_side=trade.winning_side,
+                                )
+                            else:
+                                # Early sell - market not resolved yet, just update principal
+                                session = self.db.SessionLocal()
+                                try:
+                                    trade_obj = session.query(RealTradeThreshold).filter_by(id=trade_id).first()
+                                    if trade_obj:
+                                        trade_obj.principal_after = new_principal
+                                        session.commit()
+                                except Exception as e:
+                                    session.rollback()
+                                    logger.error(f"Error updating principal for early sell: {e}")
+                                finally:
+                                    session.close()
+                            
+                            logger.info(
+                                f"Sell order {fill_order_id} filled (found in trades): "
+                                f"{filled_shares} shares at ${sell_price:.4f}, "
+                                f"received ${sell_dollars_received:.2f}, net_proceeds=${net_proceeds:.2f}, "
+                                f"new principal: ${new_principal:.2f}"
+                            )
+                            
+                            self.open_sell_orders.pop(fill_order_id, None)
+                            self.sell_orders_not_found.pop(fill_order_id, None)
+                            # Remove from all_sell_orders_to_check so we don't check it again below
+                            all_sell_orders_to_check.pop(fill_order_id, None)
+        except Exception as e:
+            logger.debug(f"Could not check fills/trades for sell orders: {e}")
         
         for sell_order_id, trade_id in list(all_sell_orders_to_check.items()):
             try:
@@ -1179,65 +1395,25 @@ class ThresholdTrader:
                 elif outcome_prices_raw.get("No") == 1:
                     winning_side = "NO"
             
-            # Place sell order at 0.99 if we won (to claim proceeds)
-            # BUT skip if we already placed an early sell order (stop-loss)
-            sell_order_placed = False
-            if is_win and outcome_price > 0 and filled_shares > 0 and not trade.sell_order_id:
-                try:
-                    logger.info(
-                        f"Placing sell order to claim proceeds: "
-                        f"{filled_shares} shares at $0.99 (trade {trade.id})"
-                    )
-                    
-                    sell_order_response = self.pm.execute_order(
-                        price=0.99,
-                        size=filled_shares,
-                        side=SELL,
-                        token_id=trade.token_id,
-                    )
-                    
-                    if sell_order_response:
-                        sell_order_id = self.pm.extract_order_id(sell_order_response)
-                        if sell_order_id:
-                            # Log sell order to database
-                            self.db.update_sell_order(
-                                trade_id=trade.id,
-                                sell_order_id=sell_order_id,
-                                sell_order_price=0.99,
-                                sell_order_size=filled_shares,
-                                sell_order_status="open",
-                            )
-                            # Track in memory
-                            self.open_sell_orders[sell_order_id] = trade.id
-                            sell_order_placed = True
-                            logger.info(f"✓ Sell order placed: order_id={sell_order_id} to claim ${payout:.2f}")
-                        else:
-                            logger.warning(f"Sell order placed but could not extract order ID")
-                    else:
-                        logger.warning(f"Failed to place sell order to claim proceeds")
-                except Exception as e:
-                    logger.error(f"Error placing sell order to claim proceeds for trade {trade.id}: {e}")
-                    # Don't update principal if sell order failed - we need to wait for it
-                    # Continue to update trade record but don't update principal yet
-            
-            # Don't update principal yet if we won - wait for sell order to fill
-            # Principal will be updated when sell order fills (in _check_sell_order_statuses)
-            # For now, keep principal the same
-            new_principal = self.principal
-            if not is_win:
-                # If we lost, update principal immediately (no sell order needed)
-                new_principal = self.principal + net_payout
-                self.principal = new_principal
-            
+            # Note: Sell order at 0.99 was already placed when buy order filled
+            # If market resolved and we won, the 0.99 sell order should execute automatically
+            # If we lost, no sell order is needed (shares are worthless)
             # If an early sell already happened, principal_after was already set when the sell filled
             # Preserve that value instead of overwriting it
+            new_principal = self.principal
             if trade.sell_order_id and trade.sell_order_status == "filled" and trade.principal_after is not None:
-                # Early sell already filled and principal_after is already set - preserve it
+                # Sell order already filled and principal_after is already set - preserve it
                 new_principal = trade.principal_after
+                self.principal = new_principal
                 logger.info(
-                    f"Preserving principal_after from early sell: ${new_principal:.2f} "
+                    f"Preserving principal_after from sell order: ${new_principal:.2f} "
                     f"(market resolution for trade {trade.id})"
                 )
+            elif not is_win:
+                # If we lost, update principal immediately (shares are worthless, no sell order needed)
+                new_principal = self.principal + net_payout
+                self.principal = new_principal
+            # If we won but sell order hasn't filled yet, principal will be updated when sell fills
             
             # Update trade in database
             self.db.update_trade_outcome(
