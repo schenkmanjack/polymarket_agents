@@ -38,18 +38,18 @@ def test_proxy_connection(proxy_url: str = None):
     
     if not proxy_url:
         print("❌ No proxy configured!")
-    print("\nTo configure proxy, use one of:")
-    print("  1. Simple environment variables (recommended):")
-    print("     export PROXY_USER='your_username'")
-    print("     export PROXY_PASS='your_password'")
-    print("     export PROXY_PORT='8001'  # optional, defaults to 8001")
-    print("\n  2. Or set HTTPS_PROXY directly:")
-    print("     export HTTPS_PROXY='http://user-USERNAME:PASSWORD@isp.oxylabs.io:8001'")
-    print("\n  3. Or legacy Oxylabs format:")
-    print("     export OXYLABS_USERNAME='your_username'")
-    print("     export OXYLABS_PASSWORD='your_password'")
-    print("     export OXYLABS_PORT='8001'")
-    return False
+        print("\nTo configure proxy, use one of:")
+        print("  1. Simple environment variables (recommended):")
+        print("     export PROXY_USER='your_username'")
+        print("     export PROXY_PASS='your_password'")
+        print("     export PROXY_PORT='8001'  # optional, defaults to 8001")
+        print("\n  2. Or set HTTPS_PROXY directly:")
+        print("     export HTTPS_PROXY='http://user-USERNAME:PASSWORD@isp.oxylabs.io:8001'")
+        print("\n  3. Or legacy Oxylabs format:")
+        print("     export OXYLABS_USERNAME='your_username'")
+        print("     export OXYLABS_PASSWORD='your_password'")
+        print("     export OXYLABS_PORT='8001'")
+        return False
     
     print(f"✓ Proxy URL configured: {proxy_url.split('@')[1] if '@' in proxy_url else 'configured'}")
     

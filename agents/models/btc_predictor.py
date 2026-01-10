@@ -174,7 +174,7 @@ class BTCPredictor:
         try:
             import torch
             
-            if self.model is None or self.model == "baseline":
+            if self.model is None or self.model == "baseline" or isinstance(self.model, str):
                 logger.warning("Lag-Llama model not loaded - using baseline")
                 return self._baseline_predict(price_sequence, prediction_horizon)
             
@@ -258,7 +258,7 @@ class BTCPredictor:
         try:
             import torch
             
-            if self.model is None or self.model == "baseline":
+            if self.model is None or self.model == "baseline" or isinstance(self.model, str):
                 logger.warning("Chronos-Bolt model not loaded - using baseline")
                 return self._baseline_predict(price_sequence, prediction_horizon)
             

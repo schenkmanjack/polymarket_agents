@@ -1,0 +1,8 @@
+{
+  "threshold": 0.40,
+  "margin": 0.02,
+  "kelly_fraction": 0.25,
+  "kelly_scale_factor": 1.0,
+  "market_type": "15m",
+  "initial_principal": 100.0
+}
