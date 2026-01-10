@@ -556,7 +556,7 @@ class Polymarket:
         except Exception as e:
             logger.error(f"Error canceling order {order_id}: {e}")
             return None
-
+    
     def get_usdc_balance(self) -> float:
         """Get USDC balance from your Polygon wallet (direct wallet)."""
         balance_res = self.usdc.functions.balanceOf(

@@ -56,6 +56,16 @@ class RealTradeThreshold(Base):
     dollars_spent = Column(Float, nullable=True)
     fee = Column(Float, nullable=True)
     
+    # Sell order information (for claiming proceeds)
+    sell_order_id = Column(String, nullable=True, index=True)
+    sell_order_price = Column(Float, nullable=True)  # Usually 0.99
+    sell_order_size = Column(Float, nullable=True)  # Number of shares to sell
+    sell_order_status = Column(String, nullable=True)  # 'open', 'filled', 'cancelled', 'partial'
+    sell_order_placed_at = Column(DateTime, nullable=True)
+    sell_order_filled_at = Column(DateTime, nullable=True)
+    sell_dollars_received = Column(Float, nullable=True)  # Amount received from selling
+    sell_fee = Column(Float, nullable=True)  # Fee paid on sell
+    
     # Outcome information
     outcome_price = Column(Float, nullable=True)  # Final outcome price (0.0 or 1.0)
     payout = Column(Float, nullable=True)  # Total payout received
@@ -272,6 +282,59 @@ class TradeDatabase:
         finally:
             session.close()
     
+    def update_sell_order(
+        self,
+        trade_id: int,
+        sell_order_id: str,
+        sell_order_price: float,
+        sell_order_size: float,
+        sell_order_status: str = "open",
+    ):
+        """Update trade with sell order information."""
+        session = self.SessionLocal()
+        try:
+            trade = session.query(RealTradeThreshold).filter_by(id=trade_id).first()
+            if trade:
+                trade.sell_order_id = sell_order_id
+                trade.sell_order_price = sell_order_price
+                trade.sell_order_size = sell_order_size
+                trade.sell_order_status = sell_order_status
+                trade.sell_order_placed_at = datetime.now(timezone.utc)
+                session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error updating sell order: {e}")
+            raise
+        finally:
+            session.close()
+    
+    def update_sell_order_fill(
+        self,
+        trade_id: int,
+        sell_order_status: str,
+        sell_dollars_received: Optional[float] = None,
+        sell_fee: Optional[float] = None,
+    ):
+        """Update sell order with fill information."""
+        session = self.SessionLocal()
+        try:
+            trade = session.query(RealTradeThreshold).filter_by(id=trade_id).first()
+            if trade:
+                trade.sell_order_status = sell_order_status
+                if sell_dollars_received is not None:
+                    trade.sell_dollars_received = sell_dollars_received
+                if sell_fee is not None:
+                    trade.sell_fee = sell_fee
+                if sell_order_status == "filled":
+                    trade.sell_order_filled_at = datetime.now(timezone.utc)
+                session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error updating sell order fill: {e}")
+            raise
+        finally:
+            session.close()
+    
     def get_trade_by_id(self, trade_id: int) -> Optional[RealTradeThreshold]:
         """Get trade by ID."""
         session = self.SessionLocal()
@@ -288,32 +351,78 @@ class TradeDatabase:
         finally:
             session.close()
     
-    def get_open_trades(self) -> List[RealTradeThreshold]:
-        """Get all trades with open orders."""
+    def get_open_trades(self, deployment_id: Optional[str] = None) -> List[RealTradeThreshold]:
+        """
+        Get all trades with open buy orders.
+        
+        Args:
+            deployment_id: Optional deployment ID to filter by. If provided, only returns
+                          trades from that deployment. If None, returns all open trades.
+        """
         session = self.SessionLocal()
         try:
-            return session.query(RealTradeThreshold).filter(
+            query = session.query(RealTradeThreshold).filter(
                 RealTradeThreshold.order_status.in_(["open", "partial"])
-            ).all()
+            )
+            
+            # Filter by deployment_id if provided
+            if deployment_id is not None:
+                query = query.filter(RealTradeThreshold.deployment_id == deployment_id)
+            
+            return query.all()
         finally:
             session.close()
     
-    def get_unresolved_trades(self) -> List[RealTradeThreshold]:
+    def get_open_sell_orders(self, deployment_id: Optional[str] = None) -> List[RealTradeThreshold]:
+        """
+        Get all trades with open sell orders.
+        
+        Args:
+            deployment_id: Optional deployment ID to filter by. If provided, only returns
+                          trades from that deployment. If None, returns all open sell orders.
+        """
+        session = self.SessionLocal()
+        try:
+            query = session.query(RealTradeThreshold).filter(
+                RealTradeThreshold.sell_order_status.in_(["open", "partial"]),
+                RealTradeThreshold.sell_order_id.isnot(None),
+            )
+            
+            # Filter by deployment_id if provided
+            if deployment_id is not None:
+                query = query.filter(RealTradeThreshold.deployment_id == deployment_id)
+            
+            return query.all()
+        finally:
+            session.close()
+    
+    def get_unresolved_trades(self, deployment_id: Optional[str] = None) -> List[RealTradeThreshold]:
         """
         Get all trades where market hasn't resolved yet.
+        
+        Args:
+            deployment_id: Optional deployment ID to filter by. If provided, only returns
+                          trades from that deployment. If None, returns all unresolved trades.
         
         Only returns trades that:
         - Have order_id (order was placed)
         - Are not cancelled or failed
         - Have been filled (filled_shares > 0) or are still open/partial
+        - Match deployment_id if provided
         """
         session = self.SessionLocal()
         try:
-            return session.query(RealTradeThreshold).filter(
+            query = session.query(RealTradeThreshold).filter(
                 RealTradeThreshold.market_resolved_at.is_(None),
                 RealTradeThreshold.order_id.isnot(None),  # Must have order_id
                 RealTradeThreshold.order_status.notin_(["cancelled", "failed"]),  # Exclude cancelled/failed
-            ).all()
+            )
+            
+            # Filter by deployment_id if provided
+            if deployment_id is not None:
+                query = query.filter(RealTradeThreshold.deployment_id == deployment_id)
+            
+            return query.all()
         finally:
             session.close()
     
@@ -362,6 +471,60 @@ class TradeDatabase:
         try:
             count = session.query(RealTradeThreshold).filter_by(market_slug=market_slug).count()
             return count > 0
+        finally:
+            session.close()
+    
+    def get_resolved_trades(self, deployment_id: Optional[str] = None) -> List[RealTradeThreshold]:
+        """
+        Get all resolved trades.
+        
+        Args:
+            deployment_id: Optional deployment ID to filter by. If provided, only returns
+                          trades from that deployment. If None, returns all resolved trades.
+        """
+        session = self.SessionLocal()
+        try:
+            query = session.query(RealTradeThreshold).filter(
+                RealTradeThreshold.market_resolved_at.isnot(None),
+                RealTradeThreshold.is_win == True,  # Only winning trades
+                RealTradeThreshold.outcome_price.isnot(None),
+            )
+            
+            # Filter by deployment_id if provided
+            if deployment_id is not None:
+                query = query.filter(RealTradeThreshold.deployment_id == deployment_id)
+            
+            return query.all()
+        finally:
+            session.close()
+    
+    def get_most_recent_filled_trade_without_sell(self, deployment_id: Optional[str] = None) -> Optional[RealTradeThreshold]:
+        """
+        Get the most recent filled trade that doesn't have a sell order yet (for early sell checking).
+        
+        Args:
+            deployment_id: Optional deployment ID to filter by. If provided, only returns
+                          trade from that deployment. If None, returns most recent from any deployment.
+        
+        Returns:
+            Most recent filled trade without sell order, or None if not found.
+        """
+        session = self.SessionLocal()
+        try:
+            query = session.query(RealTradeThreshold).filter(
+                RealTradeThreshold.order_status == "filled",  # Buy order must be filled
+                RealTradeThreshold.filled_shares.isnot(None),
+                RealTradeThreshold.filled_shares > 0,  # Must have filled shares
+                RealTradeThreshold.sell_order_id.is_(None),  # No sell order yet
+            )
+            
+            # Filter by deployment_id if provided
+            if deployment_id is not None:
+                query = query.filter(RealTradeThreshold.deployment_id == deployment_id)
+            
+            # Order by order_placed_at descending and get the first (most recent)
+            trade = query.order_by(RealTradeThreshold.order_placed_at.desc()).first()
+            return trade
         finally:
             session.close()
     

@@ -44,6 +44,8 @@ class TradingConfig:
             'threshold',
             'upper_threshold',
             'margin',
+            'threshold_sell',
+            'margin_sell',
             'kelly_fraction',
             'kelly_scale_factor',
             'market_type',
@@ -70,6 +72,14 @@ class TradingConfig:
         margin = self.config['margin']
         if not isinstance(margin, (int, float)) or margin < 0.0:
             raise ValueError(f"margin must be a non-negative float, got {margin}")
+        
+        threshold_sell = self.config['threshold_sell']
+        if not isinstance(threshold_sell, (int, float)) or not (0.0 < threshold_sell <= 1.0):
+            raise ValueError(f"threshold_sell must be a float between 0.0 and 1.0, got {threshold_sell}")
+        
+        margin_sell = self.config['margin_sell']
+        if not isinstance(margin_sell, (int, float)) or margin_sell < 0.0:
+            raise ValueError(f"margin_sell must be a non-negative float, got {margin_sell}")
         
         kelly_fraction = self.config['kelly_fraction']
         if not isinstance(kelly_fraction, (int, float)) or not (0.0 <= kelly_fraction <= 1.0):
@@ -100,6 +110,14 @@ class TradingConfig:
     @property
     def margin(self) -> float:
         return float(self.config['margin'])
+    
+    @property
+    def threshold_sell(self) -> float:
+        return float(self.config['threshold_sell'])
+    
+    @property
+    def margin_sell(self) -> float:
+        return float(self.config['margin_sell'])
     
     @property
     def kelly_fraction(self) -> float:

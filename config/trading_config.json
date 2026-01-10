@@ -2,8 +2,10 @@
   "threshold": 0.64,
   "upper_threshold": 0.97,
   "margin": 0.02,
+  "threshold_sell": 0.3,
+  "margin_sell": 0.02,
   "kelly_fraction": 0.8,
   "kelly_scale_factor": 0.8,
   "market_type": "15m",
-  "initial_principal": 3.0
+  "initial_principal": 4.0
 }
