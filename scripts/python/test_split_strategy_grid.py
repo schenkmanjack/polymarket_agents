@@ -154,7 +154,13 @@ def run_grid_search_for_market_type(
         # Create interactive heatmaps with dollar amount slider
         # Note: individual_trades is attached to df.attrs by the backtester
         if PLOTLY_AVAILABLE:
-            for metric in ["avg_roi", "win_rate"]:
+            metrics_to_visualize = ["avg_roi", "win_rate"]
+            
+            # Add Kelly ROI if available in results (now automatically calculated)
+            if "kelly_roi" in results_df.columns:
+                metrics_to_visualize.append("kelly_roi")
+            
+            for metric in metrics_to_visualize:
                 html_path = create_interactive_heatmap(
                     results_df,
                     metric,
@@ -163,23 +169,6 @@ def run_grid_search_for_market_type(
                 )
                 if html_path:
                     html_files.append(html_path)
-            
-            # Create Kelly ROI heatmaps (separate visualization)
-            # Attach individual_trades to df.attrs if not already there
-            if not hasattr(results_df, 'attrs'):
-                results_df.attrs = {}
-            if 'individual_trades' not in results_df.attrs:
-                results_df.attrs['individual_trades'] = individual_trades
-            
-            kelly_html_path = create_kelly_roi_heatmap(
-                results_df,
-                individual_trades,
-                f"{market_type}_split_kelly_roi",
-                metric="kelly_roi",
-                output_dir=output_dir
-            )
-            if kelly_html_path:
-                html_files.append(kelly_html_path)
     
     return results_df, (plot_files, html_files)
 

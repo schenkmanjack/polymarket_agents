@@ -507,7 +507,9 @@ class Polymarket:
             return None
         
         try:
-            return self.client.get_open_orders()
+            # Use get_orders with OpenOrderParams (correct method name per py-clob-client API)
+            from py_clob_client.clob_types import OpenOrderParams
+            return self.client.get_orders(OpenOrderParams())
         except Exception as e:
             logger.error(f"Error getting open orders: {e}")
             return None
