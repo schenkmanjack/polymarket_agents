@@ -321,6 +321,148 @@ def walk_orderbook_upward_from_bid(
     return weighted_avg_price, filled_shares, dollars_spent
 
 
+def walk_orderbook_downward_from_ask(
+    snapshot,
+    ask_price: float,
+    shares_to_sell: float
+) -> Tuple[Optional[float], float, float]:
+    """
+    Walk the orderbook downward from ask_price to sell shares_to_sell.
+    Starts at ask_price and walks down (accepts lower bid prices) if needed to fill all shares.
+    
+    Args:
+        snapshot: Orderbook snapshot object with 'bids' attribute
+        ask_price: The ask price we're placing (start walking from here)
+        shares_to_sell: Number of shares we want to sell
+        
+    Returns:
+        Tuple of (weighted_average_fill_price, filled_shares, dollars_received)
+        - weighted_average_fill_price: None if no fill possible, otherwise the weighted avg price
+        - filled_shares: Number of shares actually sold
+        - dollars_received: Actual dollars received (may be less than shares_to_sell * ask_price if walking down)
+    """
+    bids = snapshot.bids if hasattr(snapshot, 'bids') and snapshot.bids else []
+    if not isinstance(bids, list) or len(bids) == 0:
+        return None, 0.0, 0.0
+    
+    # Filter bids: only consider those >= ask_price initially (conservative)
+    # But if we need more volume, we'll walk down below ask_price
+    eligible_bids = []
+    for bid in bids:
+        if isinstance(bid, (list, tuple)) and len(bid) >= 2:
+            try:
+                bid_price = float(bid[0])
+                bid_size = float(bid[1])
+                # Start with bids >= ask_price, but we'll expand if needed
+                eligible_bids.append((bid_price, bid_size))
+            except (ValueError, TypeError):
+                continue
+    
+    if not eligible_bids:
+        return None, 0.0, 0.0
+    
+    # Sort by price descending (highest bids first - we want best prices)
+    eligible_bids.sort(key=lambda x: x[0], reverse=True)
+    
+    # Walk the book, selling shares until we've sold shares_to_sell
+    total_revenue = 0.0
+    filled_shares = 0.0
+    remaining_shares = shares_to_sell
+    
+    # First pass: try to sell at ask_price or better (bids >= ask_price)
+    for bid_price, bid_size in eligible_bids:
+        if remaining_shares <= 0:
+            break
+        
+        # Only accept bids at or above our ask_price initially
+        if bid_price < ask_price:
+            continue  # Skip bids below our ask price in first pass
+        
+        # How many shares can we sell to this bid level?
+        shares_to_sell_here = min(bid_size, remaining_shares)
+        
+        # Calculate revenue for these shares
+        revenue_for_shares = bid_price * shares_to_sell_here
+        
+        # Add to our fill
+        total_revenue += revenue_for_shares
+        filled_shares += shares_to_sell_here
+        remaining_shares -= shares_to_sell_here
+    
+    # Second pass: if we still have shares to sell, walk down (accept lower prices)
+    if remaining_shares > 0:
+        for bid_price, bid_size in eligible_bids:
+            if remaining_shares <= 0:
+                break
+            
+            # Now accept bids below ask_price (walking down)
+            # Skip bids we already used in first pass
+            if bid_price >= ask_price:
+                # Check if we already used this bid level
+                # (In first pass, we might have partially used it)
+                continue
+            
+            # How many shares can we sell to this bid level?
+            shares_to_sell_here = min(bid_size, remaining_shares)
+            
+            # Calculate revenue for these shares
+            revenue_for_shares = bid_price * shares_to_sell_here
+            
+            # Add to our fill
+            total_revenue += revenue_for_shares
+            filled_shares += shares_to_sell_here
+            remaining_shares -= shares_to_sell_here
+    
+    if filled_shares == 0:
+        return None, 0.0, 0.0
+    
+    # Calculate weighted average fill price
+    weighted_avg_price = total_revenue / filled_shares
+    
+    # Actual dollars received
+    dollars_received = total_revenue
+    
+    return weighted_avg_price, filled_shares, dollars_received
+
+
+def calculate_polymarket_fee(price: float, trade_value: float) -> float:
+    """
+    Calculate Polymarket trading fee based on price and trade value.
+    
+    Fee formula: Fee = trade_value × feeRate × (p × (1-p))^exponent
+    Where:
+    - trade_value = Total dollar value of the trade
+    - p = Price of the shares (0 to 1)
+    - feeRate = 0.25
+    - exponent = 2
+    
+    This results in maximum fees at p=0.50, decreasing toward extremes (0.01 and 0.99).
+    
+    Args:
+        price: Share price (0.01 to 0.99)
+        trade_value: Total dollar value of the trade
+        
+    Returns:
+        Fee in USDC
+    """
+    if price <= 0 or price >= 1 or trade_value <= 0:
+        return 0.0
+    
+    # Clamp price to valid range
+    price = max(0.01, min(0.99, price))
+    
+    # Fee parameters
+    fee_rate = 0.25
+    exponent = 2
+    
+    # Calculate fee: trade_value × feeRate × (p × (1-p))^exponent
+    p_times_one_minus_p = price * (1.0 - price)
+    fee = trade_value * fee_rate * (p_times_one_minus_p ** exponent)
+    
+    # Minimum fee precision is 0.0001 USDC (very small trades may round to 0)
+    return max(0.0, fee)
+
+
 def calculate_metrics(trades: List[Dict]) -> Dict:
     """
     Calculate performance metrics from a list of trade results.
@@ -361,6 +503,213 @@ def calculate_metrics(trades: List[Dict]) -> Dict:
         "sharpe_ratio": sharpe_ratio,
         "total_roi": total_roi,
     }
+
+
+def calculate_kelly_fraction(trades: List[Dict], bet_size: float = 4000.0) -> Optional[float]:
+    """
+    Calculate the Kelly fraction (optimal bet size as fraction of bankroll) from trade results.
+    
+    Uses the Generalized Kelly Criterion for multiple outcomes with different ROI values.
+    Maximizes expected logarithmic growth: E[ln(1 + f * ROI)]
+    
+    The optimal f* is found by solving:
+        Σ (ROI_i / (1 + f * ROI_i)) = 0
+    
+    where each trade i has ROI_i and equal probability (1/n).
+    
+    Args:
+        trades: List of trade dicts, each with 'roi' and optionally 'is_win'
+        bet_size: The bet size used for these trades (default $4000)
+                  Only used to filter trades if needed
+        
+    Returns:
+        Kelly fraction (0.0 to 1.0), or None if calculation is invalid
+    """
+    if not trades:
+        return None
+    
+    # Filter to trades with the specified bet size (if dollar_amount field exists)
+    relevant_trades = trades
+    if any('dollar_amount' in t for t in trades):
+        relevant_trades = [t for t in trades if abs(t.get('dollar_amount', bet_size) - bet_size) < 0.01]
+    
+    if not relevant_trades:
+        return None
+    
+    # Extract ROI values
+    rois = [t.get("roi", 0.0) for t in relevant_trades]
+    rois = np.array(rois)
+    
+    if len(rois) == 0:
+        return None
+    
+    # Check if we have any positive expected return
+    if np.mean(rois) <= 0:
+        return None  # No positive expected return
+    
+    # Find f that maximizes E[ln(1 + f * ROI)]
+    # We need to solve: Σ (ROI_i / (1 + f * ROI_i)) = 0
+    # Use numerical optimization (binary search or scipy)
+    
+    def kelly_objective(f: float) -> float:
+        """Derivative of expected log growth. We want this to be 0."""
+        # Handle cases where 1 + f * ROI <= 0 (would cause negative bankroll)
+        valid_mask = (1 + f * rois) > 0
+        if not np.any(valid_mask):
+            return 1e10  # Penalize invalid f
+        
+        # Calculate derivative: Σ (ROI_i / (1 + f * ROI_i))
+        derivative = np.sum(rois[valid_mask] / (1 + f * rois[valid_mask])) / len(rois)
+        return abs(derivative)  # We want to minimize the absolute value
+    
+    def kelly_growth(f: float) -> float:
+        """Expected log growth rate: E[ln(1 + f * ROI)]"""
+        valid_mask = (1 + f * rois) > 0
+        if not np.any(valid_mask):
+            return -1e10  # Very negative for invalid f
+        
+        growth = np.mean(np.log(1 + f * rois[valid_mask]))
+        return growth
+    
+    # Find the maximum f where 1 + f * min(ROI) > 0
+    # This ensures we don't go bankrupt on the worst outcome
+    min_roi = np.min(rois)
+    if min_roi <= -1.0:
+        # If we can lose more than 100%, limit f to prevent bankruptcy
+        max_f = -0.99 / min_roi  # Ensure 1 + f * min_roi > 0.01
+    else:
+        max_f = 1.0
+    
+    max_f = min(max_f, 1.0)  # Never bet more than 100% of bankroll
+    
+    # Use binary search to find f where derivative is closest to 0
+    # Or use scipy.optimize if available
+    try:
+        from scipy.optimize import minimize_scalar
+        result = minimize_scalar(
+            lambda f: -kelly_growth(f),  # Minimize negative growth (maximize growth)
+            bounds=(0.0, max_f),
+            method='bounded'
+        )
+        if result.success:
+            kelly_fraction = result.x
+        else:
+            # Fallback to binary search
+            kelly_fraction = _binary_search_kelly(rois, max_f)
+    except ImportError:
+        # Fallback to binary search if scipy not available
+        kelly_fraction = _binary_search_kelly(rois, max_f)
+    
+    # Clamp to valid range [0, max_f]
+    kelly_fraction = max(0.0, min(max_f, kelly_fraction))
+    
+    # Verify the result makes sense (positive expected growth)
+    if kelly_fraction > 0:
+        growth = kelly_growth(kelly_fraction)
+        if growth <= 0:
+            return None  # No positive growth possible
+    
+    return kelly_fraction
+
+
+def _binary_search_kelly(rois: np.ndarray, max_f: float, tolerance: float = 1e-6) -> float:
+    """
+    Binary search to find Kelly fraction that maximizes expected log growth.
+    
+    Finds f that maximizes: E[ln(1 + f * ROI)]
+    by finding f where derivative Σ (ROI_i / (1 + f * ROI_i)) ≈ 0.
+    """
+    def derivative(f: float) -> float:
+        """Derivative of expected log growth."""
+        valid_mask = (1 + f * rois) > 0
+        if not np.any(valid_mask):
+            return 1e10
+        return np.sum(rois[valid_mask] / (1 + f * rois[valid_mask])) / len(rois)
+    
+    def growth(f: float) -> float:
+        """Expected log growth rate."""
+        valid_mask = (1 + f * rois) > 0
+        if not np.any(valid_mask):
+            return -1e10
+        return np.mean(np.log(1 + f * rois[valid_mask]))
+    
+    # Binary search for f where derivative ≈ 0 (maximizes growth)
+    left, right = 0.0, max_f
+    best_f = 0.0
+    best_growth = growth(0.0)
+    
+    for _ in range(100):  # Max iterations
+        mid = (left + right) / 2.0
+        deriv = derivative(mid)
+        mid_growth = growth(mid)
+        
+        # Track best growth found
+        if mid_growth > best_growth:
+            best_growth = mid_growth
+            best_f = mid
+        
+        if abs(deriv) < tolerance:
+            break
+        
+        if deriv > 0:
+            left = mid   # Derivative positive, can increase f
+        else:
+            right = mid  # Derivative negative, need to decrease f
+    
+    return best_f
+
+
+def calculate_kelly_roi(trades: List[Dict], bet_size: float = 4000.0, bankroll: float = 100000.0) -> Optional[float]:
+    """
+    Calculate the expected ROI if betting at Kelly optimal sizing.
+    
+    Uses the Generalized Kelly Criterion growth rate formula:
+        g(f) = (1/n) * Σ ln(1 + f * ROI_i)
+    
+    where f is the Kelly fraction and ROI_i is the ROI for each trade.
+    
+    Then converts growth rate to expected ROI per bet.
+    
+    Args:
+        trades: List of trade dicts
+        bet_size: The bet size used for these trades (default $4000)
+        bankroll: Total bankroll for Kelly sizing calculation (default $100k)
+        
+    Returns:
+        Expected ROI at Kelly optimal sizing, or None if calculation is invalid
+    """
+    kelly_fraction = calculate_kelly_fraction(trades, bet_size)
+    if kelly_fraction is None or kelly_fraction <= 0:
+        return None
+    
+    # Filter to trades with the specified bet size
+    relevant_trades = trades
+    if any('dollar_amount' in t for t in trades):
+        relevant_trades = [t for t in trades if abs(t.get('dollar_amount', bet_size) - bet_size) < 0.01]
+    
+    if not relevant_trades:
+        return None
+    
+    # Extract ROI values
+    rois = np.array([t.get("roi", 0.0) for t in relevant_trades])
+    
+    if len(rois) == 0:
+        return None
+    
+    # Calculate growth rate at Kelly fraction: g(f*) = (1/n) * Σ ln(1 + f* * ROI_i)
+    # Only consider trades where 1 + f * ROI > 0 (no bankruptcy)
+    valid_mask = (1 + kelly_fraction * rois) > 0
+    if not np.any(valid_mask):
+        return None
+    
+    growth_rate = np.mean(np.log(1 + kelly_fraction * rois[valid_mask]))
+    
+    # Convert growth rate to expected ROI per bet
+    # The growth rate is in log space, so expected return = exp(growth_rate) - 1
+    import math
+    expected_return = math.exp(growth_rate) - 1
+    
+    return expected_return
 
 
 def get_markets_with_orderbooks(

@@ -9,7 +9,7 @@ import os
 import argparse
 import json
 from datetime import datetime, timezone
-from typing import Optional, Union, Tuple
+from typing import Optional, Union, Tuple, Dict
 import pandas as pd
 import numpy as np
 
@@ -38,9 +38,36 @@ except ImportError:
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 
 from agents.backtesting.threshold_backtester import ThresholdBacktester
+from agents.backtesting.backtesting_utils import calculate_kelly_fraction, calculate_kelly_roi
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def convert_to_json_serializable(obj):
+    """Recursively convert numpy types and other non-JSON-serializable types to native Python types."""
+    import numpy as np
+    
+    # Check for numpy integer types (using base class for NumPy 2.0 compatibility)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    # Check for numpy floating point types (np.float_ removed in NumPy 2.0)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    # Check for numpy boolean types
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    # Check for numpy arrays
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    # Handle dictionaries recursively
+    elif isinstance(obj, dict):
+        return {key: convert_to_json_serializable(value) for key, value in obj.items()}
+    # Handle lists and tuples recursively
+    elif isinstance(obj, (list, tuple)):
+        return [convert_to_json_serializable(item) for item in obj]
+    else:
+        return obj
 
 
 def create_heatmap(
@@ -321,19 +348,48 @@ def create_interactive_heatmap(
         
         # Convert tuple keys to string keys for JSON
         # Handle both (threshold, margin) and (threshold, margin, dollar_amount) keys
+        # Also calculate Kelly fraction for each combination
         individual_trades_json = {}
-        for key_tuple, roi_values in individual_trades.items():
-            if len(key_tuple) == 2:
+        kelly_fractions_json = {}
+        
+        # Need to get full trade objects, not just ROI values, for Kelly calculation
+        # Check if individual_trades contains full trade objects or just ROI values
+        sample_value = next(iter(individual_trades.values())) if individual_trades else None
+        has_full_trades = sample_value and isinstance(sample_value, list) and len(sample_value) > 0 and isinstance(sample_value[0], dict) and 'roi' in sample_value[0]
+        
+        for key_tuple, trade_data in individual_trades.items():
+            # Convert tuple elements to native Python types first (NumPy 2.0 compatibility)
+            key_tuple_converted = tuple(convert_to_json_serializable(k) for k in key_tuple)
+            
+            if len(key_tuple_converted) == 2:
                 # Old format: (threshold, margin)
-                thresh, marg = key_tuple
+                thresh, marg = key_tuple_converted
                 key = f"{thresh:.6f},{marg:.6f}"
-            elif len(key_tuple) == 3:
+            elif len(key_tuple_converted) == 3:
                 # New format: (threshold, margin, dollar_amount)
-                thresh, marg, dollar_amt = key_tuple
+                thresh, marg, dollar_amt = key_tuple_converted
                 key = f"{thresh:.6f},{marg:.6f},{dollar_amt:.0f}"
             else:
                 continue
-            individual_trades_json[key] = roi_values
+            
+            # Extract ROI values (either from list of ROI floats or list of trade dicts)
+            if has_full_trades and isinstance(trade_data, list) and len(trade_data) > 0 and isinstance(trade_data[0], dict):
+                roi_values = [t.get('roi', 0.0) for t in trade_data]
+                trades_for_kelly = trade_data  # Use full trade objects
+            else:
+                # Assume trade_data is a list of ROI values
+                roi_values = convert_to_json_serializable(trade_data) if isinstance(trade_data, list) else [trade_data]
+                # Create minimal trade dicts for Kelly calculation from ROI values
+                trades_for_kelly = [{'roi': float(roi), 'is_win': float(roi) > 0, 'dollar_amount': 4000.0} for roi in roi_values]
+            
+            individual_trades_json[key] = convert_to_json_serializable(roi_values)
+            
+            # Calculate Kelly fraction (using $4000 bet size)
+            kelly_fraction = calculate_kelly_fraction(trades_for_kelly, bet_size=4000.0)
+            if kelly_fraction is not None:
+                kelly_fractions_json[key] = kelly_fraction
+            else:
+                kelly_fractions_json[key] = None
         
         # Prepare data for all dollar_amount values (if dollar_amount exists)
         all_data_by_dollar_amount = {}
@@ -430,6 +486,7 @@ def create_interactive_heatmap(
     <script>
     // Individual trades data
     const individualTrades = {json.dumps(individual_trades_json)};
+    const kellyFractions = {json.dumps(kelly_fractions_json)};
     const originalThresholds = {json.dumps(thresholds_list)};
     const originalMargins = {json.dumps(margins_list)};
     let currentDollarAmountForHistogram = {int(default_dollar_amount) if has_dollar_amount else 'null'};
@@ -532,7 +589,13 @@ def create_interactive_heatmap(
                                 if (currentDollarAmountForHistogram !== null) {{
                                     titleText += ', Dollar: $' + currentDollarAmountForHistogram;
                                 }}
-                                titleText += '<br>N=' + closeMatchValues.length + '</sub>';
+                                titleText += '<br>N=' + closeMatchValues.length;
+                                // Add Kelly fraction if available
+                                const kellyKey = thresholdKey.toFixed(6) + ',' + marginKey.toFixed(6) + (currentDollarAmountForHistogram !== null ? ',' + findClosestValue(currentDollarAmountForHistogram, dollarAmountValues).toFixed(0) : '');
+                                if (kellyFractions[kellyKey] !== undefined && kellyFractions[kellyKey] !== null) {{
+                                    titleText += '<br>Kelly Fraction: ' + (kellyFractions[kellyKey] * 100).toFixed(2) + '%';
+                                }}
+                                titleText += '</sub>';
                                 Plotly.relayout(gd, {{
                                     'annotations[1].text': titleText
                                 }});
@@ -561,7 +624,12 @@ def create_interactive_heatmap(
             if (currentDollarAmountForHistogram !== null) {{
                 titleText += ', Dollar: $' + currentDollarAmountForHistogram;
             }}
-            titleText += '<br>N=' + roiValues.length + '</sub>';
+            titleText += '<br>N=' + roiValues.length;
+            // Add Kelly fraction if available
+            if (kellyFractions[key] !== undefined && kellyFractions[key] !== null) {{
+                titleText += '<br>Kelly Fraction: ' + (kellyFractions[key] * 100).toFixed(2) + '%';
+            }}
+            titleText += '</sub>';
             Plotly.relayout(gd, {{
                 'annotations[1].text': titleText
             }});
@@ -590,6 +658,125 @@ def create_interactive_heatmap(
         return filepath
     
     return None
+
+
+def create_kelly_roi_heatmap(
+    df: pd.DataFrame,
+    individual_trades: Dict,
+    market_type: str,
+    metric: str = "kelly_roi",
+    output_dir: str = None
+) -> Optional[str]:
+    """
+    Create a heatmap showing ROI if betting at Kelly optimal sizing.
+    
+    Args:
+        df: DataFrame with grid search results
+        individual_trades: Dict mapping (threshold, margin, dollar_amount) -> list of trade results
+        market_type: '15m' or '1h'
+        metric: Metric name for the heatmap
+        output_dir: Output directory for saving files
+        
+    Returns:
+        Path to HTML file if created, None otherwise
+    """
+    if not PLOTLY_AVAILABLE:
+        return None
+    
+    if df.empty:
+        return None
+    
+    if not individual_trades or len(individual_trades) == 0:
+        return None
+    
+    # Check if dollar_amount column exists
+    has_dollar_amount = 'dollar_amount' in df.columns
+    
+    if has_dollar_amount:
+        dollar_amount_values = sorted(df['dollar_amount'].unique().tolist())
+        default_dollar_amount = dollar_amount_values[0]
+        df_filtered = df[df['dollar_amount'] == default_dollar_amount].copy()
+    else:
+        dollar_amount_values = []
+        default_dollar_amount = None
+        df_filtered = df.copy()
+    
+    # Calculate Kelly ROI for each parameter combination
+    kelly_roi_dict = {}
+    
+    # Process each parameter combination in individual_trades
+    for key_tuple, trade_data in individual_trades.items():
+        if not trade_data:
+            continue
+        
+        # Determine if we have full trade objects or just ROI values
+        if isinstance(trade_data, list) and len(trade_data) > 0:
+            if isinstance(trade_data[0], dict):
+                trades_for_kelly = trade_data
+            else:
+                # ROI values only - create minimal trade dicts
+                trades_for_kelly = [{'roi': float(roi), 'is_win': float(roi) > 0, 'dollar_amount': 4000.0} for roi in trade_data]
+        else:
+            continue
+        
+        # Calculate Kelly ROI
+        kelly_roi = calculate_kelly_roi(trades_for_kelly, bet_size=4000.0)
+        
+        if kelly_roi is not None:
+            kelly_roi_dict[key_tuple] = kelly_roi
+    
+    if not kelly_roi_dict:
+        return None
+    
+    # Create DataFrame with Kelly ROI values
+    kelly_results = []
+    for key_tuple, kelly_roi in kelly_roi_dict.items():
+        if len(key_tuple) == 3:
+            threshold, margin, dollar_amount = key_tuple
+            if has_dollar_amount and abs(dollar_amount - default_dollar_amount) < 0.01:
+                kelly_results.append({
+                    'threshold': threshold,
+                    'margin': margin,
+                    'dollar_amount': dollar_amount,
+                    'kelly_roi': kelly_roi
+                })
+        elif len(key_tuple) == 2:
+            threshold, margin = key_tuple
+            kelly_results.append({
+                'threshold': threshold,
+                'margin': margin,
+                'kelly_roi': kelly_roi
+            })
+    
+    if not kelly_results:
+        return None
+    
+    kelly_df = pd.DataFrame(kelly_results)
+    
+    # Merge with original df to preserve structure
+    df_with_kelly = df_filtered.copy()
+    df_with_kelly['kelly_roi'] = 0.0
+    
+    # Merge Kelly ROI values
+    for result in kelly_results:
+        mask = (df_with_kelly['threshold'] == result['threshold']) & \
+               (df_with_kelly['margin'] == result['margin'])
+        if has_dollar_amount and 'dollar_amount' in result:
+            mask = mask & (df_with_kelly['dollar_amount'] == result['dollar_amount'])
+        if mask.any():
+            df_with_kelly.loc[mask, 'kelly_roi'] = result['kelly_roi']
+    
+    # Create empty individual_trades dict for Kelly ROI (we don't need it for this visualization)
+    df_with_kelly.attrs = getattr(df_with_kelly, 'attrs', {})
+    df_with_kelly.attrs['individual_trades'] = {}
+    
+    # Create heatmap using existing function
+    return create_interactive_heatmap(
+        df_with_kelly,
+        metric='kelly_roi',
+        market_type=market_type,
+        output_dir=output_dir
+    )
 
 
 def display_grid(df: pd.DataFrame, metric: str = "avg_roi", title: str = ""):

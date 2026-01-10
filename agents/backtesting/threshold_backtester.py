@@ -529,8 +529,19 @@ class ThresholdBacktester:
         if outcome_price is None:
             return None
         
-        # Calculate ROI using weighted average fill price (conservative - may be higher than bid_price)
-        roi = (outcome_price - weighted_avg_fill_price) / weighted_avg_fill_price if weighted_avg_fill_price > 0 else 0.0
+        # Calculate fee based on fill price and trade value
+        from agents.backtesting.backtesting_utils import calculate_polymarket_fee
+        fee = calculate_polymarket_fee(weighted_avg_fill_price, dollars_spent)
+        
+        # Calculate total cost (dollars spent + fee)
+        total_cost = dollars_spent + fee
+        
+        # Calculate total revenue (outcome price * shares)
+        total_revenue = outcome_price * filled_shares
+        
+        # Calculate ROI accounting for fees
+        # ROI = (revenue - cost) / cost
+        roi = (total_revenue - total_cost) / total_cost if total_cost > 0 else 0.0
         is_win = roi > 0
         
         # Calculate fill rate (what % of dollar amount spent)
@@ -548,9 +559,12 @@ class ThresholdBacktester:
             "fill_price": weighted_avg_fill_price,  # Weighted average fill price (>= bid_price)
             "filled_shares": filled_shares,
             "dollars_spent": dollars_spent,
+            "fee": fee,  # Fee paid for this trade
+            "total_cost": total_cost,  # dollars_spent + fee
             "fill_rate": fill_rate,
             "fill_time": fill_time,
             "outcome_price": outcome_price,
+            "total_revenue": total_revenue,  # outcome_price * filled_shares
             "roi": roi,
             "is_win": is_win,
         }

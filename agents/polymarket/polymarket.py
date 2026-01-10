@@ -7,7 +7,7 @@ import time
 import ast
 import requests
 import logging
-from typing import Optional
+from typing import Optional, Dict, List
 
 from dotenv import load_dotenv
 
@@ -19,6 +19,7 @@ import httpx
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds
 from py_clob_client.constants import AMOY, POLYGON
+from py_clob_client.exceptions import PolyApiException
 from py_order_utils.builders import OrderBuilder
 from py_order_utils.model import OrderData
 from py_order_utils.signer import Signer
@@ -34,6 +35,8 @@ from agents.utils.objects import SimpleMarket, SimpleEvent
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 
 class Polymarket:
     def __init__(self) -> None:
@@ -45,7 +48,21 @@ class Polymarket:
         self.clob_auth_endpoint = self.clob_url + "/auth/api-key"
 
         self.chain_id = 137  # POLYGON
-        self.private_key = os.getenv("POLYGON_WALLET_PRIVATE_KEY")
+        # Clean private key: strip whitespace, remove comments, and remove 0x prefix if present
+        raw_key = os.getenv("POLYGON_WALLET_PRIVATE_KEY")
+        if raw_key:
+            raw_key = raw_key.strip()
+            # Remove any comments (everything after #)
+            if "#" in raw_key:
+                raw_key = raw_key.split("#")[0].strip()
+            # Remove 0x prefix if present
+            if raw_key.startswith("0x"):
+                raw_key = raw_key[2:]
+            # Remove any remaining whitespace/newlines
+            raw_key = raw_key.replace(" ", "").replace("\n", "").replace("\r", "")
+            self.private_key = raw_key
+        else:
+            self.private_key = None
         self.proxy_wallet_address = os.getenv("POLYMARKET_PROXY_WALLET_ADDRESS")  # For gasless trading
         self.polygon_rpc = "https://polygon-rpc.com"
         self.w3 = Web3(Web3.HTTPProvider(self.polygon_rpc))
@@ -85,7 +102,6 @@ class Polymarket:
                 funder=self.proxy_wallet_address,
                 signature_type=2
             )
-            logger = logging.getLogger(__name__)
             logger.info(f"✓ Using proxy wallet as funder: {self.proxy_wallet_address[:10]}...{self.proxy_wallet_address[-8:]}")
             logger.info("  (Gasless trading enabled)")
         else:
@@ -356,10 +372,94 @@ class Polymarket:
         order = builder.build_signed_order(order_data)
         return order
 
-    def execute_order(self, price, size, side, token_id) -> str:
+    def execute_order(self, price, size, side, token_id, fee_rate_bps: Optional[int] = None, auto_detect_fee: bool = True) -> Dict:
+        """
+        Place a limit order.
+        
+        Args:
+            price: Limit price (0.01 to 0.99)
+            size: Order size (number of shares)
+            side: "BUY" or "SELL" (or use BUY/SELL constants)
+            token_id: CLOB token ID
+            fee_rate_bps: Fee rate in basis points. If None and auto_detect_fee=True, 
+                         will automatically detect from error message (default: None)
+            auto_detect_fee: If True and fee_rate_bps is None, automatically detect 
+                            fee rate from error message (default: True)
+            
+        Returns:
+            Order response dict with fields like 'orderID', 'status', 'success', etc.
+        """
+        # If fee_rate_bps not specified, try with default (0) and auto-detect from error
+        if fee_rate_bps is None:
+            if auto_detect_fee:
+                # Try with fee_rate_bps=0 first, then parse error to get required fee
+                try:
+                    return self.client.create_and_post_order(
+                        OrderArgs(price=price, size=size, side=side, token_id=token_id, fee_rate_bps=0)
+                    )
+                except PolyApiException as e:
+                    # Parse error message to extract required fee rate
+                    error_str = str(e)
+                    error_message = e.error_message if hasattr(e, 'error_message') else error_str
+                    
+                    # Check if error is about fee rate
+                    if "fee" in error_str.lower() or "fee" in str(error_message).lower():
+                        # Extract fee rate from error message like "current market's taker fee: 1000"
+                        import re
+                        # Try multiple patterns
+                        patterns = [
+                            r"taker fee[:\s]+(\d+)",
+                            r"fee[:\s]+(\d+)",
+                            r"fee rate[:\s]+(\d+)",
+                        ]
+                        for pattern in patterns:
+                            match = re.search(pattern, error_str, re.IGNORECASE)
+                            if not match and isinstance(error_message, dict):
+                                match = re.search(pattern, str(error_message), re.IGNORECASE)
+                            if match:
+                                detected_fee = int(match.group(1))
+                                logger.info(f"Auto-detected fee rate from error: {detected_fee} BPS")
+                                # Retry with detected fee rate
+                                return self.client.create_and_post_order(
+                                    OrderArgs(price=price, size=size, side=side, token_id=token_id, fee_rate_bps=detected_fee)
+                                )
+                    # If we can't parse the error, re-raise it
+                    raise
+                except Exception as e:
+                    # For any other exception, re-raise it
+                    raise
+            else:
+                # Default to 1000 BPS if auto_detect is disabled
+                fee_rate_bps = 1000
+        
         return self.client.create_and_post_order(
-            OrderArgs(price=price, size=size, side=side, token_id=token_id)
+            OrderArgs(price=price, size=size, side=side, token_id=token_id, fee_rate_bps=fee_rate_bps)
         )
+    
+    def extract_order_id(self, order_response) -> Optional[str]:
+        """
+        Extract order ID from order response.
+        Handles both dict and string formats.
+        
+        Args:
+            order_response: Response from execute_order() or execute_market_order()
+            
+        Returns:
+            Order ID string, or None if not found
+        """
+        if isinstance(order_response, dict):
+            # Try common field names
+            return order_response.get("orderID") or order_response.get("order_id") or order_response.get("id")
+        elif isinstance(order_response, str):
+            # If it's a JSON string, try to parse it
+            try:
+                import json
+                parsed = json.loads(order_response)
+                return parsed.get("orderID") or parsed.get("order_id") or parsed.get("id")
+            except (json.JSONDecodeError, AttributeError):
+                # If it's just the order ID as a string, return it
+                return order_response if order_response.startswith("0x") else None
+        return None
 
     def execute_market_order(self, market, amount) -> str:
         token_id = ast.literal_eval(market[0].dict()["metadata"]["clob_token_ids"])[1]
@@ -373,6 +473,89 @@ class Polymarket:
         print(resp)
         print("Done!")
         return resp
+
+    def get_order_status(self, order_id: str) -> Optional[Dict]:
+        """
+        Get the status of a specific order.
+        
+        Args:
+            order_id: Order ID (from execute_order response)
+            
+        Returns:
+            Order status dict with fields like 'status', 'orderID', 'takingAmount', 'makingAmount', etc.
+            Returns None if order not found or error occurred
+        """
+        if not self.client:
+            logger.error("CLOB client not initialized - cannot get order status")
+            return None
+        
+        try:
+            return self.client.get_order(order_id)
+        except Exception as e:
+            logger.error(f"Error getting order status for {order_id}: {e}")
+            return None
+
+    def get_open_orders(self) -> Optional[List[Dict]]:
+        """
+        Get all currently open/active orders for your account.
+        
+        Returns:
+            List of open orders, or None if error occurred
+        """
+        if not self.client:
+            logger.error("CLOB client not initialized - cannot get open orders")
+            return None
+        
+        try:
+            return self.client.get_open_orders()
+        except Exception as e:
+            logger.error(f"Error getting open orders: {e}")
+            return None
+
+    def get_trades(self) -> Optional[List[Dict]]:
+        """
+        Get execution details (fills) for your orders.
+        Returns trades once orders move from 'open' to 'matched'.
+        
+        Returns:
+            List of trade/fill records, or None if error occurred
+        """
+        if not self.client:
+            logger.error("CLOB client not initialized - cannot get trades")
+            return None
+        
+        try:
+            return self.client.get_trades()
+        except Exception as e:
+            logger.error(f"Error getting trades: {e}")
+            return None
+
+    def cancel_order(self, order_id: str) -> Optional[Dict]:
+        """
+        Cancel a specific order.
+        
+        Args:
+            order_id: Order ID to cancel
+            
+        Returns:
+            Cancellation response dict, or None if error occurred
+        """
+        if not self.client:
+            logger.error("CLOB client not initialized - cannot cancel order")
+            return None
+        
+        try:
+            # Check if client has cancel_order method
+            if hasattr(self.client, 'cancel_order'):
+                return self.client.cancel_order(order_id)
+            elif hasattr(self.client, 'cancel'):
+                return self.client.cancel(order_id)
+            else:
+                logger.warning("CLOB client does not have cancel_order or cancel method")
+                return None
+        except Exception as e:
+            logger.error(f"Error canceling order {order_id}: {e}")
+            return None
 
     def get_usdc_balance(self) -> float:
         """Get USDC balance from your Polygon wallet (direct wallet)."""
