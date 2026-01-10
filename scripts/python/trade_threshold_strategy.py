@@ -21,6 +21,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 
 load_dotenv()
 
+# Configure proxy BEFORE importing modules that use httpx/requests
+# This ensures environment variables are set before ClobClient initializes
+from agents.utils.proxy_config import configure_proxy, get_proxy
+configure_proxy(auto_detect=True)
+proxy_url = get_proxy()
+if proxy_url:
+    os.environ['HTTPS_PROXY'] = proxy_url
+    os.environ['HTTP_PROXY'] = proxy_url
+
 from agents.trading.trade_db import TradeDatabase, RealTradeThreshold
 from agents.trading.config_loader import TradingConfig
 from agents.trading.orderbook_helper import (
@@ -59,6 +68,12 @@ class ThresholdTrader:
     
     def __init__(self, config_path: str):
         """Initialize trader with config."""
+        # Proxy is already configured at module level before imports
+        if proxy_url:
+            logger.info(f"Proxy configured for trading: {proxy_url.split('@')[1] if '@' in proxy_url else 'configured'}")
+        else:
+            logger.warning("No proxy configured - trading requests may be blocked by Cloudflare")
+        
         self.config = TradingConfig(config_path)
         self.db = TradeDatabase()
         self.pm = Polymarket()
