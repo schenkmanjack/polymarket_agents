@@ -372,7 +372,7 @@ class Polymarket:
         order = builder.build_signed_order(order_data)
         return order
 
-    def execute_order(self, price, size, side, token_id, fee_rate_bps: Optional[int] = None, auto_detect_fee: bool = True) -> Dict:
+    def execute_order(self, price, size, side, token_id, fee_rate_bps: Optional[int] = None, auto_detect_fee: bool = True, order_type: OrderType = OrderType.GTC) -> Dict:
         """
         Place a limit order.
         
@@ -385,18 +385,23 @@ class Polymarket:
                          will automatically detect from error message (default: None)
             auto_detect_fee: If True and fee_rate_bps is None, automatically detect 
                             fee rate from error message (default: True)
+            order_type: OrderType (GTC for limit orders, FOK/IOC for market orders). Default: OrderType.GTC
             
         Returns:
             Order response dict with fields like 'orderID', 'status', 'success', etc.
         """
+        # Use two-step process: create_order + post_order with explicit OrderType
+        # This ensures the order is properly structured as a limit order
+        # Reference: https://github.com/Polymarket/py-clob-client
+        
         # If fee_rate_bps not specified, try with default (0) and auto-detect from error
         if fee_rate_bps is None:
             if auto_detect_fee:
                 # Try with fee_rate_bps=0 first, then parse error to get required fee
                 try:
-                    return self.client.create_and_post_order(
-                        OrderArgs(price=price, size=size, side=side, token_id=token_id, fee_rate_bps=0)
-                    )
+                    order_args = OrderArgs(price=price, size=size, side=side, token_id=token_id, fee_rate_bps=0)
+                    signed_order = self.client.create_order(order_args)
+                    return self.client.post_order(signed_order, order_type)
                 except PolyApiException as e:
                     # Parse error message to extract required fee rate
                     error_str = str(e)
@@ -420,9 +425,9 @@ class Polymarket:
                                 detected_fee = int(match.group(1))
                                 logger.info(f"Auto-detected fee rate from error: {detected_fee} BPS")
                                 # Retry with detected fee rate
-                                return self.client.create_and_post_order(
-                                    OrderArgs(price=price, size=size, side=side, token_id=token_id, fee_rate_bps=detected_fee)
-                                )
+                                order_args = OrderArgs(price=price, size=size, side=side, token_id=token_id, fee_rate_bps=detected_fee)
+                                signed_order = self.client.create_order(order_args)
+                                return self.client.post_order(signed_order, order_type)
                     # If we can't parse the error, re-raise it
                     raise
                 except Exception as e:
@@ -432,9 +437,10 @@ class Polymarket:
                 # Default to 1000 BPS if auto_detect is disabled
                 fee_rate_bps = 1000
         
-        return self.client.create_and_post_order(
-            OrderArgs(price=price, size=size, side=side, token_id=token_id, fee_rate_bps=fee_rate_bps)
-        )
+        # Use two-step process with explicit OrderType
+        order_args = OrderArgs(price=price, size=size, side=side, token_id=token_id, fee_rate_bps=fee_rate_bps)
+        signed_order = self.client.create_order(order_args)
+        return self.client.post_order(signed_order, order_type)
     
     def extract_order_id(self, order_response) -> Optional[str]:
         """

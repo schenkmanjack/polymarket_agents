@@ -517,8 +517,12 @@ class ThresholdTrader:
             return
         
         logger.info(
-            f"Placing order: {side} side, price={order_price:.4f}, size={order_size} shares, "
+            f"Placing LIMIT order: {side} side, limit_price={order_price:.4f}, size={order_size} shares, "
             f"order_value=${order_value:.2f} (amount_invested=${amount_invested:.2f}, principal=${self.principal:.2f})"
+        )
+        logger.info(
+            f"  Order details: trigger_price={trigger_price:.4f}, margin={self.config.margin:.4f}, "
+            f"calculated_limit_price={order_price:.4f}"
         )
         
         # Place order with retry logic
@@ -651,9 +655,8 @@ class ThresholdTrader:
                         if trade and not trade.filled_shares:
                             # Order was filled - extract fill details
                             # The 'size' field contains the filled shares
-                            # The 'price' field contains the fill price
                             filled_shares = fill.get("size")
-                            fill_price = fill.get("price")
+                            fill_price_from_record = fill.get("price")
                             
                             # Convert to float if they're strings
                             if filled_shares:
@@ -661,10 +664,27 @@ class ThresholdTrader:
                             else:
                                 filled_shares = trade.order_size  # Fallback to order size
                             
-                            if fill_price:
-                                fill_price = float(fill_price)
+                            # Use the actual fill price from the fill record (what Polymarket UI shows)
+                            # This is the real execution price, even if it seems different from limit price
+                            if fill_price_from_record:
+                                fill_price = float(fill_price_from_record)
                             else:
                                 fill_price = trade.order_price  # Fallback to order price
+                            
+                            # Log if fill price differs significantly from limit price (investigation)
+                            price_diff = abs(fill_price - trade.order_price)
+                            if price_diff > 0.01:
+                                logger.warning(
+                                    f"⚠️ Fill price ({fill_price:.4f}) differs significantly from limit price ({trade.order_price:.4f}) "
+                                    f"for order {fill_order_id}. Difference: {price_diff:.4f}. "
+                                    f"Limit BUY orders should only fill at limit price or better (lower). "
+                                    f"Using actual fill price from Polymarket ({fill_price:.4f}) as shown in UI."
+                                )
+                            else:
+                                logger.info(
+                                    f"✓ Fill price ({fill_price:.4f}) matches limit price ({trade.order_price:.4f}) "
+                                    f"for order {fill_order_id}"
+                                )
                             
                             dollars_spent = filled_shares * fill_price
                             
@@ -771,8 +791,9 @@ class ThresholdTrader:
                 if is_filled or is_cancelled:
                     if is_filled and not trade.filled_shares:
                         # Update trade with fill information
+                        # For limit orders, fill price is the limit price (or better)
                         filled_shares = float(filled_amount) if filled_amount else trade.order_size
-                        fill_price = trade.order_price  # Use order price as fill price (limit order)
+                        fill_price = trade.order_price  # Use limit order price as fill price
                         dollars_spent = filled_shares * fill_price
                         
                         # Calculate fee (simplified - actual fee may vary)
