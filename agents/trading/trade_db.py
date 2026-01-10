@@ -299,21 +299,45 @@ class TradeDatabase:
             session.close()
     
     def get_unresolved_trades(self) -> List[RealTradeThreshold]:
-        """Get all trades where market hasn't resolved yet."""
+        """
+        Get all trades where market hasn't resolved yet.
+        
+        Only returns trades that:
+        - Have order_id (order was placed)
+        - Are not cancelled or failed
+        - Have been filled (filled_shares > 0) or are still open/partial
+        """
         session = self.SessionLocal()
         try:
             return session.query(RealTradeThreshold).filter(
-                RealTradeThreshold.market_resolved_at.is_(None)
+                RealTradeThreshold.market_resolved_at.is_(None),
+                RealTradeThreshold.order_id.isnot(None),  # Must have order_id
+                RealTradeThreshold.order_status.notin_(["cancelled", "failed"]),  # Exclude cancelled/failed
             ).all()
         finally:
             session.close()
     
     def get_latest_principal(self) -> Optional[float]:
-        """Get the latest principal from the most recent resolved trade."""
+        """
+        Get the latest principal from the most recent resolved trade.
+        
+        Only considers trades that:
+        - Have principal_after set (trade resolved)
+        - Have order_id set (order was successfully placed)
+        - Have market_resolved_at set (market actually resolved)
+        - Have a valid order_status (not 'failed')
+        - Have principal_after > 0 (positive principal only)
+        
+        This filters out test entries, failed orders, and invalid negative principals.
+        """
         session = self.SessionLocal()
         try:
             trade = session.query(RealTradeThreshold).filter(
-                RealTradeThreshold.principal_after.isnot(None)
+                RealTradeThreshold.principal_after.isnot(None),
+                RealTradeThreshold.principal_after > 0,  # Only positive principals
+                RealTradeThreshold.order_id.isnot(None),  # Must have order_id (order was placed)
+                RealTradeThreshold.market_resolved_at.isnot(None),  # Market must be resolved
+                RealTradeThreshold.order_status != "failed",  # Exclude failed orders
             ).order_by(RealTradeThreshold.market_resolved_at.desc()).first()
             if trade:
                 return trade.principal_after

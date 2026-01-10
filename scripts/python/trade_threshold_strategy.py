@@ -84,13 +84,22 @@ class ThresholdTrader:
         logger.info(f"Deployment ID: {self.deployment_id}")
         
         # Load or initialize principal
+        # Only use principal from resolved trades (principal_after is set and > 0)
+        # Ignore test entries, failed orders, and negative principals
         latest_principal = self.db.get_latest_principal()
-        if latest_principal is not None:
+        if latest_principal is not None and latest_principal > 0:
             self.principal = latest_principal
             logger.info(f"Loaded principal from database: ${self.principal:.2f}")
         else:
             self.principal = self.config.initial_principal
             logger.info(f"Using initial principal from config: ${self.principal:.2f}")
+            if latest_principal is not None and latest_principal <= 0:
+                logger.warning(
+                    f"Ignoring invalid principal from database (${latest_principal:.2f}) - "
+                    f"using initial principal from config instead"
+                )
+            else:
+                logger.info("(No valid resolved trades found in database, using initial principal)")
         
         # Track markets we're monitoring
         self.monitored_markets: Dict[str, Dict] = {}  # market_slug -> market info
@@ -363,26 +372,9 @@ class ThresholdTrader:
                 if attempt < 2:
                     await asyncio.sleep(5.0)  # Wait 5 seconds before retry
                 else:
-                    logger.error(f"Failed to place order after 3 attempts")
-                    # Log error to database
-                    trade_id = self.db.create_trade(
-                        deployment_id=self.deployment_id,
-                        threshold=self.config.threshold,
-                        margin=self.config.margin,
-                        kelly_fraction=self.config.kelly_fraction,
-                        kelly_scale_factor=self.config.kelly_scale_factor,
-                        market_type=self.config.market_type,
-                        market_id=market_id,
-                        market_slug=market_slug,
-                        token_id=token_id,
-                        order_id=None,
-                        order_price=order_price,
-                        order_size=order_size,
-                        order_side=side,
-                        principal_before=self.principal,
-                        order_status="failed",
-                        error_message=str(e),
-                    )
+                    logger.error(f"Failed to place order after 3 attempts - not creating trade record")
+                    # Don't create trade record for failed orders - principal shouldn't change
+                    # Only log the error without creating a database entry
                     return
         
         if not order_response:
@@ -537,6 +529,34 @@ class ThresholdTrader:
     async def _process_market_resolution(self, trade: RealTradeThreshold, market: Dict):
         """Process market resolution and update principal."""
         try:
+            # Only process trades that actually executed
+            # Skip if order was never placed, cancelled, or never filled
+            if not trade.order_id:
+                logger.warning(f"Trade {trade.id} has no order_id - skipping resolution (order never placed)")
+                return
+            
+            if trade.order_status in ["cancelled", "failed"]:
+                logger.info(f"Trade {trade.id} has status '{trade.order_status}' - skipping resolution (order did not execute)")
+                return
+            
+            # Check if order was actually filled
+            filled_shares = trade.filled_shares or 0.0
+            dollars_spent = trade.dollars_spent or 0.0
+            
+            if filled_shares <= 0 or dollars_spent <= 0:
+                logger.warning(
+                    f"Trade {trade.id} was not filled (filled_shares={filled_shares}, "
+                    f"dollars_spent=${dollars_spent:.2f}) - skipping resolution (order did not execute)"
+                )
+                # Mark as cancelled/unfilled if not already marked
+                if trade.order_status not in ["cancelled", "failed"]:
+                    self.db.update_order_status(
+                        trade.id,
+                        "cancelled",
+                        error_message="Order never filled before market resolution"
+                    )
+                return
+            
             # Get outcome prices
             outcome_prices_raw = market.get("outcomePrices")
             if not outcome_prices_raw:
@@ -566,12 +586,10 @@ class ThresholdTrader:
                 logger.error(f"Could not parse outcome price for trade {trade.id}")
                 return
             
-            # Calculate payout
-            filled_shares = trade.filled_shares or trade.order_size
+            # Calculate payout (only for filled shares)
             payout = outcome_price * filled_shares
             
             # Calculate net payout and ROI
-            dollars_spent = trade.dollars_spent or (filled_shares * trade.order_price)
             fee = trade.fee or 0.0
             net_payout = payout - dollars_spent - fee
             roi = net_payout / (dollars_spent + fee) if (dollars_spent + fee) > 0 else 0.0
