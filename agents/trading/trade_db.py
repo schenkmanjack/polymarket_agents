@@ -317,9 +317,13 @@ class TradeDatabase:
         finally:
             session.close()
     
-    def get_latest_principal(self) -> Optional[float]:
+    def get_latest_principal(self, deployment_id: Optional[str] = None) -> Optional[float]:
         """
         Get the latest principal from the most recent resolved trade.
+        
+        Args:
+            deployment_id: Optional deployment ID to filter by. If None, returns principal from any deployment.
+                          If provided, only returns principal from trades with matching deployment_id.
         
         Only considers trades that:
         - Have principal_after set (trade resolved)
@@ -327,18 +331,25 @@ class TradeDatabase:
         - Have market_resolved_at set (market actually resolved)
         - Have a valid order_status (not 'failed')
         - Have principal_after > 0 (positive principal only)
+        - Match deployment_id if provided
         
         This filters out test entries, failed orders, and invalid negative principals.
         """
         session = self.SessionLocal()
         try:
-            trade = session.query(RealTradeThreshold).filter(
+            query = session.query(RealTradeThreshold).filter(
                 RealTradeThreshold.principal_after.isnot(None),
                 RealTradeThreshold.principal_after > 0,  # Only positive principals
                 RealTradeThreshold.order_id.isnot(None),  # Must have order_id (order was placed)
                 RealTradeThreshold.market_resolved_at.isnot(None),  # Market must be resolved
                 RealTradeThreshold.order_status != "failed",  # Exclude failed orders
-            ).order_by(RealTradeThreshold.market_resolved_at.desc()).first()
+            )
+            
+            # Filter by deployment_id if provided
+            if deployment_id is not None:
+                query = query.filter(RealTradeThreshold.deployment_id == deployment_id)
+            
+            trade = query.order_by(RealTradeThreshold.market_resolved_at.desc()).first()
             if trade:
                 return trade.principal_after
             return None

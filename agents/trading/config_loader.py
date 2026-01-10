@@ -42,6 +42,7 @@ class TradingConfig:
         """Validate configuration."""
         required_fields = [
             'threshold',
+            'upper_threshold',
             'margin',
             'kelly_fraction',
             'kelly_scale_factor',
@@ -57,6 +58,14 @@ class TradingConfig:
         threshold = self.config['threshold']
         if not isinstance(threshold, (int, float)) or not (0.0 < threshold <= 1.0):
             raise ValueError(f"threshold must be a float between 0.0 and 1.0, got {threshold}")
+        
+        upper_threshold = self.config['upper_threshold']
+        if not isinstance(upper_threshold, (int, float)) or not (0.0 < upper_threshold <= 1.0):
+            raise ValueError(f"upper_threshold must be a float between 0.0 and 1.0, got {upper_threshold}")
+        
+        # Ensure upper_threshold > threshold
+        if upper_threshold <= threshold:
+            raise ValueError(f"upper_threshold ({upper_threshold}) must be greater than threshold ({threshold})")
         
         margin = self.config['margin']
         if not isinstance(margin, (int, float)) or margin < 0.0:
@@ -83,6 +92,10 @@ class TradingConfig:
     @property
     def threshold(self) -> float:
         return float(self.config['threshold'])
+    
+    @property
+    def upper_threshold(self) -> float:
+        return float(self.config['upper_threshold'])
     
     @property
     def margin(self) -> float:

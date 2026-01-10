@@ -1,5 +1,6 @@
 {
   "threshold": 0.64,
+  "upper_threshold": 0.97,
   "margin": 0.02,
   "kelly_fraction": 0.8,
   "kelly_scale_factor": 0.8,

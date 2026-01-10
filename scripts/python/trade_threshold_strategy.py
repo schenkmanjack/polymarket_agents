@@ -84,22 +84,24 @@ class ThresholdTrader:
         logger.info(f"Deployment ID: {self.deployment_id}")
         
         # Load or initialize principal
-        # Only use principal from resolved trades (principal_after is set and > 0)
-        # Ignore test entries, failed orders, and negative principals
-        latest_principal = self.db.get_latest_principal()
+        # Only use principal from resolved trades from THIS deployment
+        # If no trades from current deployment, use initial_principal from config
+        latest_principal = self.db.get_latest_principal(deployment_id=self.deployment_id)
         if latest_principal is not None and latest_principal > 0:
             self.principal = latest_principal
-            logger.info(f"Loaded principal from database: ${self.principal:.2f}")
+            logger.info(f"Loaded principal from database (deployment {self.deployment_id[:8]}...): ${self.principal:.2f}")
         else:
+            # Check if there are any resolved trades from previous deployments
+            any_principal = self.db.get_latest_principal(deployment_id=None)
+            if any_principal is not None and any_principal > 0:
+                logger.info(
+                    f"Found principal ${any_principal:.2f} from previous deployment, "
+                    f"but using initial_principal from config for new deployment"
+                )
+            
             self.principal = self.config.initial_principal
             logger.info(f"Using initial principal from config: ${self.principal:.2f}")
-            if latest_principal is not None and latest_principal <= 0:
-                logger.warning(
-                    f"Ignoring invalid principal from database (${latest_principal:.2f}) - "
-                    f"using initial principal from config instead"
-                )
-            else:
-                logger.info("(No valid resolved trades found in database, using initial principal)")
+            logger.info("(No resolved trades found for current deployment, using initial principal)")
         
         # Track markets we're monitoring
         self.monitored_markets: Dict[str, Dict] = {}  # market_slug -> market info
@@ -122,10 +124,31 @@ class ThresholdTrader:
         logger.info("=" * 80)
         logger.info(f"Market type: {self.config.market_type}")
         logger.info(f"Threshold: {self.config.threshold:.4f}")
+        logger.info(f"Upper threshold: {self.config.upper_threshold:.4f}")
         logger.info(f"Margin: {self.config.margin:.4f}")
         logger.info(f"Kelly fraction: {self.config.kelly_fraction:.4f}")
         logger.info(f"Kelly scale factor: {self.config.kelly_scale_factor:.4f}")
         logger.info(f"Current principal: ${self.principal:.2f}")
+        
+        # Check wallet balance
+        try:
+            wallet_balance = self.pm.get_polymarket_balance()
+            if wallet_balance is not None:
+                logger.info(f"Wallet balance: ${wallet_balance:.2f}")
+                amount_invested = self.config.get_amount_invested(self.principal)
+                if wallet_balance < amount_invested:
+                    logger.warning(
+                        f"⚠ INSUFFICIENT WALLET BALANCE: "
+                        f"${wallet_balance:.2f} < ${amount_invested:.2f} (required for next order)"
+                    )
+                    logger.warning("Please fund your proxy wallet to enable trading")
+                else:
+                    logger.info(f"✓ Wallet balance sufficient for next order (${amount_invested:.2f})")
+            else:
+                logger.warning("Could not check wallet balance - ensure proxy wallet is configured")
+        except Exception as e:
+            logger.warning(f"Could not check wallet balance: {e}")
+        
         logger.info("=" * 80)
         
         # Resume monitoring markets we've bet on
@@ -287,6 +310,24 @@ class ThresholdTrader:
             logger.warning(f"Principal ${self.principal:.2f} is below minimum bet size ${MIN_BET_SIZE:.2f}")
             return
         
+        # Check wallet balance before placing orders
+        try:
+            wallet_balance = self.pm.get_polymarket_balance()
+            if wallet_balance is None:
+                logger.warning("Could not check wallet balance - skipping order placement")
+                return
+            
+            amount_invested = self.config.get_amount_invested(self.principal)
+            if wallet_balance < amount_invested:
+                logger.warning(
+                    f"Insufficient wallet balance: ${wallet_balance:.2f} < ${amount_invested:.2f} "
+                    f"(required for order). Skipping order placement."
+                )
+                return
+        except Exception as e:
+            logger.error(f"Error checking wallet balance: {e}")
+            # Continue anyway - let the order fail if balance is insufficient
+        
         for market_slug, market_info in list(self.monitored_markets.items()):
             # Skip if already bet on
             if market_slug in self.markets_with_bets:
@@ -318,6 +359,15 @@ class ThresholdTrader:
             
             if trigger:
                 side, lowest_ask = trigger
+                
+                # Check upper threshold - don't place order if price is too high
+                if lowest_ask > self.config.upper_threshold:
+                    logger.info(
+                        f"Threshold triggered for {market_slug}: {side} side, lowest_ask={lowest_ask:.4f}, "
+                        f"but above upper_threshold={self.config.upper_threshold:.4f} - skipping order"
+                    )
+                    continue
+                
                 logger.info(f"Threshold triggered for {market_slug}: {side} side, lowest_ask={lowest_ask:.4f}")
                 
                 # Place order
@@ -343,6 +393,9 @@ class ThresholdTrader:
         amount_invested = self.config.get_amount_invested(self.principal)
         order_size = int(amount_invested / order_price)  # Round down to whole shares
         
+        # Calculate actual order value
+        order_value = order_size * order_price
+        
         if order_size < 1:
             logger.warning(f"Order size too small: {order_size} shares (amount_invested=${amount_invested:.2f})")
             return
@@ -352,7 +405,10 @@ class ThresholdTrader:
             logger.warning(f"Market {market_slug} is no longer active, skipping order")
             return
         
-        logger.info(f"Placing order: {side} side, price={order_price:.4f}, size={order_size} shares")
+        logger.info(
+            f"Placing order: {side} side, price={order_price:.4f}, size={order_size} shares, "
+            f"order_value=${order_value:.2f} (amount_invested=${amount_invested:.2f}, principal=${self.principal:.2f})"
+        )
         
         # Place order with retry logic
         order_response = None
@@ -368,7 +424,31 @@ class ThresholdTrader:
                 if order_response:
                     break
             except Exception as e:
+                error_msg = str(e)
                 logger.error(f"Order placement attempt {attempt + 1} failed: {e}")
+                
+                # Check for specific error types
+                if "not enough balance" in error_msg.lower() or "allowance" in error_msg.lower():
+                    # Check current balance for better error message
+                    try:
+                        current_balance = self.pm.get_polymarket_balance()
+                        if current_balance is not None:
+                            logger.error(
+                                f"Insufficient balance/allowance: wallet has ${current_balance:.2f}, "
+                                f"need ${amount_invested:.2f} (order_size={order_size}, price={order_price:.4f})"
+                            )
+                        else:
+                            logger.error(
+                                f"Insufficient balance/allowance: could not check balance. "
+                                f"Order requires ${amount_invested:.2f} (order_size={order_size}, price={order_price:.4f})"
+                            )
+                    except Exception as balance_error:
+                        logger.error(f"Could not check balance: {balance_error}")
+                    
+                    # Don't retry balance errors - they won't resolve quickly
+                    logger.error("Stopping retries due to balance/allowance error")
+                    return
+                
                 if attempt < 2:
                     await asyncio.sleep(5.0)  # Wait 5 seconds before retry
                 else:
