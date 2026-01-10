@@ -1149,6 +1149,16 @@ class ThresholdTrader:
                 new_principal = self.principal + net_payout
                 self.principal = new_principal
             
+            # If an early sell already happened, principal_after was already set when the sell filled
+            # Preserve that value instead of overwriting it
+            if trade.sell_order_id and trade.sell_order_status == "filled" and trade.principal_after is not None:
+                # Early sell already filled and principal_after is already set - preserve it
+                new_principal = trade.principal_after
+                logger.info(
+                    f"Preserving principal_after from early sell: ${new_principal:.2f} "
+                    f"(market resolution for trade {trade.id})"
+                )
+            
             # Update trade in database
             self.db.update_trade_outcome(
                 trade_id=trade.id,
@@ -1157,7 +1167,7 @@ class ThresholdTrader:
                 net_payout=net_payout,
                 roi=roi,
                 is_win=is_win,
-                principal_after=new_principal,  # Will be updated again when sell fills
+                principal_after=new_principal,  # Preserved from early sell if applicable
                 winning_side=winning_side,
             )
             

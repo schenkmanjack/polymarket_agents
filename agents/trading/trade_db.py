@@ -10,7 +10,7 @@ import os
 import logging
 from datetime import datetime, timezone
 from typing import Optional, Dict, List
-from sqlalchemy import create_engine, Column, String, Float, Integer, DateTime, Boolean, Index, text
+from sqlalchemy import create_engine, Column, String, Float, Integer, DateTime, Boolean, Index, text, inspect
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import StaticPool
@@ -136,8 +136,100 @@ class TradeDatabase:
         
         # Create tables
         Base.metadata.create_all(self.engine)
+        
+        # Migrate existing table to add new columns if they don't exist
+        self._migrate_table()
+        
         SessionLocal = sessionmaker(bind=self.engine)
         self.SessionLocal = SessionLocal
+    
+    def _migrate_table(self):
+        """Add missing columns to real_trades_threshold table if they don't exist (migration)."""
+        try:
+            inspector = inspect(self.engine)
+            table_name = "real_trades_threshold"
+            
+            if table_name not in inspector.get_table_names():
+                logger.debug(f"Table {table_name} doesn't exist yet, will be created with all columns")
+                return
+            
+            # Get existing columns
+            existing_columns = [col['name'] for col in inspector.get_columns(table_name)]
+            columns_to_add = []
+            
+            # Check which sell order columns are missing
+            sell_order_columns = {
+                'sell_order_id': 'VARCHAR',
+                'sell_order_price': 'FLOAT',
+                'sell_order_size': 'FLOAT',
+                'sell_order_status': 'VARCHAR',
+                'sell_order_placed_at': 'TIMESTAMP',
+                'sell_order_filled_at': 'TIMESTAMP',
+                'sell_dollars_received': 'FLOAT',
+                'sell_fee': 'FLOAT',
+            }
+            
+            for col_name, col_type in sell_order_columns.items():
+                if col_name not in existing_columns:
+                    columns_to_add.append((col_name, col_type))
+            
+            # Add missing columns
+            if columns_to_add:
+                logger.info(f"Migrating {table_name}: adding {len(columns_to_add)} missing columns")
+                # Use a single transaction for all column additions
+                conn = self.engine.connect()
+                trans = conn.begin()
+                try:
+                    for col_name, col_type in columns_to_add:
+                        try:
+                            if 'postgresql' in str(self.engine.url).lower():
+                                # PostgreSQL
+                                if col_type == 'VARCHAR':
+                                    sql_type = 'VARCHAR'
+                                elif col_type == 'FLOAT':
+                                    sql_type = 'DOUBLE PRECISION'
+                                elif col_type == 'TIMESTAMP':
+                                    sql_type = 'TIMESTAMP'
+                                else:
+                                    sql_type = 'VARCHAR'
+                                
+                                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {sql_type}"))
+                            else:
+                                # SQLite
+                                if col_type == 'VARCHAR':
+                                    sql_type = 'TEXT'
+                                elif col_type == 'FLOAT':
+                                    sql_type = 'REAL'
+                                elif col_type == 'TIMESTAMP':
+                                    sql_type = 'TIMESTAMP'
+                                else:
+                                    sql_type = 'TEXT'
+                                
+                                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {sql_type}"))
+                            
+                            logger.info(f"  ✓ Added column {col_name}")
+                        except Exception as e:
+                            error_str = str(e).lower()
+                            # Column might already exist (race condition) - that's okay
+                            if 'already exists' not in error_str and 'duplicate' not in error_str:
+                                logger.warning(f"  ⚠ Could not add column {col_name}: {e}")
+                                # Don't rollback for individual column errors - continue with others
+                    
+                    # Commit all changes
+                    trans.commit()
+                    logger.info(f"✓ Migration complete for {table_name} - added {len(columns_to_add)} columns")
+                except Exception as e:
+                    trans.rollback()
+                    logger.error(f"Migration failed, rolling back: {e}", exc_info=True)
+                    raise  # Re-raise to ensure we know migration failed
+                finally:
+                    conn.close()
+            else:
+                logger.debug(f"Table {table_name} already has all required columns")
+        except Exception as e:
+            logger.error(f"Error during table migration: {e}", exc_info=True)
+            # Re-raise the exception - we need migration to succeed before proceeding
+            raise
     
     def create_trade(
         self,
