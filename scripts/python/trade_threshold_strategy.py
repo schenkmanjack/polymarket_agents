@@ -1388,6 +1388,18 @@ class ThresholdTrader:
             return
         logger.info(f"✅ Extracted order ID: {order_id}")
         
+        # Log buy order placement
+        logger.info(
+            f"✅✅✅ BUY ORDER PLACED ✅✅✅\n"
+            f"  Order ID: {order_id}\n"
+            f"  Market: {market_slug}\n"
+            f"  Side: {side}\n"
+            f"  Price: ${order_price:.4f}\n"
+            f"  Size: {order_size} shares\n"
+            f"  Order Value: ${order_value:.2f}\n"
+            f"  Principal: ${self.principal:.2f}"
+        )
+        
         # Create trade record
         trade_id = self.db.create_trade(
             deployment_id=self.deployment_id,
@@ -1518,11 +1530,7 @@ class ThresholdTrader:
                                     f"Limit BUY orders should only fill at limit price or better (lower). "
                                     f"Using actual fill price from Polymarket ({fill_price:.4f}) as shown in UI."
                                 )
-                            else:
-                                logger.info(
-                                    f"✓ Fill price ({fill_price:.4f}) matches limit price ({trade.order_price:.4f}) "
-                                    f"for order {fill_order_id}"
-                                )
+                            # Removed verbose logging for normal fill price matches
                             
                             dollars_spent = filled_shares * fill_price
                             
@@ -1874,8 +1882,8 @@ class ThresholdTrader:
                     
                     taker_order_id = fill.get("taker_order_id")
                     
-                    # Log what we found in this trade record
-                    logger.debug(
+                    # Log what we found in this trade record (INFO level to see actual values)
+                    logger.info(
                         f"📊 Trade record: maker_orders={maker_orders} (type={type(maker_orders).__name__}), "
                         f"taker_order_id={taker_order_id}, status={fill.get('status')}, "
                         f"size={fill.get('size')}, price={fill.get('price')}"
