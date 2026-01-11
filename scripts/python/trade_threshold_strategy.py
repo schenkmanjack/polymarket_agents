@@ -140,7 +140,7 @@ class ThresholdTrader:
         self.max_order_not_found_retries = 3  # Retry 3 times before giving up
         
         # Timing
-        self.orderbook_poll_interval = 5.0  # seconds - check prices every 5 seconds for placing orders
+        self.orderbook_poll_interval = 1.0  # seconds - check prices every 1 second for placing orders and threshold sells
         self.order_status_check_interval = 10.0  # seconds
         self.market_resolution_check_interval = 30.0  # seconds
         
@@ -2081,11 +2081,6 @@ class ThresholdTrader:
                         f"Will continue checking via trade records and notifications. "
                         f"Not marking as filled without evidence."
                     )
-                    continue
-                    else:
-                        # Trade not found or already resolved - remove from tracking
-                        self.open_sell_orders.pop(sell_order_id, None)
-                        self.sell_orders_not_found.pop(sell_order_id, None)
                     continue
                 
                 # Sell order found - clear retry count
