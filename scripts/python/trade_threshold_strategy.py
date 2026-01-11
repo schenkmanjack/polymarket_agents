@@ -13,6 +13,7 @@ import os
 import argparse
 import uuid
 import time
+import math
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List, Set
 from dotenv import load_dotenv
@@ -763,6 +764,58 @@ class ThresholdTrader:
                     else:
                         logger.error(f"    Balance at time of error: Not checked or unavailable")
                     
+                    # Check if it's a minimum size error (e.g., "Size (2) lower than the minimum: 5")
+                    is_min_size_error = (
+                        'size' in error_str.lower() and 
+                        'minimum' in error_str.lower() and
+                        ('lower than' in error_str.lower() or 'less than' in error_str.lower())
+                    )
+                    
+                    if is_min_size_error:
+                        # Extract minimum size from error message
+                        import re
+                        min_size_match = re.search(r'minimum[:\s]+(\d+)', error_str, re.IGNORECASE)
+                        if min_size_match:
+                            min_size_required = int(min_size_match.group(1))
+                            logger.error(
+                                f"  ❌ MINIMUM SIZE ERROR: Trying to sell {sell_size_int} shares, "
+                                f"but market requires minimum {min_size_required} shares. "
+                                f"Available balance: {balance:.6f} shares. "
+                                f"Cannot place sell order - insufficient shares."
+                            )
+                            # Don't retry - we don't have enough shares
+                            logger.error(
+                                f"  ⚠️ Skipping sell order placement. "
+                                f"Will wait for market resolution or try again if balance increases."
+                            )
+                            # Log to database that sell order failed due to minimum size
+                            try:
+                                error_sell_size = float(sell_size_int) if sell_size_int is not None else trade.filled_shares
+                                self.db.update_sell_order(
+                                    trade_id=trade.id,
+                                    sell_order_id=None,
+                                    sell_order_price=0.99,
+                                    sell_order_size=error_sell_size,
+                                    sell_order_status="failed",
+                                )
+                                session = self.db.SessionLocal()
+                                try:
+                                    from agents.trading.trade_db import RealTradeThreshold
+                                    trade_obj = session.query(RealTradeThreshold).filter(
+                                        RealTradeThreshold.id == trade.id
+                                    ).first()
+                                    if trade_obj:
+                                        trade_obj.error_message = (
+                                            f"Sell order failed: minimum size {min_size_required} shares required, "
+                                            f"but only {balance:.6f} shares available (attempt {attempt + 1})"
+                                        )
+                                        session.commit()
+                                finally:
+                                    session.close()
+                            except Exception as db_error:
+                                logger.debug(f"Could not log minimum size error to database: {db_error}")
+                            return  # Don't retry - we can't meet minimum size
+                    
                     # Check if it's a balance/allowance error
                     is_balance_error = (
                         'not enough balance' in error_str.lower() or
@@ -1016,45 +1069,55 @@ class ThresholdTrader:
             )
         
         # Calculate order size accounting for fees
-        # Fees reduce the shares received, so we need to order slightly more to get the desired shares
+        # IMPORTANT: Fees reduce the SHARES RECEIVED, not just add to cost
+        # If we order X shares at price P:
+        #   - Cost = X * P
+        #   - Fee = (X * P) * fee_multiplier
+        #   - Shares lost = Fee / P = X * fee_multiplier
+        #   - Shares received = X - X * fee_multiplier = X * (1 - fee_multiplier)
+        # To get N shares after fees: N = X * (1 - fee_multiplier)
+        # Therefore: X = N / (1 - fee_multiplier)
+        
         from agents.backtesting.backtesting_utils import calculate_polymarket_fee
         
-        # Start with desired shares based on amount_invested
-        desired_shares = amount_invested / order_price
+        # Start with desired shares based on amount_invested (this is what we want AFTER fees)
+        desired_shares_after_fee = amount_invested / order_price
         
-        # Estimate fee for this order size (iterative approach to account for fees)
-        # Fee = trade_value * 0.25 * (price * (1-price))^2
-        # After fee, shares_received = (trade_value - fee) / price
-        # We want: shares_received = desired_shares
-        # So: (trade_value - fee) / price = desired_shares
-        # trade_value - fee = desired_shares * price
-        # trade_value - (trade_value * fee_rate * (p*(1-p))^2) = desired_shares * price
-        # trade_value * (1 - fee_rate * (p*(1-p))^2) = desired_shares * price
-        # trade_value = desired_shares * price / (1 - fee_rate * (p*(1-p))^2)
-        
+        # Calculate fee multiplier
         fee_rate = 0.25
         exponent = 2
         p_times_one_minus_p = order_price * (1.0 - order_price)
         fee_multiplier = fee_rate * (p_times_one_minus_p ** exponent)
         
-        # Calculate order value needed to get desired shares after fees
+        # Calculate how many shares we need to ORDER to get desired_shares_after_fee
+        # shares_received = shares_ordered * (1 - fee_multiplier)
+        # So: shares_ordered = shares_received / (1 - fee_multiplier)
         if fee_multiplier < 1.0:  # Avoid division by zero
-            order_value_with_fee = (desired_shares * order_price) / (1.0 - fee_multiplier)
-            # Cap at dollar_bet_limit
-            order_value_with_fee = min(order_value_with_fee, self.config.dollar_bet_limit)
-            # Recalculate desired shares based on capped value
-            desired_shares = order_value_with_fee / order_price
+            shares_to_order = desired_shares_after_fee / (1.0 - fee_multiplier)
+            
+            # Calculate order value and cap at dollar_bet_limit
+            order_value_with_fee = shares_to_order * order_price
+            if order_value_with_fee > self.config.dollar_bet_limit:
+                # Cap at dollar_bet_limit, recalculate shares
+                order_value_with_fee = self.config.dollar_bet_limit
+                shares_to_order = order_value_with_fee / order_price
+                # Recalculate what we'll get after fees
+                desired_shares_after_fee = shares_to_order * (1.0 - fee_multiplier)
             
             # Log fee adjustment
             estimated_fee = order_value_with_fee * fee_multiplier
-            estimated_shares_after_fee = (order_value_with_fee - estimated_fee) / order_price
-            logger.debug(
-                f"Fee adjustment: base_value=${amount_invested:.2f} -> adjusted_value=${order_value_with_fee:.2f}, "
-                f"estimated_fee=${estimated_fee:.4f}, estimated_shares_after_fee={estimated_shares_after_fee:.4f}"
+            estimated_shares_received = shares_to_order * (1.0 - fee_multiplier)
+            logger.info(
+                f"Fee adjustment for shares: ordering {shares_to_order:.4f} shares to get ~{estimated_shares_received:.4f} shares after fees. "
+                f"Order value: ${order_value_with_fee:.2f}, estimated fee: ${estimated_fee:.4f}"
             )
+        else:
+            shares_to_order = desired_shares_after_fee
+            order_value_with_fee = shares_to_order * order_price
         
-        # Round down to whole shares (Polymarket requires whole shares - fractional shares not supported)
-        order_size = int(desired_shares)
+        # Round UP to whole shares to ensure we get at least the desired shares after fees
+        # (Polymarket requires whole shares - fractional shares not supported)
+        order_size = math.ceil(shares_to_order)
         
         # Calculate actual order value
         order_value = order_size * order_price
