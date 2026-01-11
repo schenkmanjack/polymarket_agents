@@ -527,6 +527,7 @@ class ThresholdTrader:
             
             # Retry loop for placing sell order
             for attempt in range(max_retries):
+                sell_size_int = None  # Initialize for error logging
                 try:
                     logger.info(
                         f"Attempt {attempt + 1}/{max_retries}: Placing initial sell order at $0.99 "
@@ -553,9 +554,12 @@ class ThresholdTrader:
                         f"order_price=$0.99"
                     )
                     
+                    balance = None
                     if hasattr(self.pm, 'get_conditional_token_balance'):
+                        logger.info(f"  🔍 Checking conditional token balance for token_id={trade.token_id}...")
                         try:
                             balance = self.pm.get_conditional_token_balance(trade.token_id)
+                            logger.info(f"  📊 Balance check returned: {balance} (type: {type(balance)})")
                             if balance is not None:
                                 logger.info(
                                     f"  📊 Balance check result: {balance:.6f} shares available "
@@ -587,7 +591,7 @@ class ThresholdTrader:
                                 exc_info=True
                             )
                     else:
-                        logger.debug("  get_conditional_token_balance method not available")
+                        logger.warning("  ⚠️ get_conditional_token_balance method not available - cannot check balance")
                     
                     # Check conditional token allowances (critical for selling)
                     # According to py-clob-client docs, exchange contracts need approval to transfer conditional tokens
@@ -612,15 +616,36 @@ class ThresholdTrader:
                         else:
                             logger.debug("  ensure_conditional_token_allowances method not available")
                     
+                    # Determine sell size: use actual balance if available, otherwise use filled_shares
+                    # This handles cases where fees reduce the actual shares received
+                    sell_size = trade.filled_shares
+                    if balance is not None and balance > 0:
+                        # Use the actual available balance (may be less than filled_shares due to fees)
+                        sell_size = min(balance, trade.filled_shares)
+                        if sell_size < trade.filled_shares:
+                            logger.warning(
+                                f"  ⚠️ Adjusting sell size from {trade.filled_shares} to {sell_size:.6f} "
+                                f"shares (actual balance). Difference likely due to fees."
+                            )
+                    
+                    # Ensure sell_size is at least 1 share and is an integer
+                    sell_size_int = max(1, int(sell_size))
+                    if sell_size_int < sell_size:
+                        logger.warning(
+                            f"  ⚠️ Rounding sell size down from {sell_size:.6f} to {sell_size_int} "
+                            f"shares (must be integer)"
+                        )
+                    
                     # Attempt to place sell order
                     logger.info(
-                        f"  📤 Placing SELL order: price=$0.99, size={int(trade.filled_shares)} shares, "
+                        f"  📤 Placing SELL order: price=$0.99, size={sell_size_int} shares "
+                        f"(filled_shares={trade.filled_shares}, balance={balance:.6f if balance else 'N/A'}), "
                         f"token_id={trade.token_id[:20]}..."
                     )
                     
                     sell_order_response = self.pm.execute_order(
                         price=0.99,
-                        size=int(trade.filled_shares),  # Ensure integer size
+                        size=sell_size_int,  # Use actual available balance
                         side=SELL,
                         token_id=trade.token_id,
                     )
@@ -630,20 +655,20 @@ class ThresholdTrader:
                     if sell_order_response:
                         sell_order_id = self.pm.extract_order_id(sell_order_response)
                         if sell_order_id:
-                            # Log sell order to database
+                            # Log sell order to database (use actual sell size, not filled_shares)
                             self.db.update_sell_order(
                                 trade_id=trade.id,
                                 sell_order_id=sell_order_id,
                                 sell_order_price=0.99,
-                                sell_order_size=trade.filled_shares,
+                                sell_order_size=float(sell_size_int),  # Use actual sell size
                                 sell_order_status="open",
                             )
                             # Track in memory
                             self.open_sell_orders[sell_order_id] = trade.id
                             logger.info(
                                 f"✓ Initial sell order placed at $0.99: order_id={sell_order_id}, "
-                                f"size={trade.filled_shares} shares, logged to database "
-                                f"(attempt {attempt + 1})"
+                                f"size={sell_size_int} shares (filled_shares={trade.filled_shares}), "
+                                f"logged to database (attempt {attempt + 1})"
                             )
                             return  # Success!
                         else:
@@ -658,20 +683,38 @@ class ThresholdTrader:
                 
                 except Exception as e:
                     error_str = str(e)
-                    error_message = getattr(e, 'error_message', {})
+                    error_message = getattr(e, 'error_message', None)
+                    error_dict = getattr(e, '__dict__', {})
+                    
+                    # Try to get full exception details
+                    import traceback
+                    full_traceback = traceback.format_exc()
                     
                     logger.error(
-                        f"  ❌ Sell order attempt {attempt + 1}/{max_retries} FAILED for trade {trade.id}:",
-                        exc_info=True
+                        f"  ❌ Sell order attempt {attempt + 1}/{max_retries} FAILED for trade {trade.id}:"
                     )
                     logger.error(f"    Error type: {type(e).__name__}")
-                    logger.error(f"    Error message: {error_str}")
-                    logger.error(f"    Error details: {error_message}")
+                    logger.error(f"    Error class: {type(e)}")
+                    logger.error(f"    Error message (str): {error_str}")
+                    logger.error(f"    Error message (repr): {repr(error_str)}")
+                    logger.error(f"    Error message length: {len(error_str)}")
+                    if error_message:
+                        logger.error(f"    Error details (error_message attr): {error_message}")
+                        logger.error(f"    Error details (repr): {repr(error_message)}")
+                        logger.error(f"    Error details (type): {type(error_message)}")
+                    logger.error(f"    Error dict: {error_dict}")
+                    logger.error(f"    Error args: {e.args}")
+                    logger.error(f"    Full traceback:\n{full_traceback}")
                     logger.error(
                         f"    Trade details: token_id={trade.token_id}, "
                         f"filled_shares={trade.filled_shares}, "
-                        f"order_price=$0.99"
+                        f"order_price=$0.99, "
+                        f"sell_size_attempted={sell_size_int if sell_size_int is not None else 'N/A'}"
                     )
+                    if balance is not None:
+                        logger.error(f"    Balance at time of error: {balance:.6f} shares")
+                    else:
+                        logger.error(f"    Balance at time of error: Not checked or unavailable")
                     
                     # Check if it's a balance/allowance error
                     is_balance_error = (
@@ -711,11 +754,13 @@ class ThresholdTrader:
                     
                     # Log error to database for tracking
                     try:
+                        # Use sell_size_int if available, otherwise use filled_shares
+                        error_sell_size = float(sell_size_int) if sell_size_int is not None else trade.filled_shares
                         self.db.update_sell_order(
                             trade_id=trade.id,
                             sell_order_id=None,
                             sell_order_price=0.99,
-                            sell_order_size=trade.filled_shares,
+                            sell_order_size=error_sell_size,
                             sell_order_status="failed",
                         )
                         # Update error message
@@ -799,10 +844,39 @@ class ThresholdTrader:
                 else:
                     logger.warning(f"Failed to cancel sell order {trade.sell_order_id}, proceeding anyway")
             
+            # Check actual balance before placing early sell order
+            balance = None
+            if hasattr(self.pm, 'get_conditional_token_balance'):
+                try:
+                    balance = self.pm.get_conditional_token_balance(trade.token_id)
+                    if balance is not None:
+                        logger.info(
+                            f"  📊 Balance check for early sell: {balance:.6f} shares available "
+                            f"(filled_shares={trade.filled_shares})"
+                        )
+                except Exception as e:
+                    logger.warning(f"  ⚠️ Could not check balance for early sell: {e}")
+            
+            # Determine sell size: use actual balance if available
+            sell_size = trade.filled_shares
+            if balance is not None and balance > 0:
+                sell_size = min(balance, trade.filled_shares)
+                if sell_size < trade.filled_shares:
+                    logger.warning(
+                        f"  ⚠️ Adjusting early sell size from {trade.filled_shares} to {sell_size:.6f} "
+                        f"shares (actual balance)"
+                    )
+            
+            sell_size_int = max(1, int(sell_size))
+            
             # Place new early sell order
+            logger.info(
+                f"  📤 Placing EARLY SELL order: price=${sell_price:.4f}, size={sell_size_int} shares "
+                f"(filled_shares={trade.filled_shares}, balance={balance:.6f if balance else 'N/A'})"
+            )
             sell_order_response = self.pm.execute_order(
                 price=sell_price,
-                size=trade.filled_shares,
+                size=sell_size_int,  # Use actual available balance
                 side=SELL,
                 token_id=trade.token_id,
             )
@@ -810,12 +884,12 @@ class ThresholdTrader:
             if sell_order_response:
                 sell_order_id = self.pm.extract_order_id(sell_order_response)
                 if sell_order_id:
-                    # Log sell order to database
+                    # Log sell order to database (use actual sell size)
                     self.db.update_sell_order(
                         trade_id=trade.id,
                         sell_order_id=sell_order_id,
                         sell_order_price=sell_price,
-                        sell_order_size=trade.filled_shares,
+                        sell_order_size=float(sell_size_int),  # Use actual sell size
                         sell_order_status="open",
                     )
                     # Track in memory
@@ -824,7 +898,8 @@ class ThresholdTrader:
                     self.markets_with_bets.add(trade.market_slug)
                     logger.info(
                         f"✓ Early sell order placed: order_id={sell_order_id}, "
-                        f"price={sell_price:.4f}, size={trade.filled_shares} shares"
+                        f"price={sell_price:.4f}, size={sell_size_int} shares "
+                        f"(filled_shares={trade.filled_shares})"
                     )
                 else:
                     logger.warning(f"Early sell order placed but could not extract order ID")
@@ -1730,7 +1805,7 @@ class ThresholdTrader:
             is_win = (winning_side is not None and trade.order_side == winning_side)
             
             # Calculate payout and ROI based on actual proceeds from selling
-            # ROI is calculated AFTER we execute the sell (0.99 limit, early sell, or market resolution)
+            # ROI accounts for fees on both buy and sell orders
             fee = trade.fee or 0.0
             sell_fee = trade.sell_fee or 0.0
             
@@ -1741,18 +1816,47 @@ class ThresholdTrader:
                 roi = net_payout / (dollars_spent + fee) if (dollars_spent + fee) > 0 else 0.0
             elif not is_win:
                 # We lost - shares are worthless, no sell order needed
+                # Neither the 0.99 limit sell nor threshold sell triggered, and market resolved against us
                 payout = 0.0
-                net_payout = -dollars_spent - fee
-                roi = net_payout / (dollars_spent + fee) if (dollars_spent + fee) > 0 else 0.0
-            else:
-                # We won but sell order hasn't filled yet (should execute at 0.99 soon)
-                # Use outcome_price as placeholder - ROI will be updated when sell fills
-                payout = outcome_price * filled_shares
-                net_payout = payout - dollars_spent - fee  # Don't include sell_fee yet
+                net_payout = -dollars_spent - fee  # Lost the entire bet (buy cost + buy fee)
                 roi = net_payout / (dollars_spent + fee) if (dollars_spent + fee) > 0 else 0.0
                 logger.info(
-                    f"Trade {trade.id} won but sell order not filled yet - using outcome_price as placeholder. "
-                    f"ROI will be updated when sell order fills."
+                    f"Trade {trade.id} lost - market resolved against us. "
+                    f"No sell order triggered. Calculating ROI and updating principal."
+                )
+            else:
+                # We won but sell order hasn't filled yet (neither 0.99 limit sell nor threshold sell triggered)
+                # Market resolved in our favor - shares are worth $1 each (outcome_price = 1.0)
+                # Calculate as if we claim at $1 per share, accounting for sell fees
+                payout = outcome_price * filled_shares  # Should be $1 * shares = total claimable
+                
+                # Calculate sell fee as if we sold at $1 per share
+                from agents.backtesting.backtesting_utils import calculate_polymarket_fee
+                estimated_sell_fee = calculate_polymarket_fee(1.0, payout)  # Fee for selling at $1
+                
+                # Update sell_fee in database if not already set (for tracking)
+                if not trade.sell_fee:
+                    session = self.db.SessionLocal()
+                    try:
+                        trade_obj = session.query(RealTradeThreshold).filter_by(id=trade.id).first()
+                        if trade_obj:
+                            trade_obj.sell_fee = estimated_sell_fee
+                            session.commit()
+                            logger.debug(f"Updated sell_fee to ${estimated_sell_fee:.2f} for trade {trade.id}")
+                    except Exception as e:
+                        session.rollback()
+                        logger.warning(f"Could not update sell_fee: {e}")
+                    finally:
+                        session.close()
+                
+                # Net payout accounts for both buy and sell fees
+                net_payout = payout - estimated_sell_fee - dollars_spent - fee
+                roi = net_payout / (dollars_spent + fee) if (dollars_spent + fee) > 0 else 0.0
+                
+                logger.info(
+                    f"Trade {trade.id} won but sell order not filled - market resolved. "
+                    f"Assuming claim at $1 per share (outcome_price={outcome_price:.4f}). "
+                    f"Calculating ROI with estimated sell fee (${estimated_sell_fee:.2f}) and updating principal."
                 )
             
             # Log outcome for debugging
@@ -1762,10 +1866,10 @@ class ThresholdTrader:
                 f"payout=${payout:.2f}, net_payout=${net_payout:.2f}, roi={roi*100:.2f}%"
             )
             
-            # Update principal ONLY when:
+            # Update principal when:
             # 1. Sell order already filled (principal_after was set when sell filled)
-            # 2. OR we lost (market ended, no sell order needed)
-            # Do NOT update principal if we won but sell order hasn't filled yet - wait for sell to fill
+            # 2. OR we lost (market ended, no sell order needed - update principal now)
+            # 3. OR we won but sell order hasn't filled (market resolved - update principal now so we can move on)
             new_principal = self.principal  # Default: keep current principal
             principal_updated = False
             
@@ -1781,7 +1885,8 @@ class ThresholdTrader:
                 )
             elif not is_win:
                 # We lost - market ended, shares are worthless, no sell order needed
-                # Update principal now (this is the only time we update principal at market resolution)
+                # Neither the 0.99 limit sell nor threshold sell triggered, and market resolved against us
+                # Update principal now so we can move on to the next market
                 new_principal = self.principal + net_payout
                 self.principal = new_principal
                 principal_updated = True
@@ -1790,13 +1895,16 @@ class ThresholdTrader:
                     f"(net_payout=${net_payout:.2f})"
                 )
             else:
-                # We won but sell order hasn't filled yet
-                # Do NOT update principal - wait for sell order to fill
-                # principal_after will be set when sell order fills
+                # We won but sell order hasn't filled yet (neither 0.99 limit sell nor threshold sell triggered)
+                # Market resolved in our favor - update principal now using estimated claim value
+                # This allows us to move on to the next market even if sell order didn't fill
+                new_principal = self.principal + net_payout
+                self.principal = new_principal
+                principal_updated = True
                 logger.info(
-                    f"Market ended - we won but sell order hasn't filled yet. "
-                    f"Principal will be updated when sell order fills. "
-                    f"Current principal: ${self.principal:.2f}"
+                    f"Market ended - we won but sell order didn't fill. "
+                    f"Updating principal based on estimated claim value: ${self.principal:.2f} -> ${new_principal:.2f} "
+                    f"(net_payout=${net_payout:.2f}, estimated sell_fee included)"
                 )
             
             # Update trade in database

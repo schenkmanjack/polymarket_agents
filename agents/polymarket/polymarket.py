@@ -29,7 +29,7 @@ from py_clob_client.clob_types import (
     OrderType,
     OrderBookSummary,
 )
-from py_clob_client.order_builder.constants import BUY
+from py_clob_client.order_builder.constants import BUY, SELL
 
 from agents.utils.objects import SimpleMarket, SimpleEvent
 
@@ -400,21 +400,39 @@ class Polymarket:
         # This ensures the order is properly structured as a limit order
         # Reference: https://github.com/Polymarket/py-clob-client
         
+        logger.info(
+            f"🔵 execute_order() called: price={price}, size={size}, side={side}, "
+            f"token_id={token_id[:20] if token_id else None}..., "
+            f"fee_rate_bps={fee_rate_bps}, order_type={order_type}"
+        )
+        
         # If fee_rate_bps not specified, try with default (0) and auto-detect from error
         if fee_rate_bps is None:
             if auto_detect_fee:
                 # Try with fee_rate_bps=0 first, then parse error to get required fee
                 try:
+                    logger.debug(f"  Creating OrderArgs with fee_rate_bps=0 (will auto-detect if needed)")
                     order_args = OrderArgs(price=price, size=size, side=side, token_id=token_id, fee_rate_bps=0)
+                    logger.debug(f"  OrderArgs created: {order_args}")
+                    logger.debug(f"  Calling client.create_order()...")
                     signed_order = self.client.create_order(order_args)
-                    return self.client.post_order(signed_order, order_type)
+                    logger.debug(f"  Signed order created, calling client.post_order() with order_type={order_type}...")
+                    response = self.client.post_order(signed_order, order_type)
+                    logger.info(f"  ✅ Order posted successfully, response: {response}")
+                    return response
                 except PolyApiException as e:
                     # Parse error message to extract required fee rate
                     error_str = str(e)
                     error_message = e.error_message if hasattr(e, 'error_message') else error_str
                     
+                    logger.warning(
+                        f"  ⚠️ PolyApiException during order creation: {error_str}. "
+                        f"Error message attr: {error_message}"
+                    )
+                    
                     # Check if error is about fee rate
                     if "fee" in error_str.lower() or "fee" in str(error_message).lower():
+                        logger.info(f"  🔍 Detected fee-related error, attempting to extract fee rate...")
                         # Extract fee rate from error message like "current market's taker fee: 1000"
                         import re
                         # Try multiple patterns
@@ -429,12 +447,16 @@ class Polymarket:
                                 match = re.search(pattern, str(error_message), re.IGNORECASE)
                             if match:
                                 detected_fee = int(match.group(1))
-                                logger.info(f"Auto-detected fee rate from error: {detected_fee} BPS")
+                                logger.info(f"  ✅ Auto-detected fee rate from error: {detected_fee} BPS")
                                 # Retry with detected fee rate
+                                logger.debug(f"  Retrying with fee_rate_bps={detected_fee}...")
                                 order_args = OrderArgs(price=price, size=size, side=side, token_id=token_id, fee_rate_bps=detected_fee)
                                 signed_order = self.client.create_order(order_args)
-                                return self.client.post_order(signed_order, order_type)
+                                response = self.client.post_order(signed_order, order_type)
+                                logger.info(f"  ✅ Order posted successfully after fee detection, response: {response}")
+                                return response
                     # If we can't parse the error, re-raise it
+                    logger.error(f"  ❌ Could not parse fee from error, re-raising exception")
                     raise
                 except Exception as e:
                     # For any other exception, re-raise it
@@ -444,9 +466,15 @@ class Polymarket:
                 fee_rate_bps = 1000
         
         # Use two-step process with explicit OrderType
+        logger.debug(f"  Creating OrderArgs with fee_rate_bps={fee_rate_bps}")
         order_args = OrderArgs(price=price, size=size, side=side, token_id=token_id, fee_rate_bps=fee_rate_bps)
+        logger.debug(f"  OrderArgs created: {order_args}")
+        logger.debug(f"  Calling client.create_order()...")
         signed_order = self.client.create_order(order_args)
-        return self.client.post_order(signed_order, order_type)
+        logger.debug(f"  Signed order created, calling client.post_order() with order_type={order_type}...")
+        response = self.client.post_order(signed_order, order_type)
+        logger.info(f"  ✅ Order posted successfully, response: {response}")
+        return response
     
     def extract_order_id(self, order_response) -> Optional[str]:
         """
@@ -570,7 +598,7 @@ class Polymarket:
         except Exception as e:
             logger.error(f"Error canceling order {order_id}: {e}")
             return None
-    
+
     def get_usdc_balance(self) -> float:
         """Get USDC balance from your Polygon wallet (direct wallet)."""
         balance_res = self.usdc.functions.balanceOf(
