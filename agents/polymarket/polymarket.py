@@ -28,6 +28,7 @@ from py_clob_client.clob_types import (
     MarketOrderArgs,
     OrderType,
     OrderBookSummary,
+    TradeParams,
 )
 from py_clob_client.order_builder.constants import BUY, SELL
 
@@ -554,10 +555,14 @@ class Polymarket:
             logger.error(f"Error getting open orders: {e}")
             return None
 
-    def get_trades(self) -> Optional[List[Dict]]:
+    def get_trades(self, maker_address: Optional[str] = None, market: Optional[str] = None) -> Optional[List[Dict]]:
         """
         Get execution details (fills) for your orders.
         Returns trades once orders move from 'open' to 'matched'.
+        
+        Args:
+            maker_address: Optional wallet address to filter trades. If not provided, uses current wallet.
+            market: Optional market ID (condition_id) to filter trades by market.
         
         Returns:
             List of trade/fill records, or None if error occurred
@@ -567,9 +572,29 @@ class Polymarket:
             return None
         
         try:
-            return self.client.get_trades()
+            # Use TradeParams to filter trades if parameters provided
+            if maker_address or market:
+                # Determine which address to use
+                if not maker_address:
+                    if self.proxy_wallet_address:
+                        maker_address = self.proxy_wallet_address
+                    else:
+                        maker_address = self.get_address_for_private_key()
+                
+                trade_params = TradeParams(
+                    maker_address=maker_address,
+                    market=market if market else None,
+                )
+                logger.debug(
+                    f"🔍 Getting trades with filters: maker_address={maker_address[:10]}..., "
+                    f"market={market[:20] if market else 'None'}..."
+                )
+                return self.client.get_trades(trade_params)
+            else:
+                # No filters - get all trades
+                return self.client.get_trades()
         except Exception as e:
-            logger.error(f"Error getting trades: {e}")
+            logger.error(f"Error getting trades: {e}", exc_info=True)
             return None
 
     def cancel_order(self, order_id: str) -> Optional[Dict]:

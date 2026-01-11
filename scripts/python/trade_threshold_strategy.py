@@ -1376,9 +1376,22 @@ class ThresholdTrader:
         # First, check fills/trades to see if any orders have been filled
         # This is more reliable than get_order_status for filled orders
         # Note: get_order() has a known issue (py-clob-client #217) where it doesn't return filled orders
+        # Only check trades if we have open orders to check
+        if not all_trades_to_check:
+            return
+        
+        # Filter by our wallet address to get only our trades (more efficient)
         try:
-            fills = self.pm.get_trades()
+            # Get our wallet address for filtering
+            wallet_address = None
+            if hasattr(self.pm, 'proxy_wallet_address') and self.pm.proxy_wallet_address:
+                wallet_address = self.pm.proxy_wallet_address
+            elif hasattr(self.pm, 'get_address_for_private_key'):
+                wallet_address = self.pm.get_address_for_private_key()
+            
+            fills = self.pm.get_trades(maker_address=wallet_address)
             if fills:
+                logger.debug(f"📊 get_trades() response for buy orders: {fills}")
                 for fill in fills:
                     # Try multiple field names for order ID (taker_order_id is the actual field name)
                     fill_order_id = (
@@ -1654,44 +1667,90 @@ class ThresholdTrader:
                     logger.info(f"📬 Checking {len(notifications)} notifications for sell order fills...")
                     for idx, notification in enumerate(notifications):
                         # Log all notification details for debugging
-                        order_id = notification.get("orderID") or notification.get("order_id") or notification.get("id")
+                        # Check payload first (where order_id is actually stored in Polymarket notifications)
+                        payload = notification.get("payload") or {}
+                        order_id = (
+                            payload.get("order_id") or 
+                            payload.get("orderID") or
+                            notification.get("orderID") or 
+                            notification.get("order_id") or 
+                            notification.get("id")
+                        )
                         notification_type = str(notification.get("type") or notification.get("notification_type") or "unknown")
                         notification_message = notification.get("message") or notification.get("text") or notification.get("content") or ""
                         notification_title = notification.get("title") or ""
                         notification_timestamp = notification.get("timestamp") or notification.get("created_at") or notification.get("time") or ""
                         
+                        # Extract additional info from payload
+                        payload_side = payload.get("side") or ""
+                        payload_matched_size = payload.get("matched_size") or ""
+                        payload_price = payload.get("price") or ""
+                        
                         logger.info(
                             f"📬 Notification {idx + 1}/{len(notifications)}: "
                             f"order_id={order_id}, type={notification_type}, "
+                            f"side={payload_side}, matched_size={payload_matched_size}, price={payload_price}, "
                             f"title={notification_title}, message={notification_message[:200]}, "
-                            f"timestamp={notification_timestamp}, "
-                            f"full_notification={notification}"
+                            f"timestamp={notification_timestamp}"
                         )
                         
                         if order_id and order_id in all_sell_orders_to_check:
+                            trade_id = all_sell_orders_to_check[order_id]
+                            trade = self.db.get_trade_by_id(trade_id)
+                            
+                            # Only process notifications for orders that are still open
+                            if not trade or trade.sell_order_status != "open":
+                                logger.debug(
+                                    f"⏭️ Skipping notification for order {order_id} (trade {trade_id}): "
+                                    f"order status is '{trade.sell_order_status if trade else 'not found'}' (not open)"
+                                )
+                                continue
+                            
                             # Check if this is a fill notification
-                            is_fill_notification = (
-                                "fill" in notification_type.lower() or 
-                                "filled" in notification_type.lower() or 
-                                "match" in notification_type.lower() or
+                            # Notification type 2 appears to be order fill/match notifications
+                            # Only treat as filled if remaining_size is 0 (order fully filled)
+                            # matched_size > 0 alone doesn't mean filled - could be partial fill or old notification
+                            remaining_size = payload.get("remaining_size") or ""
+                            matched_size = payload.get("matched_size") or ""
+                            
+                            # Only treat as fully filled if remaining_size is explicitly "0" and matched_size > 0
+                            is_fully_filled = (
+                                remaining_size == "0" and 
+                                matched_size and 
+                                matched_size != "0" and 
+                                float(matched_size) > 0
+                            )
+                            
+                            # Also check message/title for explicit fill indicators
+                            has_fill_keywords = (
                                 "fill" in notification_message.lower() or
                                 "filled" in notification_message.lower() or
-                                "matched" in notification_message.lower() or
                                 "fill" in notification_title.lower() or
-                                "filled" in notification_title.lower() or
-                                "matched" in notification_title.lower()
+                                "filled" in notification_title.lower()
+                            )
+                            
+                            is_fill_notification = is_fully_filled or has_fill_keywords
+                            
+                            logger.debug(
+                                f"🔍 Notification analysis for order {order_id} (trade {trade_id}): "
+                                f"type={notification_type}, remaining_size={remaining_size}, matched_size={matched_size}, "
+                                f"is_fully_filled={is_fully_filled}, has_fill_keywords={has_fill_keywords}, "
+                                f"is_fill_notification={is_fill_notification}"
                             )
                             
                             if is_fill_notification:
-                                trade_id = all_sell_orders_to_check[order_id]
-                                trade = self.db.get_trade_by_id(trade_id)
-                                if trade and trade.sell_order_status == "open":
-                                    logger.info(
-                                        f"🔔🔔🔔 NOTIFICATION MATCH: Sell order {order_id} (trade {trade_id}) FILLED via notification! "
-                                        f"Type: {notification_type}, Title: {notification_title}, Message: {notification_message[:200]}"
-                                    )
-                                    # Mark this order for immediate processing (skip the 10-second delay)
-                                    notifications_processed.add(order_id)
+                                logger.info(
+                                    f"🔔🔔🔔 NOTIFICATION MATCH: Sell order {order_id} (trade {trade_id}) FILLED via notification! "
+                                    f"Type: {notification_type}, remaining_size={remaining_size}, matched_size={matched_size}, "
+                                    f"Title: {notification_title}, Message: {notification_message[:200]}"
+                                )
+                                # Mark this order for immediate processing (skip the 10-second delay)
+                                notifications_processed.add(order_id)
+                            else:
+                                logger.debug(
+                                    f"⏭️ Notification for order {order_id} (trade {trade_id}) does not indicate fill: "
+                                    f"remaining_size={remaining_size}, matched_size={matched_size}"
+                                )
                 else:
                     logger.debug("No notifications returned from API")
         except Exception as e:
@@ -1793,10 +1852,26 @@ class ThresholdTrader:
         # This is more reliable than get_order_status for filled orders
         # Trade records are created when orders are partially or fully filled
         # Trade statuses: MATCHED, MINED, CONFIRMED, FAILED
+        # Only check trades if we have open sell orders to check
+        if not all_sell_orders_to_check:
+            return
+        
+        # Filter by our wallet address to get only our trades (more efficient)
         try:
-            fills = self.pm.get_trades()
+            # Get our wallet address for filtering
+            wallet_address = None
+            if hasattr(self.pm, 'proxy_wallet_address') and self.pm.proxy_wallet_address:
+                wallet_address = self.pm.proxy_wallet_address
+            elif hasattr(self.pm, 'get_address_for_private_key'):
+                wallet_address = self.pm.get_address_for_private_key()
+            
+            fills = self.pm.get_trades(maker_address=wallet_address)
             if fills:
-                logger.debug(f"📊 Checking {len(fills)} trade records for sell order fills...")
+                logger.info(f"📊 Checking {len(fills)} trade records for sell order fills...")
+                logger.info(f"📊 get_trades() response: {fills}")
+                # Log all order IDs we're looking for
+                logger.debug(f"🔍 Looking for sell orders: {list(all_sell_orders_to_check.keys())}")
+                
                 for fill in fills:
                     # Try multiple field names for order ID (taker_order_id is the actual field name)
                     fill_order_id = (
@@ -1810,12 +1885,18 @@ class ThresholdTrader:
                     trade_status = fill.get("status") or fill.get("trade_status") or ""
                     trade_status_upper = str(trade_status).upper()
                     
-                    # Log trade record details
-                    logger.debug(
-                        f"📊 Trade record: order_id={fill_order_id}, status={trade_status}, "
-                        f"size={fill.get('size')}, price={fill.get('price')}, "
-                        f"full_record={fill}"
-                    )
+                    # Log trade record details (INFO level for orders we're tracking)
+                    if fill_order_id in all_sell_orders_to_check:
+                        logger.info(
+                            f"📊📊📊 TRADE RECORD FOUND for tracked order: order_id={fill_order_id}, status={trade_status}, "
+                            f"size={fill.get('size')}, price={fill.get('price')}, "
+                            f"full_record={fill}"
+                        )
+                    else:
+                        logger.debug(
+                            f"📊 Trade record: order_id={fill_order_id}, status={trade_status}, "
+                            f"size={fill.get('size')}, price={fill.get('price')}"
+                        )
                     
                     if fill_order_id in all_sell_orders_to_check:
                         trade_id = all_sell_orders_to_check[fill_order_id]
@@ -2105,6 +2186,63 @@ class ThresholdTrader:
                                 f"treating as filled"
                             )
                             is_filled = True
+                        else:
+                            # Status is LIVE but not fully filled yet - check if order is missing from open orders
+                            # (API might show LIVE but order actually filled)
+                            try:
+                                open_orders = self.pm.get_open_orders()
+                                if open_orders:
+                                    open_order_ids = {o.get("orderID") or o.get("order_id") for o in open_orders if o.get("orderID") or o.get("order_id")}
+                                    if sell_order_id not in open_order_ids:
+                                        # Order shows LIVE in status but not in open orders - likely filled
+                                        logger.info(
+                                            f"⚠️ Sell order {sell_order_id} shows status='{status}' but is NOT in open orders list - "
+                                            f"treating as filled (API delay)"
+                                        )
+                                        is_filled = True
+                                    else:
+                                        # Status is LIVE, order is in open orders, but not fully filled yet - keep checking
+                                        logger.debug(
+                                            f"⏳ Sell order {sell_order_id} (trade {trade_id}) still LIVE: "
+                                            f"filled_amount={filled_amount}, total_amount={total_amount}. "
+                                            f"Order is in open orders. Will continue checking on next loop iteration."
+                                        )
+                                else:
+                                    # No open orders returned - keep checking
+                                    logger.debug(
+                                        f"⏳ Sell order {sell_order_id} (trade {trade_id}) still LIVE: "
+                                        f"filled_amount={filled_amount}, total_amount={total_amount}. "
+                                        f"Will continue checking on next loop iteration."
+                                    )
+                            except Exception as e:
+                                logger.debug(f"Could not check open orders for order {sell_order_id}: {e}")
+                    elif status in ["live", "LIVE", "open", "OPEN"]:
+                        # Status is LIVE but no filled_amount yet - check if order is missing from open orders
+                        try:
+                            open_orders = self.pm.get_open_orders()
+                            if open_orders:
+                                open_order_ids = {o.get("orderID") or o.get("order_id") for o in open_orders if o.get("orderID") or o.get("order_id")}
+                                if sell_order_id not in open_order_ids:
+                                    # Order shows LIVE in status but not in open orders - likely filled
+                                    logger.info(
+                                        f"⚠️ Sell order {sell_order_id} shows status='{status}' with no fill data but is NOT in open orders list - "
+                                        f"treating as filled (API delay)"
+                                    )
+                                    is_filled = True
+                                else:
+                                    # Status is LIVE, order is in open orders, but no fill data yet - keep checking
+                                    logger.debug(
+                                        f"⏳ Sell order {sell_order_id} (trade {trade_id}) status is LIVE with no fill data yet. "
+                                        f"Order is in open orders. Will continue checking on next loop iteration."
+                                    )
+                            else:
+                                # No open orders returned - keep checking
+                                logger.debug(
+                                    f"⏳ Sell order {sell_order_id} (trade {trade_id}) status is LIVE with no fill data yet. "
+                                    f"Will continue checking on next loop iteration."
+                                )
+                        except Exception as e:
+                            logger.debug(f"Could not check open orders for order {sell_order_id}: {e}")
                 
                 if is_filled or is_cancelled:
                     if is_filled:
