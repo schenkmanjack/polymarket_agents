@@ -518,6 +518,45 @@ class ThresholdTrader:
                 RealTradeThreshold.market_slug.in_(monitored_market_slugs),  # Only current markets
             ).order_by(RealTradeThreshold.order_placed_at.desc()).all()
             
+            # Also check trades that were incorrectly marked as "filled" but might not actually be filled
+            # This handles cases where API delays caused false positives
+            # Only check if order was marked filled very recently (within last 2 minutes) and market hasn't resolved
+            from datetime import datetime, timezone, timedelta
+            recent_time = datetime.now(timezone.utc) - timedelta(minutes=2)
+            trades_incorrectly_filled = session.query(RealTradeThreshold).filter(
+                RealTradeThreshold.deployment_id == self.deployment_id,
+                RealTradeThreshold.order_status == "filled",
+                RealTradeThreshold.filled_shares.isnot(None),
+                RealTradeThreshold.filled_shares > 0,
+                RealTradeThreshold.sell_order_id.isnot(None),
+                RealTradeThreshold.sell_order_status == "filled",  # Marked as filled
+                RealTradeThreshold.market_resolved_at.is_(None),  # Market not resolved yet
+                RealTradeThreshold.market_slug.in_(monitored_market_slugs),  # Only current markets
+                RealTradeThreshold.sell_order_placed_at.isnot(None),
+                RealTradeThreshold.sell_order_placed_at >= recent_time,  # Recently marked as filled
+            ).order_by(RealTradeThreshold.order_placed_at.desc()).all()
+            
+            # Verify these trades are actually still open by checking the API
+            for trade in trades_incorrectly_filled:
+                try:
+                    # Check if order is actually still open in the API
+                    order_status = self.pm.get_order_status(trade.sell_order_id)
+                    if order_status:
+                        status = order_status.get("status", "unknown")
+                        if status in ["live", "LIVE", "open", "OPEN"]:
+                            # Order is still open - it was incorrectly marked as filled
+                            logger.warning(
+                                f"⚠️ Trade {trade.id} sell order {trade.sell_order_id} was incorrectly marked as 'filled' "
+                                f"but is still OPEN in API (status={status}). Resetting to 'open' and checking early sell."
+                            )
+                            # Reset sell_order_status to "open" so it can be checked for early sell
+                            trade.sell_order_status = "open"
+                            session.commit()
+                            # Add to trades_with_099_sell list so it gets checked
+                            trades_with_099_sell.append(trade)
+                except Exception as e:
+                    logger.debug(f"Could not verify order status for trade {trade.id}: {e}")
+            
             for trade in trades_with_099_sell:
                 try:
                     # Fetch orderbook for the token we bought
@@ -1756,99 +1795,7 @@ class ThresholdTrader:
         except Exception as e:
             logger.warning(f"Could not check notifications: {e}", exc_info=True)
         
-        # First, proactively check open orders list to see if any sell orders are missing (likely filled)
-        # This helps catch fills that weren't detected via get_trades() or get_order_status()
-        try:
-            open_orders = self.pm.get_open_orders()
-            open_order_ids = set()
-            if open_orders:
-                open_order_ids = {o.get("orderID") or o.get("order_id") for o in open_orders if o.get("orderID") or o.get("order_id")}
-            
-            # Check if any tracked sell orders are missing from open orders
-            for sell_order_id, trade_id in list(all_sell_orders_to_check.items()):
-                if sell_order_id not in open_order_ids:
-                    # Order is not in open orders - check if it's already marked as filled
-                    trade = self.db.get_trade_by_id(trade_id)
-                    if trade and trade.sell_order_status == "open":
-                        # Don't mark as filled if order was placed very recently (within last 10 seconds)
-                        # UNLESS we have a notification confirming the fill
-                        # It might not have appeared in open orders list yet, or might still be processing
-                        if sell_order_id not in notifications_processed and trade.sell_order_placed_at:
-                            time_since_placed = (datetime.now(timezone.utc) - trade.sell_order_placed_at).total_seconds()
-                            if time_since_placed < 10.0:
-                                logger.debug(
-                                    f"Sell order {sell_order_id} (trade {trade_id}) not in open orders, "
-                                    f"but was placed only {time_since_placed:.1f}s ago - waiting before marking as filled"
-                                )
-                                continue  # Skip this order, check again next time
-                        
-                        # If we have a notification, log it
-                        if sell_order_id in notifications_processed:
-                            logger.info(
-                                f"✅ Processing sell order {sell_order_id} fill (confirmed by notification) - "
-                                f"skipping 10-second delay"
-                            )
-                        
-                        logger.info(
-                            f"Sell order {sell_order_id} (trade {trade_id}) not found in open orders - "
-                            f"marking as filled (order was placed at {trade.sell_order_placed_at})"
-                        )
-                        # Mark as filled using order details
-                        if trade.sell_order_size and trade.sell_order_price:
-                            from agents.backtesting.backtesting_utils import calculate_polymarket_fee
-                            sell_dollars_received = trade.sell_order_size * trade.sell_order_price
-                            sell_fee = calculate_polymarket_fee(trade.sell_order_price, sell_dollars_received)
-                            
-                            self.db.update_sell_order_fill(
-                                trade_id=trade_id,
-                                sell_order_status="filled",
-                                sell_dollars_received=sell_dollars_received,
-                                sell_fee=sell_fee,
-                            )
-                            
-                            # Calculate and update trade outcome
-                            total_cost = (trade.dollars_spent or 0) + (trade.fee or 0)
-                            total_received = sell_dollars_received - sell_fee
-                            net_profit = total_received - total_cost
-                            roi = net_profit / total_cost if total_cost > 0 else 0.0
-                            is_win = (trade.sell_order_price >= 0.99)
-                            
-                            # Set winning_side to the side we bet on (since selling at $0.99 means we were right)
-                            winning_side = trade.order_side if is_win else None
-                            
-                            # Update principal
-                            new_principal = self.principal + net_profit
-                            self.principal = new_principal
-                            
-                            # Update trade
-                            session = self.db.SessionLocal()
-                            try:
-                                trade_obj = session.query(RealTradeThreshold).filter_by(id=trade_id).first()
-                                if trade_obj:
-                                    trade_obj.principal_after = new_principal
-                                    trade_obj.roi = roi
-                                    trade_obj.is_win = is_win
-                                    trade_obj.net_payout = net_profit
-                                    trade_obj.payout = sell_dollars_received
-                                    trade_obj.winning_side = winning_side
-                                    session.commit()
-                                    logger.info(
-                                        f"✓ Marked sell order {sell_order_id} as filled (not in open orders). "
-                                        f"Net profit: ${net_profit:.2f}, ROI: {roi*100:.2f}%"
-                                    )
-                            except Exception as e:
-                                session.rollback()
-                                logger.error(f"Error updating trade after marking sell order as filled: {e}")
-                            finally:
-                                session.close()
-                            
-                            # Remove from tracking
-                            self.open_sell_orders.pop(sell_order_id, None)
-                            all_sell_orders_to_check.pop(sell_order_id, None)
-        except Exception as e:
-            logger.debug(f"Could not check open orders proactively: {e}")
-        
-        # Then, check fills/trades to see if any sell orders have been filled
+        # Check fills/trades to see if any sell orders have been filled
         # This is more reliable than get_order_status for filled orders
         # Trade records are created when orders are partially or fully filled
         # Trade statuses: MATCHED, MINED, CONFIRMED, FAILED
@@ -1868,37 +1815,72 @@ class ThresholdTrader:
             fills = self.pm.get_trades(maker_address=wallet_address)
             if fills:
                 logger.info(f"📊 Checking {len(fills)} trade records for sell order fills...")
-                logger.info(f"📊 get_trades() response: {fills}")
-                # Log all order IDs we're looking for
-                logger.debug(f"🔍 Looking for sell orders: {list(all_sell_orders_to_check.keys())}")
+                logger.info(f"🔍 Looking for sell orders: {list(all_sell_orders_to_check.keys())}")
+                
+                # Log summary of what we're checking
+                logger.info(
+                    f"📋 Sell order fill detection: Checking maker_orders and taker_order_id fields "
+                    f"in {len(fills)} trade records for {len(all_sell_orders_to_check)} tracked sell orders"
+                )
                 
                 for fill in fills:
-                    # Try multiple field names for order ID (taker_order_id is the actual field name)
-                    fill_order_id = (
-                        fill.get("taker_order_id") or 
-                        fill.get("orderID") or 
-                        fill.get("order_id") or 
-                        fill.get("id")
+                    # For SELL orders, we place limit orders (GTC) which can be either maker or taker:
+                    # - If our limit sell sits on the orderbook, we're the MAKER (order ID in maker_orders)
+                    # - If our limit sell matches immediately against an existing bid, we're the TAKER (order ID in taker_order_id)
+                    # So we need to check BOTH fields to find our sell order ID
+                    maker_orders = fill.get("maker_orders") or []
+                    if not isinstance(maker_orders, list):
+                        maker_orders = []
+                    
+                    taker_order_id = fill.get("taker_order_id")
+                    
+                    # Log what we found in this trade record
+                    logger.debug(
+                        f"📊 Trade record: maker_orders={maker_orders} (type={type(maker_orders).__name__}), "
+                        f"taker_order_id={taker_order_id}, status={fill.get('status')}, "
+                        f"size={fill.get('size')}, price={fill.get('price')}"
                     )
+                    
+                    # Try to find our sell order ID in either maker_orders or taker_order_id
+                    fill_order_id = None
+                    matched_in = None
+                    for sell_order_id in all_sell_orders_to_check.keys():
+                        if sell_order_id in maker_orders:
+                            fill_order_id = sell_order_id
+                            matched_in = "maker_orders"
+                            logger.info(
+                                f"✅✅✅ MATCH FOUND: Sell order {sell_order_id} found in maker_orders list "
+                                f"(we were the maker). Trade record: status={fill.get('status')}, "
+                                f"size={fill.get('size')}, price={fill.get('price')}"
+                            )
+                            break
+                        elif taker_order_id == sell_order_id:
+                            fill_order_id = sell_order_id
+                            matched_in = "taker_order_id"
+                            logger.info(
+                                f"✅✅✅ MATCH FOUND: Sell order {sell_order_id} found in taker_order_id "
+                                f"(we were the taker). Trade record: status={fill.get('status')}, "
+                                f"size={fill.get('size')}, price={fill.get('price')}"
+                            )
+                            break
+                    
+                    # If no match found, try legacy field names for logging purposes only
+                    if not fill_order_id:
+                        fill_order_id = (
+                            fill.get("orderID") or 
+                            fill.get("order_id") or 
+                            fill.get("id")
+                        )
+                        if fill_order_id:
+                            logger.debug(
+                                f"📊 Trade record has legacy order_id={fill_order_id} but doesn't match any tracked sell orders"
+                            )
                     
                     # Check trade status (MATCHED, MINED, CONFIRMED, FAILED)
                     trade_status = fill.get("status") or fill.get("trade_status") or ""
                     trade_status_upper = str(trade_status).upper()
                     
-                    # Log trade record details (INFO level for orders we're tracking)
-                    if fill_order_id in all_sell_orders_to_check:
-                        logger.info(
-                            f"📊📊📊 TRADE RECORD FOUND for tracked order: order_id={fill_order_id}, status={trade_status}, "
-                            f"size={fill.get('size')}, price={fill.get('price')}, "
-                            f"full_record={fill}"
-                        )
-                    else:
-                        logger.debug(
-                            f"📊 Trade record: order_id={fill_order_id}, status={trade_status}, "
-                            f"size={fill.get('size')}, price={fill.get('price')}"
-                        )
-                    
-                    if fill_order_id in all_sell_orders_to_check:
+                    if fill_order_id and fill_order_id in all_sell_orders_to_check:
                         trade_id = all_sell_orders_to_check[fill_order_id]
                         trade = self.db.get_trade_by_id(trade_id)
                         if trade and trade.sell_order_status == "open":
@@ -2052,98 +2034,14 @@ class ThresholdTrader:
                         )
                         continue
                     
-                    # Max retries reached - check if it's in open orders
-                    trade = self.db.get_trade_by_id(trade_id)
-                    if trade and trade.sell_order_status == "open":
-                        logger.warning(
-                            f"Sell order {sell_order_id} not found in API after {self.max_order_not_found_retries} retries - "
-                            f"checking open orders list"
-                        )
-                        # Check if it's in open orders
-                        try:
-                            open_orders = self.pm.get_open_orders()
-                            if open_orders:
-                                order_ids = [o.get("orderID") or o.get("order_id") for o in open_orders]
-                                if sell_order_id not in order_ids:
-                                    # Order is not in open orders - likely filled
-                                    logger.info(f"Sell order {sell_order_id} not in open orders - marking as filled")
-                                    # Update sell order as filled
-                                    if trade.sell_order_size:
-                                        from agents.backtesting.backtesting_utils import calculate_polymarket_fee
-                                        sell_dollars_received = trade.sell_order_size * trade.sell_order_price
-                                        sell_fee = calculate_polymarket_fee(trade.sell_order_price, sell_dollars_received)
-                                        self.db.update_sell_order_fill(
-                                            trade_id=trade_id,
-                                            sell_order_status="filled",
-                                            sell_dollars_received=sell_dollars_received,
-                                            sell_fee=sell_fee,
-                                        )
-                                        
-                                        # Calculate net profit: (what we received from selling) - (what we spent buying)
-                                        total_cost = (trade.dollars_spent or 0) + (trade.fee or 0)  # Buy cost + buy fee
-                                        total_received = sell_dollars_received - sell_fee  # Sell proceeds - sell fee
-                                        net_profit = total_received - total_cost  # Net profit/loss
-                                        
-                                        # Update principal: add net profit (which may be negative if fees exceed gains)
-                                        new_principal = self.principal + net_profit
-                                        self.principal = new_principal
-                                        
-                                        # Calculate ROI: net_profit / total_cost
-                                        roi = net_profit / total_cost if total_cost > 0 else 0.0
-                                        
-                                        # If we sold at $0.99, the market resolved in our favor (we won the bet)
-                                        is_win = (trade.sell_order_price >= 0.99)  # Selling at $0.99 means market resolved in our favor
-                                        
-                                        # Update trade with final principal
-                                        if trade.market_resolved_at:
-                                            # Market already resolved - update with outcome info
-                                            self.db.update_trade_outcome(
-                                                trade_id=trade_id,
-                                                outcome_price=trade.outcome_price,
-                                                payout=sell_dollars_received,
-                                                net_payout=net_profit,
-                                                roi=roi,
-                                                is_win=is_win,
-                                                principal_after=new_principal,
-                                                winning_side=trade.winning_side,
-                                            )
-                                        else:
-                                            # Early sell - market not resolved yet, but we sold at $0.99 so we won
-                                            # Set winning_side to the side we bet on (since selling at $0.99 means we were right)
-                                            winning_side = trade.order_side if is_win else None
-                                            
-                                            session = self.db.SessionLocal()
-                                            try:
-                                                trade_obj = session.query(RealTradeThreshold).filter_by(id=trade_id).first()
-                                                if trade_obj:
-                                                    trade_obj.principal_after = new_principal
-                                                    trade_obj.roi = roi
-                                                    trade_obj.is_win = is_win
-                                                    trade_obj.net_payout = net_profit
-                                                    trade_obj.payout = sell_dollars_received
-                                                    trade_obj.winning_side = winning_side
-                                                    session.commit()
-                                            except Exception as e:
-                                                session.rollback()
-                                                logger.error(f"Error updating principal for early sell: {e}")
-                                            finally:
-                                                session.close()
-                                        
-                                        logger.info(
-                                            f"Sell order {sell_order_id} filled (not found in API): "
-                                            f"received ${sell_dollars_received:.2f}, net_proceeds=${net_proceeds:.2f}, "
-                                            f"new principal: ${new_principal:.2f}"
-                                        )
-                                        
-                                        self.open_sell_orders.pop(sell_order_id, None)
-                                        self.sell_orders_not_found.pop(sell_order_id, None)  # Clear retry count
-                                else:
-                                    # Order is in open orders but get_order_status failed - keep retrying
-                                    logger.warning(f"Sell order {sell_order_id} is in open orders but status check failed - will retry")
-                                    continue
-                        except Exception as e:
-                            logger.warning(f"Could not check open orders for sell: {e} - will retry")
-                            continue
+                    # Max retries reached - order not found in API
+                    # Don't mark as filled just because it's not found - wait for trade record or notification
+                    logger.warning(
+                        f"Sell order {sell_order_id} not found in API after {self.max_order_not_found_retries} retries. "
+                        f"Will continue checking via trade records and notifications. "
+                        f"Not marking as filled without evidence."
+                    )
+                    continue
                     else:
                         # Trade not found or already resolved - remove from tracking
                         self.open_sell_orders.pop(sell_order_id, None)
@@ -2187,62 +2085,25 @@ class ThresholdTrader:
                             )
                             is_filled = True
                         else:
-                            # Status is LIVE but not fully filled yet - check if order is missing from open orders
-                            # (API might show LIVE but order actually filled)
-                            try:
-                                open_orders = self.pm.get_open_orders()
-                                if open_orders:
-                                    open_order_ids = {o.get("orderID") or o.get("order_id") for o in open_orders if o.get("orderID") or o.get("order_id")}
-                                    if sell_order_id not in open_order_ids:
-                                        # Order shows LIVE in status but not in open orders - likely filled
-                                        logger.info(
-                                            f"⚠️ Sell order {sell_order_id} shows status='{status}' but is NOT in open orders list - "
-                                            f"treating as filled (API delay)"
-                                        )
-                                        is_filled = True
-                                    else:
-                                        # Status is LIVE, order is in open orders, but not fully filled yet - keep checking
-                                        logger.debug(
-                                            f"⏳ Sell order {sell_order_id} (trade {trade_id}) still LIVE: "
-                                            f"filled_amount={filled_amount}, total_amount={total_amount}. "
-                                            f"Order is in open orders. Will continue checking on next loop iteration."
-                                        )
-                                else:
-                                    # No open orders returned - keep checking
-                                    logger.debug(
-                                        f"⏳ Sell order {sell_order_id} (trade {trade_id}) still LIVE: "
-                                        f"filled_amount={filled_amount}, total_amount={total_amount}. "
-                                        f"Will continue checking on next loop iteration."
-                                    )
-                            except Exception as e:
-                                logger.debug(f"Could not check open orders for order {sell_order_id}: {e}")
+                            # Status is LIVE but not fully filled yet - be conservative
+                            # Only mark as filled if order is missing from open orders AND we have some fill evidence
+                            # (filled_amount > 0 or a trade record exists)
+                            # Don't assume filled just because it's missing from open orders - could be API delay
+                            logger.debug(
+                                f"⏳ Sell order {sell_order_id} (trade {trade_id}) still LIVE: "
+                                f"filled_amount={filled_amount}, total_amount={total_amount}. "
+                                f"Will continue checking on next loop iteration. "
+                                f"Need filled_amount >= total_amount or trade record to mark as filled."
+                            )
                     elif status in ["live", "LIVE", "open", "OPEN"]:
-                        # Status is LIVE but no filled_amount yet - check if order is missing from open orders
-                        try:
-                            open_orders = self.pm.get_open_orders()
-                            if open_orders:
-                                open_order_ids = {o.get("orderID") or o.get("order_id") for o in open_orders if o.get("orderID") or o.get("order_id")}
-                                if sell_order_id not in open_order_ids:
-                                    # Order shows LIVE in status but not in open orders - likely filled
-                                    logger.info(
-                                        f"⚠️ Sell order {sell_order_id} shows status='{status}' with no fill data but is NOT in open orders list - "
-                                        f"treating as filled (API delay)"
-                                    )
-                                    is_filled = True
-                                else:
-                                    # Status is LIVE, order is in open orders, but no fill data yet - keep checking
-                                    logger.debug(
-                                        f"⏳ Sell order {sell_order_id} (trade {trade_id}) status is LIVE with no fill data yet. "
-                                        f"Order is in open orders. Will continue checking on next loop iteration."
-                                    )
-                            else:
-                                # No open orders returned - keep checking
-                                logger.debug(
-                                    f"⏳ Sell order {sell_order_id} (trade {trade_id}) status is LIVE with no fill data yet. "
-                                    f"Will continue checking on next loop iteration."
-                                )
-                        except Exception as e:
-                            logger.debug(f"Could not check open orders for order {sell_order_id}: {e}")
+                        # Status is LIVE but no filled_amount yet - be conservative
+                        # Don't assume filled just because it's missing from open orders
+                        # Wait for more evidence (filled_amount > 0, trade record, or notification)
+                        logger.debug(
+                            f"⏳ Sell order {sell_order_id} (trade {trade_id}) status is LIVE with no fill data yet. "
+                            f"Will continue checking on next loop iteration. "
+                            f"Need more evidence (filled_amount, trade record, or notification) before marking as filled."
+                        )
                 
                 if is_filled or is_cancelled:
                     if is_filled:
