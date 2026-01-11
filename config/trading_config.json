@@ -5,8 +5,8 @@
   "threshold_sell": 0.3,
   "margin_sell": 0.02,
   "kelly_fraction": 0.8,
-  "kelly_scale_factor": 0.9,
+  "kelly_scale_factor": 0.6,
   "market_type": "15m",
-  "initial_principal": 8.0,
+  "initial_principal": 14.0,
   "dollar_bet_limit": 100.0
 }
