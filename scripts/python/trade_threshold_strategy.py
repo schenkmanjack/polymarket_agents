@@ -1644,6 +1644,59 @@ class ThresholdTrader:
         if not all_sell_orders_to_check:
             return
         
+        # First, check notifications for order fills (most reliable method)
+        # Notifications are pushed by Polymarket when orders fill
+        notifications_processed = set()
+        try:
+            if hasattr(self.pm, 'get_notifications'):
+                notifications = self.pm.get_notifications()
+                if notifications:
+                    logger.info(f"📬 Checking {len(notifications)} notifications for sell order fills...")
+                    for idx, notification in enumerate(notifications):
+                        # Log all notification details for debugging
+                        order_id = notification.get("orderID") or notification.get("order_id") or notification.get("id")
+                        notification_type = str(notification.get("type") or notification.get("notification_type") or "unknown")
+                        notification_message = notification.get("message") or notification.get("text") or notification.get("content") or ""
+                        notification_title = notification.get("title") or ""
+                        notification_timestamp = notification.get("timestamp") or notification.get("created_at") or notification.get("time") or ""
+                        
+                        logger.info(
+                            f"📬 Notification {idx + 1}/{len(notifications)}: "
+                            f"order_id={order_id}, type={notification_type}, "
+                            f"title={notification_title}, message={notification_message[:200]}, "
+                            f"timestamp={notification_timestamp}, "
+                            f"full_notification={notification}"
+                        )
+                        
+                        if order_id and order_id in all_sell_orders_to_check:
+                            # Check if this is a fill notification
+                            is_fill_notification = (
+                                "fill" in notification_type.lower() or 
+                                "filled" in notification_type.lower() or 
+                                "match" in notification_type.lower() or
+                                "fill" in notification_message.lower() or
+                                "filled" in notification_message.lower() or
+                                "matched" in notification_message.lower() or
+                                "fill" in notification_title.lower() or
+                                "filled" in notification_title.lower() or
+                                "matched" in notification_title.lower()
+                            )
+                            
+                            if is_fill_notification:
+                                trade_id = all_sell_orders_to_check[order_id]
+                                trade = self.db.get_trade_by_id(trade_id)
+                                if trade and trade.sell_order_status == "open":
+                                    logger.info(
+                                        f"🔔🔔🔔 NOTIFICATION MATCH: Sell order {order_id} (trade {trade_id}) FILLED via notification! "
+                                        f"Type: {notification_type}, Title: {notification_title}, Message: {notification_message[:200]}"
+                                    )
+                                    # Mark this order for immediate processing (skip the 10-second delay)
+                                    notifications_processed.add(order_id)
+                else:
+                    logger.debug("No notifications returned from API")
+        except Exception as e:
+            logger.warning(f"Could not check notifications: {e}", exc_info=True)
+        
         # First, proactively check open orders list to see if any sell orders are missing (likely filled)
         # This helps catch fills that weren't detected via get_trades() or get_order_status()
         try:
@@ -1659,8 +1712,9 @@ class ThresholdTrader:
                     trade = self.db.get_trade_by_id(trade_id)
                     if trade and trade.sell_order_status == "open":
                         # Don't mark as filled if order was placed very recently (within last 10 seconds)
+                        # UNLESS we have a notification confirming the fill
                         # It might not have appeared in open orders list yet, or might still be processing
-                        if trade.sell_order_placed_at:
+                        if sell_order_id not in notifications_processed and trade.sell_order_placed_at:
                             time_since_placed = (datetime.now(timezone.utc) - trade.sell_order_placed_at).total_seconds()
                             if time_since_placed < 10.0:
                                 logger.debug(
@@ -1668,6 +1722,13 @@ class ThresholdTrader:
                                     f"but was placed only {time_since_placed:.1f}s ago - waiting before marking as filled"
                                 )
                                 continue  # Skip this order, check again next time
+                        
+                        # If we have a notification, log it
+                        if sell_order_id in notifications_processed:
+                            logger.info(
+                                f"✅ Processing sell order {sell_order_id} fill (confirmed by notification) - "
+                                f"skipping 10-second delay"
+                            )
                         
                         logger.info(
                             f"Sell order {sell_order_id} (trade {trade_id}) not found in open orders - "
@@ -1693,6 +1754,9 @@ class ThresholdTrader:
                             roi = net_profit / total_cost if total_cost > 0 else 0.0
                             is_win = (trade.sell_order_price >= 0.99)
                             
+                            # Set winning_side to the side we bet on (since selling at $0.99 means we were right)
+                            winning_side = trade.order_side if is_win else None
+                            
                             # Update principal
                             new_principal = self.principal + net_profit
                             self.principal = new_principal
@@ -1707,6 +1771,7 @@ class ThresholdTrader:
                                     trade_obj.is_win = is_win
                                     trade_obj.net_payout = net_profit
                                     trade_obj.payout = sell_dollars_received
+                                    trade_obj.winning_side = winning_side
                                     session.commit()
                                     logger.info(
                                         f"✓ Marked sell order {sell_order_id} as filled (not in open orders). "
@@ -1726,9 +1791,12 @@ class ThresholdTrader:
         
         # Then, check fills/trades to see if any sell orders have been filled
         # This is more reliable than get_order_status for filled orders
+        # Trade records are created when orders are partially or fully filled
+        # Trade statuses: MATCHED, MINED, CONFIRMED, FAILED
         try:
             fills = self.pm.get_trades()
             if fills:
+                logger.debug(f"📊 Checking {len(fills)} trade records for sell order fills...")
                 for fill in fills:
                     # Try multiple field names for order ID (taker_order_id is the actual field name)
                     fill_order_id = (
@@ -1737,105 +1805,153 @@ class ThresholdTrader:
                         fill.get("order_id") or 
                         fill.get("id")
                     )
+                    
+                    # Check trade status (MATCHED, MINED, CONFIRMED, FAILED)
+                    trade_status = fill.get("status") or fill.get("trade_status") or ""
+                    trade_status_upper = str(trade_status).upper()
+                    
+                    # Log trade record details
+                    logger.debug(
+                        f"📊 Trade record: order_id={fill_order_id}, status={trade_status}, "
+                        f"size={fill.get('size')}, price={fill.get('price')}, "
+                        f"full_record={fill}"
+                    )
+                    
                     if fill_order_id in all_sell_orders_to_check:
                         trade_id = all_sell_orders_to_check[fill_order_id]
                         trade = self.db.get_trade_by_id(trade_id)
                         if trade and trade.sell_order_status == "open":
-                            # Sell order was filled - extract fill details
-                            filled_shares = fill.get("size")
-                            fill_price_from_record = fill.get("price")
+                            # Check if trade status indicates success (MATCHED, MINED, or CONFIRMED)
+                            # FAILED trades should not be treated as filled
+                            is_successful_trade = trade_status_upper in ["MATCHED", "MINED", "CONFIRMED"]
+                            is_failed_trade = trade_status_upper == "FAILED"
                             
-                            # Convert to float if they're strings
-                            if filled_shares:
-                                filled_shares = float(filled_shares)
-                            else:
-                                filled_shares = trade.sell_order_size  # Fallback to order size
-                            
-                            # Use the actual fill price from the fill record
-                            if fill_price_from_record:
-                                sell_price = float(fill_price_from_record)
-                            else:
-                                sell_price = trade.sell_order_price or 0.99  # Fallback to order price
-                            
-                            sell_dollars_received = filled_shares * sell_price
-                            
-                            from agents.backtesting.backtesting_utils import calculate_polymarket_fee
-                            sell_fee = calculate_polymarket_fee(sell_price, sell_dollars_received)
-                            
-                            self.db.update_sell_order_fill(
-                                trade_id=trade_id,
-                                sell_order_status="filled",
-                                sell_dollars_received=sell_dollars_received,
-                                sell_fee=sell_fee,
-                            )
-                            
-                            # Calculate net profit: (what we received from selling) - (what we spent buying)
-                            # Note: Principal wasn't reduced when buying, so we need to account for the full cost
-                            total_cost = (trade.dollars_spent or 0) + (trade.fee or 0)  # Buy cost + buy fee
-                            total_received = sell_dollars_received - sell_fee  # Sell proceeds - sell fee
-                            net_profit = total_received - total_cost  # Net profit/loss
-                            
-                            # Update principal: add net profit (which may be negative if fees exceed gains)
-                            new_principal = self.principal + net_profit
-                            self.principal = new_principal
-                            
-                            # Calculate ROI: net_profit / total_cost
-                            roi = net_profit / total_cost if total_cost > 0 else 0.0
-                            
-                            # If we sold at $0.99, the market resolved in our favor (we won the bet)
-                            # is_win should be True if we bet on the winning side (sold at $0.99 means we were right)
-                            is_win = (sell_price >= 0.99)  # Selling at $0.99 means market resolved in our favor
-                            
-                            # Update trade with final principal
-                            if trade.market_resolved_at:
-                                # Market already resolved - update with outcome info
-                                self.db.update_trade_outcome(
-                                    trade_id=trade_id,
-                                    outcome_price=trade.outcome_price,
-                                    payout=sell_dollars_received,
-                                    net_payout=net_profit,
-                                    roi=roi,
-                                    is_win=is_win,
-                                    principal_after=new_principal,
-                                    winning_side=trade.winning_side,
+                            if is_failed_trade:
+                                logger.warning(
+                                    f"⚠️ Sell order {fill_order_id} (trade {trade_id}) trade record shows FAILED status - "
+                                    f"order did not execute successfully"
                                 )
-                            else:
-                                # Early sell - market not resolved yet, but we sold at $0.99 so we won
+                                # Mark as failed in database
                                 session = self.db.SessionLocal()
                                 try:
                                     trade_obj = session.query(RealTradeThreshold).filter_by(id=trade_id).first()
                                     if trade_obj:
-                                        trade_obj.principal_after = new_principal
-                                        trade_obj.roi = roi
-                                        trade_obj.is_win = is_win
-                                        trade_obj.net_payout = net_profit
-                                        trade_obj.payout = sell_dollars_received
+                                        trade_obj.sell_order_status = "failed"
+                                        trade_obj.error_message = f"Sell order trade failed: status={trade_status}"
                                         session.commit()
                                 except Exception as e:
                                     session.rollback()
-                                    logger.error(f"Error updating principal for early sell: {e}")
+                                    logger.error(f"Error marking sell order as failed: {e}")
                                 finally:
                                     session.close()
+                                continue  # Skip processing this trade
                             
-                            logger.info(
-                                f"✅✅✅ SELL ORDER FILLED ✅✅✅\n"
-                                f"  Sell Order ID: {fill_order_id}\n"
-                                f"  Trade ID: {trade_id}\n"
-                                f"  Filled Shares: {filled_shares}\n"
-                                f"  Sell Price: ${sell_price:.4f}\n"
-                                f"  Dollars Received: ${sell_dollars_received:.2f}\n"
-                                f"  Sell Fee: ${sell_fee:.4f}\n"
-                                f"  Total Cost (buy): ${total_cost:.2f}\n"
-                                f"  Net Profit: ${net_profit:.2f}\n"
-                                f"  ROI: {roi*100:.2f}%\n"
-                                f"  Is Win: {is_win}\n"
-                                f"  Principal: ${self.principal:.2f} -> ${new_principal:.2f}"
-                            )
-                            
-                            self.open_sell_orders.pop(fill_order_id, None)
-                            self.sell_orders_not_found.pop(fill_order_id, None)
-                            # Remove from all_sell_orders_to_check so we don't check it again below
-                            all_sell_orders_to_check.pop(fill_order_id, None)
+                            if is_successful_trade:
+                                logger.info(
+                                    f"✅✅✅ TRADE RECORD: Sell order {fill_order_id} (trade {trade_id}) has trade record "
+                                    f"with status={trade_status_upper} - order was filled!"
+                                )
+                                
+                                # Sell order was filled - extract fill details
+                                filled_shares = fill.get("size")
+                                fill_price_from_record = fill.get("price")
+                                
+                                # Convert to float if they're strings
+                                if filled_shares:
+                                    filled_shares = float(filled_shares)
+                                else:
+                                    filled_shares = trade.sell_order_size  # Fallback to order size
+                                
+                                # Use the actual fill price from the fill record
+                                if fill_price_from_record:
+                                    sell_price = float(fill_price_from_record)
+                                else:
+                                    sell_price = trade.sell_order_price or 0.99  # Fallback to order price
+                                
+                                sell_dollars_received = filled_shares * sell_price
+                                
+                                from agents.backtesting.backtesting_utils import calculate_polymarket_fee
+                                sell_fee = calculate_polymarket_fee(sell_price, sell_dollars_received)
+                                
+                                self.db.update_sell_order_fill(
+                                    trade_id=trade_id,
+                                    sell_order_status="filled",
+                                    sell_dollars_received=sell_dollars_received,
+                                    sell_fee=sell_fee,
+                                )
+                                
+                                # Calculate net profit: (what we received from selling) - (what we spent buying)
+                                # Note: Principal wasn't reduced when buying, so we need to account for the full cost
+                                total_cost = (trade.dollars_spent or 0) + (trade.fee or 0)  # Buy cost + buy fee
+                                total_received = sell_dollars_received - sell_fee  # Sell proceeds - sell fee
+                                net_profit = total_received - total_cost  # Net profit/loss
+                                
+                                # Update principal: add net profit (which may be negative if fees exceed gains)
+                                new_principal = self.principal + net_profit
+                                self.principal = new_principal
+                                
+                                # Calculate ROI: net_profit / total_cost
+                                roi = net_profit / total_cost if total_cost > 0 else 0.0
+                                
+                                # If we sold at $0.99, the market resolved in our favor (we won the bet)
+                                # is_win should be True if we bet on the winning side (sold at $0.99 means we were right)
+                                is_win = (sell_price >= 0.99)  # Selling at $0.99 means market resolved in our favor
+                                
+                                # Update trade with final principal
+                                if trade.market_resolved_at:
+                                    # Market already resolved - update with outcome info
+                                    self.db.update_trade_outcome(
+                                        trade_id=trade_id,
+                                        outcome_price=trade.outcome_price,
+                                        payout=sell_dollars_received,
+                                        net_payout=net_profit,
+                                        roi=roi,
+                                        is_win=is_win,
+                                        principal_after=new_principal,
+                                        winning_side=trade.winning_side,
+                                    )
+                                else:
+                                    # Early sell - market not resolved yet, but we sold at $0.99 so we won
+                                    # Set winning_side to the side we bet on (since selling at $0.99 means we were right)
+                                    winning_side = trade.order_side if is_win else None
+                                    
+                                    session = self.db.SessionLocal()
+                                    try:
+                                        trade_obj = session.query(RealTradeThreshold).filter_by(id=trade_id).first()
+                                        if trade_obj:
+                                            trade_obj.principal_after = new_principal
+                                            trade_obj.roi = roi
+                                            trade_obj.is_win = is_win
+                                            trade_obj.net_payout = net_profit
+                                            trade_obj.payout = sell_dollars_received
+                                            trade_obj.winning_side = winning_side
+                                            session.commit()
+                                    except Exception as e:
+                                        session.rollback()
+                                        logger.error(f"Error updating principal for early sell: {e}")
+                                    finally:
+                                        session.close()
+                                
+                                logger.info(
+                                    f"✅✅✅ SELL ORDER FILLED (via trade record) ✅✅✅\n"
+                                    f"  Sell Order ID: {fill_order_id}\n"
+                                    f"  Trade ID: {trade_id}\n"
+                                    f"  Trade Status: {trade_status_upper}\n"
+                                    f"  Filled Shares: {filled_shares}\n"
+                                    f"  Sell Price: ${sell_price:.4f}\n"
+                                    f"  Dollars Received: ${sell_dollars_received:.2f}\n"
+                                    f"  Sell Fee: ${sell_fee:.4f}\n"
+                                    f"  Total Cost (buy): ${total_cost:.2f}\n"
+                                    f"  Net Profit: ${net_profit:.2f}\n"
+                                    f"  ROI: {roi*100:.2f}%\n"
+                                    f"  Is Win: {is_win}\n"
+                                    f"  Principal: ${self.principal:.2f} -> ${new_principal:.2f}"
+                                )
+                                
+                                self.open_sell_orders.pop(fill_order_id, None)
+                                self.sell_orders_not_found.pop(fill_order_id, None)
+                                # Remove from all_sell_orders_to_check so we don't check it again below
+                                all_sell_orders_to_check.pop(fill_order_id, None)
         except Exception as e:
             logger.debug(f"Could not check fills/trades for sell orders: {e}")
         
@@ -1912,6 +2028,9 @@ class ThresholdTrader:
                                             )
                                         else:
                                             # Early sell - market not resolved yet, but we sold at $0.99 so we won
+                                            # Set winning_side to the side we bet on (since selling at $0.99 means we were right)
+                                            winning_side = trade.order_side if is_win else None
+                                            
                                             session = self.db.SessionLocal()
                                             try:
                                                 trade_obj = session.query(RealTradeThreshold).filter_by(id=trade_id).first()
@@ -1921,6 +2040,7 @@ class ThresholdTrader:
                                                     trade_obj.is_win = is_win
                                                     trade_obj.net_payout = net_profit
                                                     trade_obj.payout = sell_dollars_received
+                                                    trade_obj.winning_side = winning_side
                                                     session.commit()
                                             except Exception as e:
                                                 session.rollback()
@@ -1962,10 +2082,29 @@ class ThresholdTrader:
                     continue
                 
                 # Check if sell order is filled or cancelled
-                is_filled = status in ["filled", "FILLED", "complete", "COMPLETE"] or (
+                # Also check for "matched" status which indicates the order was filled immediately
+                # Check if filled_amount equals or exceeds total_amount (order is fully filled)
+                is_filled = status in ["filled", "FILLED", "complete", "COMPLETE", "matched", "MATCHED"] or (
                     filled_amount and total_amount and float(filled_amount) >= float(total_amount)
                 )
                 is_cancelled = status in ["cancelled", "CANCELLED", "canceled", "CANCELED"]
+                
+                # Log order status for debugging
+                if trade.sell_order_status == "open":
+                    logger.info(
+                        f"🔍 Sell order {sell_order_id} (trade {trade_id}) status check: "
+                        f"status={status}, filled_amount={filled_amount}, total_amount={total_amount}, "
+                        f"is_filled={is_filled}, is_cancelled={is_cancelled}"
+                    )
+                    
+                    # If status is "live" but filled_amount equals total_amount, it's actually filled
+                    if status in ["live", "LIVE", "open", "OPEN"] and filled_amount and total_amount:
+                        if float(filled_amount) >= float(total_amount):
+                            logger.info(
+                                f"⚠️ Sell order {sell_order_id} shows status='{status}' but filled_amount ({filled_amount}) >= total_amount ({total_amount}) - "
+                                f"treating as filled"
+                            )
+                            is_filled = True
                 
                 if is_filled or is_cancelled:
                     if is_filled:
@@ -2015,6 +2154,9 @@ class ThresholdTrader:
                             )
                         else:
                             # Early sell - market not resolved yet, but we sold at $0.99 so we won
+                            # Set winning_side to the side we bet on (since selling at $0.99 means we were right)
+                            winning_side = trade.order_side if is_win else None
+                            
                             session = self.db.SessionLocal()
                             try:
                                 trade_obj = session.query(RealTradeThreshold).filter_by(id=trade_id).first()
@@ -2024,6 +2166,7 @@ class ThresholdTrader:
                                     trade_obj.is_win = is_win
                                     trade_obj.net_payout = net_profit
                                     trade_obj.payout = sell_dollars_received
+                                    trade_obj.winning_side = winning_side
                                     session.commit()
                             except Exception as e:
                                 session.rollback()

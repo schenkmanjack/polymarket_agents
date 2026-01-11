@@ -852,6 +852,21 @@ class Polymarket:
         except Exception as e:
             logger.error(f"❌ Error ensuring conditional token allowances: {e}", exc_info=True)
             return False
+    
+    def get_notifications(self) -> Optional[List[Dict]]:
+        """
+        Get notifications from Polymarket API.
+        Notifications include order fills, cancellations, and other events.
+        
+        Returns:
+            List of notification dictionaries, or None if error
+        """
+        try:
+            notifications = self.client.get_notifications()
+            return notifications
+        except Exception as e:
+            logger.error(f"Error getting notifications: {e}", exc_info=True)
+            return None
 
 
 def test():
