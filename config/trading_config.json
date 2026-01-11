@@ -7,6 +7,6 @@
   "kelly_fraction": 0.8,
   "kelly_scale_factor": 0.6,
   "market_type": "15m",
-  "initial_principal": 14.0,
-  "dollar_bet_limit": 100.0
+  "initial_principal": 16.0,
+  "dollar_bet_limit": 160.0
 }
