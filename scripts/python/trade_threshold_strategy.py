@@ -477,7 +477,14 @@ class ThresholdTrader:
     
     async def _place_initial_sell_order(self, trade: RealTradeThreshold):
         """Place initial sell order at 0.99 immediately when buy order fills."""
+        trade_id = trade.id  # Save ID before reloading
         try:
+            # Reload trade from database to ensure we have latest data
+            trade = self.db.get_trade_by_id(trade_id)
+            if not trade:
+                logger.error(f"Trade {trade_id} not found in database when placing sell order")
+                return
+            
             # Skip if already have a sell order
             if trade.sell_order_id:
                 logger.debug(f"Trade {trade.id} already has sell order {trade.sell_order_id}, skipping")
@@ -485,17 +492,24 @@ class ThresholdTrader:
             
             # Skip if no filled shares
             if not trade.filled_shares or trade.filled_shares <= 0:
-                logger.warning(f"Trade {trade.id} has no filled shares, cannot place sell order")
+                logger.warning(
+                    f"Trade {trade.id} has no filled shares (filled_shares={trade.filled_shares}), "
+                    f"cannot place sell order"
+                )
+                return
+            
+            if not trade.token_id:
+                logger.error(f"Trade {trade.id} has no token_id, cannot place sell order")
                 return
             
             logger.info(
                 f"Placing initial sell order at $0.99 for {trade.filled_shares} shares "
-                f"(trade {trade.id})"
+                f"(trade {trade.id}, token_id={trade.token_id})"
             )
             
             sell_order_response = self.pm.execute_order(
                 price=0.99,
-                size=trade.filled_shares,
+                size=int(trade.filled_shares),  # Ensure integer size
                 side=SELL,
                 token_id=trade.token_id,
             )
@@ -515,14 +529,23 @@ class ThresholdTrader:
                     self.open_sell_orders[sell_order_id] = trade.id
                     logger.info(
                         f"✓ Initial sell order placed at $0.99: order_id={sell_order_id}, "
-                        f"size={trade.filled_shares} shares"
+                        f"size={trade.filled_shares} shares, logged to database"
                     )
                 else:
-                    logger.warning(f"Initial sell order placed but could not extract order ID")
+                    logger.error(
+                        f"Initial sell order placed but could not extract order ID. "
+                        f"Response: {sell_order_response}"
+                    )
             else:
-                logger.warning(f"Failed to place initial sell order for trade {trade.id}")
+                logger.error(
+                    f"Failed to place initial sell order for trade {trade.id}. "
+                    f"execute_order returned None or empty response"
+                )
         except Exception as e:
-            logger.error(f"Error placing initial sell order for trade {trade.id}: {e}", exc_info=True)
+            logger.error(
+                f"Error placing initial sell order for trade {trade.id}: {e}", 
+                exc_info=True
+            )
     
     async def _place_early_sell_order(self, trade: RealTradeThreshold, sell_price: float):
         """Place an early sell order (stop-loss), canceling the 0.99 order first if it exists."""
@@ -1373,16 +1396,7 @@ class ThresholdTrader:
                 logger.error(f"Could not parse outcome price for trade {trade.id}")
                 return
             
-            # Calculate payout (only for filled shares)
-            payout = outcome_price * filled_shares
-            
-            # Calculate net payout and ROI
-            fee = trade.fee or 0.0
-            net_payout = payout - dollars_spent - fee
-            roi = net_payout / (dollars_spent + fee) if (dollars_spent + fee) > 0 else 0.0
-            is_win = roi > 0
-            
-            # Determine winning side
+            # Determine winning side first
             winning_side = None
             if isinstance(outcome_prices_raw, list) and len(outcome_prices_raw) >= 2:
                 if float(outcome_prices_raw[0]) == 1.0:
@@ -1395,27 +1409,83 @@ class ThresholdTrader:
                 elif outcome_prices_raw.get("No") == 1:
                     winning_side = "NO"
             
-            # Note: Sell order at 0.99 was already placed when buy order filled
-            # If market resolved and we won, the 0.99 sell order should execute automatically
-            # If we lost, no sell order is needed (shares are worthless)
-            # If an early sell already happened, principal_after was already set when the sell filled
-            # Preserve that value instead of overwriting it
-            new_principal = self.principal
+            # Calculate is_win: check if we bet on the winning side (YES/NO question)
+            # This is independent of ROI - it's simply: did we bet on the side that won?
+            is_win = (winning_side is not None and trade.order_side == winning_side)
+            
+            # Calculate payout and ROI based on actual proceeds from selling
+            # ROI is calculated AFTER we execute the sell (0.99 limit, early sell, or market resolution)
+            fee = trade.fee or 0.0
+            sell_fee = trade.sell_fee or 0.0
+            
+            if trade.sell_order_id and trade.sell_order_status == "filled" and trade.sell_dollars_received:
+                # We already sold (either at 0.99 or early sell) - use actual proceeds
+                payout = trade.sell_dollars_received
+                net_payout = payout - sell_fee - dollars_spent - fee
+                roi = net_payout / (dollars_spent + fee) if (dollars_spent + fee) > 0 else 0.0
+            elif not is_win:
+                # We lost - shares are worthless, no sell order needed
+                payout = 0.0
+                net_payout = -dollars_spent - fee
+                roi = net_payout / (dollars_spent + fee) if (dollars_spent + fee) > 0 else 0.0
+            else:
+                # We won but sell order hasn't filled yet (should execute at 0.99 soon)
+                # Use outcome_price as placeholder - ROI will be updated when sell fills
+                payout = outcome_price * filled_shares
+                net_payout = payout - dollars_spent - fee  # Don't include sell_fee yet
+                roi = net_payout / (dollars_spent + fee) if (dollars_spent + fee) > 0 else 0.0
+                logger.info(
+                    f"Trade {trade.id} won but sell order not filled yet - using outcome_price as placeholder. "
+                    f"ROI will be updated when sell order fills."
+                )
+            
+            # Log outcome for debugging
+            logger.info(
+                f"Trade {trade.id} outcome: side={trade.order_side}, winning_side={winning_side}, "
+                f"is_win={is_win}, outcome_price={outcome_price:.4f}, "
+                f"payout=${payout:.2f}, net_payout=${net_payout:.2f}, roi={roi*100:.2f}%"
+            )
+            
+            # Update principal ONLY when:
+            # 1. Sell order already filled (principal_after was set when sell filled)
+            # 2. OR we lost (market ended, no sell order needed)
+            # Do NOT update principal if we won but sell order hasn't filled yet - wait for sell to fill
+            new_principal = self.principal  # Default: keep current principal
+            principal_updated = False
+            
             if trade.sell_order_id and trade.sell_order_status == "filled" and trade.principal_after is not None:
-                # Sell order already filled and principal_after is already set - preserve it
+                # Sell order already filled - principal_after was set when sell filled
+                # Preserve that value (don't recalculate)
                 new_principal = trade.principal_after
                 self.principal = new_principal
+                principal_updated = True
                 logger.info(
                     f"Preserving principal_after from sell order: ${new_principal:.2f} "
                     f"(market resolution for trade {trade.id})"
                 )
             elif not is_win:
-                # If we lost, update principal immediately (shares are worthless, no sell order needed)
+                # We lost - market ended, shares are worthless, no sell order needed
+                # Update principal now (this is the only time we update principal at market resolution)
                 new_principal = self.principal + net_payout
                 self.principal = new_principal
-            # If we won but sell order hasn't filled yet, principal will be updated when sell fills
+                principal_updated = True
+                logger.info(
+                    f"Market ended - we lost. Updating principal: ${self.principal:.2f} -> ${new_principal:.2f} "
+                    f"(net_payout=${net_payout:.2f})"
+                )
+            else:
+                # We won but sell order hasn't filled yet
+                # Do NOT update principal - wait for sell order to fill
+                # principal_after will be set when sell order fills
+                logger.info(
+                    f"Market ended - we won but sell order hasn't filled yet. "
+                    f"Principal will be updated when sell order fills. "
+                    f"Current principal: ${self.principal:.2f}"
+                )
             
             # Update trade in database
+            # Only set principal_after if we actually updated it (sell filled or we lost)
+            principal_after_value = new_principal if principal_updated else None
             self.db.update_trade_outcome(
                 trade_id=trade.id,
                 outcome_price=outcome_price,
@@ -1423,7 +1493,7 @@ class ThresholdTrader:
                 net_payout=net_payout,
                 roi=roi,
                 is_win=is_win,
-                principal_after=new_principal,  # Preserved from early sell if applicable
+                principal_after=principal_after_value,  # Only set if we updated principal
                 winning_side=winning_side,
             )
             
