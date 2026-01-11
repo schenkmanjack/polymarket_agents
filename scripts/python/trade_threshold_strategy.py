@@ -755,23 +755,28 @@ class ThresholdTrader:
             min_order_size = math.ceil(MIN_ORDER_VALUE / order_price)
             new_order_value = min_order_size * order_price
             
-            # Check if we have enough balance for the larger order
-            if new_order_value <= amount_invested:
-                logger.info(
-                    f"Order value ${order_value:.2f} below minimum ${MIN_ORDER_VALUE:.2f}. "
-                    f"Increasing order size from {order_size} to {min_order_size} shares "
-                    f"(new order_value=${new_order_value:.2f})"
-                )
-                order_size = min_order_size
-                order_value = new_order_value
-            else:
+            # Check if rounded-up amount exceeds dollar_bet_limit
+            if new_order_value > self.config.dollar_bet_limit:
                 logger.warning(
                     f"Order value ${order_value:.2f} below minimum ${MIN_ORDER_VALUE:.2f}, "
-                    f"but insufficient funds to increase size. "
-                    f"Need ${new_order_value:.2f} but only have ${amount_invested:.2f}. "
-                    f"Skipping order."
+                    f"but rounding up to ${new_order_value:.2f} would exceed dollar_bet_limit "
+                    f"${self.config.dollar_bet_limit:.2f}. Skipping order."
                 )
                 return
+            
+            # Round up to meet minimum (using Kelly-calculated amount_invested)
+            # Kelly amount is already calculated, so we just need to round up the order size
+            logger.info(
+                f"Order value ${order_value:.2f} below minimum ${MIN_ORDER_VALUE:.2f}. "
+                f"Rounding up order size from {order_size} to {min_order_size} shares "
+                f"(new order_value=${new_order_value:.2f}, "
+                f"Kelly amount_invested=${amount_invested:.2f}, "
+                f"within dollar_bet_limit=${self.config.dollar_bet_limit:.2f})"
+            )
+            order_size = min_order_size
+            order_value = new_order_value
+            # Update amount_invested to reflect the larger order (for logging/record keeping)
+            amount_invested = new_order_value
         
         # Verify market is still active before placing order
         if not is_market_active(market):
