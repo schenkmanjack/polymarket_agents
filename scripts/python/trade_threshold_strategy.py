@@ -187,21 +187,61 @@ class ThresholdTrader:
         
         self.running = True
         
-        # Start background tasks
-        tasks = [
-            asyncio.create_task(self._market_detection_loop()),
-            asyncio.create_task(self._orderbook_monitoring_loop()),
-            asyncio.create_task(self._order_status_loop()),
-            asyncio.create_task(self._market_resolution_loop()),
+        # Start background tasks with error handling
+        tasks = []
+        task_names = [
+            ("market_detection", self._market_detection_loop),
+            ("orderbook_monitoring", self._orderbook_monitoring_loop),
+            ("order_status", self._order_status_loop),
+            ("market_resolution", self._market_resolution_loop),
         ]
         
+        for name, coro in task_names:
+            task = asyncio.create_task(coro())
+            task.set_name(name)  # Set name for better error messages
+            tasks.append(task)
+            logger.info(f"Started background task: {name}")
+        
+        sys.stdout.flush()
+        sys.stderr.flush()
+        
         try:
-            await asyncio.gather(*tasks)
+            # Use return_exceptions=True to prevent one task crash from killing all tasks
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Check for exceptions in task results
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    task_name = task_names[i][0] if i < len(task_names) else f"task_{i}"
+                    logger.error("=" * 80)
+                    logger.error(f"CRITICAL ERROR: Background task '{task_name}' crashed")
+                    logger.error("=" * 80)
+                    logger.error(f"Error type: {type(result).__name__}")
+                    logger.error(f"Error message: {str(result)}")
+                    # Log full traceback
+                    import traceback
+                    tb_str = ''.join(traceback.format_exception(type(result), result, result.__traceback__))
+                    logger.error(f"Full traceback:\n{tb_str}")
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                    
         except KeyboardInterrupt:
             logger.info("Received shutdown signal")
+        except Exception as e:
+            logger.error("=" * 80)
+            logger.error("CRITICAL ERROR: Unexpected exception in trading loop")
+            logger.error("=" * 80)
+            logger.error(f"Error type: {type(e).__name__}")
+            logger.error(f"Error message: {str(e)}")
+            logger.error("Full traceback:", exc_info=True)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            raise
         finally:
             self.running = False
             logger.info("Trading stopped")
+            sys.stdout.flush()
+            sys.stderr.flush()
     
     async def _resume_monitoring(self):
         """Resume monitoring markets we've bet on (for script restart recovery)."""
@@ -2505,22 +2545,88 @@ class ThresholdTrader:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Trade threshold strategy")
-    parser.add_argument(
-        "--config",
-        type=str,
-        required=True,
-        help="Path to JSON config file",
-    )
-    
-    args = parser.parse_args()
-    
-    trader = ThresholdTrader(args.config)
-    
+    """Main entry point with comprehensive error handling."""
     try:
-        asyncio.run(trader.start())
-    except KeyboardInterrupt:
-        logger.info("Shutting down...")
+        parser = argparse.ArgumentParser(description="Trade threshold strategy")
+        parser.add_argument(
+            "--config",
+            type=str,
+            required=True,
+            help="Path to JSON config file",
+        )
+        
+        args = parser.parse_args()
+        
+        logger.info("=" * 80)
+        logger.info("STARTING TRADE THRESHOLD STRATEGY")
+        logger.info("=" * 80)
+        logger.info(f"Config file: {args.config}")
+        logger.info(f"Python version: {sys.version}")
+        logger.info(f"Working directory: {os.getcwd()}")
+        logger.info("=" * 80)
+        
+        # Flush logs immediately
+        sys.stdout.flush()
+        sys.stderr.flush()
+        
+        # Initialize trader (this can fail)
+        logger.info("Initializing trader...")
+        try:
+            trader = ThresholdTrader(args.config)
+            logger.info("Trader initialized successfully")
+        except Exception as e:
+            logger.error("=" * 80)
+            logger.error("CRITICAL ERROR: Failed to initialize trader")
+            logger.error("=" * 80)
+            logger.error(f"Error type: {type(e).__name__}")
+            logger.error(f"Error message: {str(e)}")
+            logger.error("Full traceback:", exc_info=True)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            raise
+        
+        # Start trading loop (this can also fail)
+        logger.info("Starting trading loop...")
+        sys.stdout.flush()
+        sys.stderr.flush()
+        
+        try:
+            asyncio.run(trader.start())
+        except KeyboardInterrupt:
+            logger.info("=" * 80)
+            logger.info("Received shutdown signal (KeyboardInterrupt)")
+            logger.info("=" * 80)
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception as e:
+            logger.error("=" * 80)
+            logger.error("CRITICAL ERROR: Trading loop crashed")
+            logger.error("=" * 80)
+            logger.error(f"Error type: {type(e).__name__}")
+            logger.error(f"Error message: {str(e)}")
+            logger.error("Full traceback:", exc_info=True)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            raise
+            
+    except Exception as e:
+        # Catch-all for any unhandled exceptions
+        logger.error("=" * 80)
+        logger.error("FATAL ERROR: Unhandled exception in main()")
+        logger.error("=" * 80)
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Error message: {str(e)}")
+        logger.error("Full traceback:", exc_info=True)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        # Re-raise to ensure process exits with error code
+        raise
+    finally:
+        logger.info("=" * 80)
+        logger.info("Script exiting")
+        logger.info("=" * 80)
+        sys.stdout.flush()
+        sys.stderr.flush()
 
 
 if __name__ == "__main__":
