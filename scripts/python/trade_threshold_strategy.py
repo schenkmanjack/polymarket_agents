@@ -1133,7 +1133,6 @@ class ThresholdTrader:
         if order_value < MIN_ORDER_VALUE:
             # Try to increase order size to meet minimum
             # Use math.ceil to properly round up: ceil(1.00 / 0.97) = ceil(1.031) = 2
-            import math
             min_order_size = math.ceil(MIN_ORDER_VALUE / order_price)
             new_order_value = min_order_size * order_price
             
