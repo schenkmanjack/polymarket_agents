@@ -476,8 +476,15 @@ class ThresholdTrader:
             logger.error(f"Error checking early sell condition for trade {trade.id}: {e}", exc_info=True)
     
     async def _place_initial_sell_order(self, trade: RealTradeThreshold):
-        """Place initial sell order at 0.99 immediately when buy order fills."""
+        """Place initial sell order at 0.99 immediately when buy order fills.
+        
+        Retries with delays to handle share settlement delays after buy order fills.
+        """
         trade_id = trade.id  # Save ID before reloading
+        max_retries = 5
+        initial_delay = 2.0  # Wait 2 seconds before first attempt (shares need to settle)
+        retry_delays = [3.0, 5.0, 10.0, 15.0]  # Increasing delays for retries
+        
         try:
             # Reload trade from database to ensure we have latest data
             trade = self.db.get_trade_by_id(trade_id)
@@ -502,45 +509,111 @@ class ThresholdTrader:
                 logger.error(f"Trade {trade.id} has no token_id, cannot place sell order")
                 return
             
+            # Wait initial delay to allow shares to settle after buy order fills
             logger.info(
-                f"Placing initial sell order at $0.99 for {trade.filled_shares} shares "
-                f"(trade {trade.id}, token_id={trade.token_id})"
+                f"Waiting {initial_delay}s for shares to settle before placing sell order "
+                f"at $0.99 for {trade.filled_shares} shares (trade {trade.id})"
             )
+            await asyncio.sleep(initial_delay)
             
-            sell_order_response = self.pm.execute_order(
-                price=0.99,
-                size=int(trade.filled_shares),  # Ensure integer size
-                side=SELL,
-                token_id=trade.token_id,
-            )
-            
-            if sell_order_response:
-                sell_order_id = self.pm.extract_order_id(sell_order_response)
-                if sell_order_id:
-                    # Log sell order to database
-                    self.db.update_sell_order(
-                        trade_id=trade.id,
-                        sell_order_id=sell_order_id,
-                        sell_order_price=0.99,
-                        sell_order_size=trade.filled_shares,
-                        sell_order_status="open",
-                    )
-                    # Track in memory
-                    self.open_sell_orders[sell_order_id] = trade.id
+            # Retry loop for placing sell order
+            for attempt in range(max_retries):
+                try:
                     logger.info(
-                        f"✓ Initial sell order placed at $0.99: order_id={sell_order_id}, "
-                        f"size={trade.filled_shares} shares, logged to database"
+                        f"Attempt {attempt + 1}/{max_retries}: Placing initial sell order at $0.99 "
+                        f"for {trade.filled_shares} shares (trade {trade.id}, token_id={trade.token_id})"
                     )
-                else:
-                    logger.error(
-                        f"Initial sell order placed but could not extract order ID. "
-                        f"Response: {sell_order_response}"
+                    
+                    # Reload trade to ensure we have latest data
+                    trade = self.db.get_trade_by_id(trade_id)
+                    if not trade:
+                        logger.error(f"Trade {trade_id} not found during retry")
+                        return
+                    
+                    # Check again if sell order was already placed (by another process or retry)
+                    if trade.sell_order_id:
+                        logger.info(f"Trade {trade.id} already has sell order {trade.sell_order_id}, skipping")
+                        return
+                    
+                    sell_order_response = self.pm.execute_order(
+                        price=0.99,
+                        size=int(trade.filled_shares),  # Ensure integer size
+                        side=SELL,
+                        token_id=trade.token_id,
                     )
-            else:
-                logger.error(
-                    f"Failed to place initial sell order for trade {trade.id}. "
-                    f"execute_order returned None or empty response"
-                )
+                    
+                    if sell_order_response:
+                        sell_order_id = self.pm.extract_order_id(sell_order_response)
+                        if sell_order_id:
+                            # Log sell order to database
+                            self.db.update_sell_order(
+                                trade_id=trade.id,
+                                sell_order_id=sell_order_id,
+                                sell_order_price=0.99,
+                                sell_order_size=trade.filled_shares,
+                                sell_order_status="open",
+                            )
+                            # Track in memory
+                            self.open_sell_orders[sell_order_id] = trade.id
+                            logger.info(
+                                f"✓ Initial sell order placed at $0.99: order_id={sell_order_id}, "
+                                f"size={trade.filled_shares} shares, logged to database "
+                                f"(attempt {attempt + 1})"
+                            )
+                            return  # Success!
+                        else:
+                            logger.warning(
+                                f"Initial sell order placed but could not extract order ID. "
+                                f"Response: {sell_order_response}"
+                            )
+                    else:
+                        logger.warning(
+                            f"Attempt {attempt + 1}: execute_order returned None or empty response"
+                        )
+                
+                except Exception as e:
+                    error_str = str(e)
+                    error_message = getattr(e, 'error_message', {})
+                    
+                    # Check if it's a balance/allowance error
+                    is_balance_error = (
+                        'not enough balance' in error_str.lower() or
+                        'not enough allowance' in error_str.lower() or
+                        'balance' in str(error_message).lower() or
+                        'allowance' in str(error_message).lower()
+                    )
+                    
+                    if is_balance_error and attempt < max_retries - 1:
+                        # Balance/allowance error - retry with delay (shares might still be settling)
+                        delay = retry_delays[min(attempt, len(retry_delays) - 1)]
+                        logger.warning(
+                            f"Attempt {attempt + 1} failed with balance/allowance error: {error_str}. "
+                            f"Waiting {delay}s before retry (shares may still be settling)..."
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    else:
+                        # Other error or max retries reached
+                        logger.error(
+                            f"Error placing initial sell order for trade {trade.id} "
+                            f"(attempt {attempt + 1}/{max_retries}): {e}"
+                        )
+                        if attempt == max_retries - 1:
+                            logger.error(
+                                f"Failed to place sell order after {max_retries} attempts. "
+                                f"Will retry on next order status check."
+                            )
+                            # Don't raise - we'll retry later when checking order statuses
+                            return
+                        else:
+                            # Wait before next retry
+                            delay = retry_delays[min(attempt, len(retry_delays) - 1)]
+                            await asyncio.sleep(delay)
+            
+            logger.error(
+                f"Failed to place initial sell order for trade {trade.id} after {max_retries} attempts"
+            )
+            
         except Exception as e:
             logger.error(
                 f"Error placing initial sell order for trade {trade.id}: {e}", 
@@ -992,6 +1065,9 @@ class ThresholdTrader:
         
         # Also check sell orders
         await self._check_sell_order_statuses()
+        
+        # Check for trades with filled buy orders but no sell orders (retry sell order placement)
+        await self._retry_missing_sell_orders()
     
     async def _check_sell_order_statuses(self):
         """Check status of all open sell orders."""
@@ -1302,6 +1378,40 @@ class ThresholdTrader:
             
             except Exception as e:
                 logger.error(f"Error checking sell order {sell_order_id}: {e}", exc_info=True)
+    
+    async def _retry_missing_sell_orders(self):
+        """Retry placing sell orders for trades with filled buy orders but no sell orders."""
+        try:
+            # Get all filled trades for current deployment that don't have sell orders
+            session = self.db.SessionLocal()
+            try:
+                from agents.trading.trade_db import RealTradeThreshold
+                trades_needing_sell = session.query(RealTradeThreshold).filter(
+                    RealTradeThreshold.deployment_id == self.deployment_id,
+                    RealTradeThreshold.order_status == "filled",
+                    RealTradeThreshold.filled_shares.isnot(None),
+                    RealTradeThreshold.filled_shares > 0,
+                    RealTradeThreshold.sell_order_id.is_(None),  # No sell order yet
+                    RealTradeThreshold.market_resolved_at.is_(None),  # Market not resolved yet
+                ).all()
+                
+                for trade in trades_needing_sell:
+                    # Only retry if buy order filled more than 10 seconds ago (give shares time to settle)
+                    if trade.order_filled_at:
+                        from datetime import datetime, timezone, timedelta
+                        time_since_fill = datetime.now(timezone.utc) - trade.order_filled_at
+                        if time_since_fill.total_seconds() < 10:
+                            continue  # Too soon, skip
+                    
+                    logger.info(
+                        f"Found trade {trade.id} with filled buy order but no sell order. "
+                        f"Retrying sell order placement..."
+                    )
+                    await self._place_initial_sell_order(trade)
+            finally:
+                session.close()
+        except Exception as e:
+            logger.debug(f"Error checking for missing sell orders: {e}")
     
     async def _market_resolution_loop(self):
         """Check market resolution every 30 seconds."""

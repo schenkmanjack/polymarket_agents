@@ -659,6 +659,12 @@ def calculate_kelly_fraction(trades: List[Dict], bet_size: float = 4000.0) -> Op
         if growth <= 0:
             return None  # No positive growth possible
     
+    # Cap Kelly fraction at reasonable maximum (e.g., 0.25 = 25% of bankroll)
+    # Full Kelly is often too aggressive in practice, and 100% Kelly is unrealistic
+    # This prevents unrealistic 100% Kelly fractions when all trades win
+    MAX_REASONABLE_KELLY = 0.25  # Cap at 25% of bankroll
+    kelly_fraction = min(kelly_fraction, MAX_REASONABLE_KELLY)
+    
     return kelly_fraction
 
 
@@ -713,12 +719,10 @@ def calculate_kelly_roi(trades: List[Dict], bet_size: float = 4000.0, bankroll: 
     """
     Calculate the expected ROI if betting at Kelly optimal sizing.
     
-    Uses the Generalized Kelly Criterion growth rate formula:
-        g(f) = (1/n) * Σ ln(1 + f * ROI_i)
-    
-    where f is the Kelly fraction and ROI_i is the ROI for each trade.
-    
-    Then converts growth rate to expected ROI per bet.
+    Kelly ROI represents the expected ROI per trade when betting kelly_fraction of bankroll.
+    Since ROI is already calculated on full principal, Kelly ROI is simply the average ROI
+    (the strategy's expected return), but it's useful to see alongside Kelly fraction to
+    understand optimal sizing.
     
     Args:
         trades: List of trade dicts
@@ -726,7 +730,7 @@ def calculate_kelly_roi(trades: List[Dict], bet_size: float = 4000.0, bankroll: 
         bankroll: Total bankroll for Kelly sizing calculation (default $100k)
         
     Returns:
-        Expected ROI at Kelly optimal sizing, or None if calculation is invalid
+        Expected ROI at Kelly optimal sizing (same as avg_roi), or None if calculation is invalid
     """
     kelly_fraction = calculate_kelly_fraction(trades, bet_size)
     if kelly_fraction is None or kelly_fraction <= 0:
@@ -746,20 +750,11 @@ def calculate_kelly_roi(trades: List[Dict], bet_size: float = 4000.0, bankroll: 
     if len(rois) == 0:
         return None
     
-    # Calculate growth rate at Kelly fraction: g(f*) = (1/n) * Σ ln(1 + f* * ROI_i)
-    # Only consider trades where 1 + f * ROI > 0 (no bankruptcy)
-    valid_mask = (1 + kelly_fraction * rois) > 0
-    if not np.any(valid_mask):
-        return None
+    # Kelly ROI is simply the expected ROI (average ROI)
+    # The Kelly fraction tells you how much of bankroll to bet, but ROI is already per-trade
+    expected_roi = np.mean(rois)
     
-    growth_rate = np.mean(np.log(1 + kelly_fraction * rois[valid_mask]))
-    
-    # Convert growth rate to expected ROI per bet
-    # The growth rate is in log space, so expected return = exp(growth_rate) - 1
-    import math
-    expected_return = math.exp(growth_rate) - 1
-    
-    return expected_return
+    return expected_roi
 
 
 def get_markets_with_orderbooks(
