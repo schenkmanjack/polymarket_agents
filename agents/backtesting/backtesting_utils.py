@@ -659,12 +659,6 @@ def calculate_kelly_fraction(trades: List[Dict], bet_size: float = 4000.0) -> Op
         if growth <= 0:
             return None  # No positive growth possible
     
-    # Cap Kelly fraction at reasonable maximum (e.g., 0.25 = 25% of bankroll)
-    # Full Kelly is often too aggressive in practice, and 100% Kelly is unrealistic
-    # This prevents unrealistic 100% Kelly fractions when all trades win
-    MAX_REASONABLE_KELLY = 0.25  # Cap at 25% of bankroll
-    kelly_fraction = min(kelly_fraction, MAX_REASONABLE_KELLY)
-    
     return kelly_fraction
 
 
@@ -717,12 +711,17 @@ def _binary_search_kelly(rois: np.ndarray, max_f: float, tolerance: float = 1e-6
 
 def calculate_kelly_roi(trades: List[Dict], bet_size: float = 4000.0, bankroll: float = 100000.0) -> Optional[float]:
     """
-    Calculate the expected ROI if betting at Kelly optimal sizing.
+    Calculate the expected ROI relative to bankroll when betting at Kelly optimal sizing.
     
-    Kelly ROI represents the expected ROI per trade when betting kelly_fraction of bankroll.
-    Since ROI is already calculated on full principal, Kelly ROI is simply the average ROI
-    (the strategy's expected return), but it's useful to see alongside Kelly fraction to
-    understand optimal sizing.
+    Kelly ROI represents the expected percent gain relative to your ENTIRE bankroll/principal,
+    not just the bet size. If you bet kelly_fraction of bankroll, your return relative to
+    full bankroll is: kelly_fraction * avg_roi
+    
+    Example:
+        - Bankroll: $100,000
+        - Kelly fraction: 0.10 (bet 10% = $10,000)
+        - Trade ROI: 0.05 (5% return on bet = $500 profit)
+        - Kelly ROI: 0.10 * 0.05 = 0.005 (0.5% return on full bankroll)
     
     Args:
         trades: List of trade dicts
@@ -730,7 +729,7 @@ def calculate_kelly_roi(trades: List[Dict], bet_size: float = 4000.0, bankroll: 
         bankroll: Total bankroll for Kelly sizing calculation (default $100k)
         
     Returns:
-        Expected ROI at Kelly optimal sizing (same as avg_roi), or None if calculation is invalid
+        Expected ROI relative to full bankroll when betting at Kelly fraction, or None if invalid
     """
     kelly_fraction = calculate_kelly_fraction(trades, bet_size)
     if kelly_fraction is None or kelly_fraction <= 0:
@@ -750,11 +749,14 @@ def calculate_kelly_roi(trades: List[Dict], bet_size: float = 4000.0, bankroll: 
     if len(rois) == 0:
         return None
     
-    # Kelly ROI is simply the expected ROI (average ROI)
-    # The Kelly fraction tells you how much of bankroll to bet, but ROI is already per-trade
-    expected_roi = np.mean(rois)
+    # Calculate average ROI per trade (return on bet)
+    avg_roi_per_trade = np.mean(rois)
     
-    return expected_roi
+    # Kelly ROI = expected return relative to full bankroll
+    # If betting kelly_fraction of bankroll, return relative to bankroll is kelly_fraction * avg_roi
+    kelly_roi = kelly_fraction * avg_roi_per_trade
+    
+    return kelly_roi
 
 
 def get_markets_with_orderbooks(

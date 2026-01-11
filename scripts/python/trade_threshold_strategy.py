@@ -708,9 +708,38 @@ class ThresholdTrader:
         # Calculate actual order value
         order_value = order_size * order_price
         
+        # Polymarket minimum order value is $1.00
+        MIN_ORDER_VALUE = 1.00
+        
         if order_size < 1:
             logger.warning(f"Order size too small: {order_size} shares (amount_invested=${amount_invested:.2f})")
             return
+        
+        # Check if order value meets minimum requirement
+        if order_value < MIN_ORDER_VALUE:
+            # Try to increase order size to meet minimum
+            # Use math.ceil to properly round up: ceil(1.00 / 0.97) = ceil(1.031) = 2
+            import math
+            min_order_size = math.ceil(MIN_ORDER_VALUE / order_price)
+            new_order_value = min_order_size * order_price
+            
+            # Check if we have enough balance for the larger order
+            if new_order_value <= amount_invested:
+                logger.info(
+                    f"Order value ${order_value:.2f} below minimum ${MIN_ORDER_VALUE:.2f}. "
+                    f"Increasing order size from {order_size} to {min_order_size} shares "
+                    f"(new order_value=${new_order_value:.2f})"
+                )
+                order_size = min_order_size
+                order_value = new_order_value
+            else:
+                logger.warning(
+                    f"Order value ${order_value:.2f} below minimum ${MIN_ORDER_VALUE:.2f}, "
+                    f"but insufficient funds to increase size. "
+                    f"Need ${new_order_value:.2f} but only have ${amount_invested:.2f}. "
+                    f"Skipping order."
+                )
+                return
         
         # Verify market is still active before placing order
         if not is_market_active(market):
@@ -741,7 +770,21 @@ class ThresholdTrader:
                     break
             except Exception as e:
                 error_msg = str(e)
+                error_message = getattr(e, 'error_message', {})
+                error_str = str(error_message) if error_message else error_msg
+                
                 logger.error(f"Order placement attempt {attempt + 1} failed: {e}")
+                
+                # Check for minimum order size error
+                if "min size" in error_msg.lower() or "invalid amount" in error_msg.lower() or "min size" in error_str.lower():
+                    logger.error(
+                        f"Order value ${order_value:.2f} below Polymarket minimum. "
+                        f"This should have been caught earlier. Order details: "
+                        f"size={order_size}, price={order_price:.4f}, value=${order_value:.2f}"
+                    )
+                    # Don't retry - order is too small
+                    logger.error("Stopping retries due to order size below minimum")
+                    return
                 
                 # Check for specific error types
                 if "not enough balance" in error_msg.lower() or "allowance" in error_msg.lower():
