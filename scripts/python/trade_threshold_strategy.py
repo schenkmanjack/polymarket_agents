@@ -482,8 +482,8 @@ class ThresholdTrader:
         """
         trade_id = trade.id  # Save ID before reloading
         max_retries = 5
-        initial_delay = 2.0  # Wait 2 seconds before first attempt (shares need to settle)
-        retry_delays = [3.0, 5.0, 10.0, 15.0]  # Increasing delays for retries
+        initial_delay = 5.0  # Wait 5 seconds before first attempt (shares need to settle)
+        retry_delays = [10.0, 20.0, 30.0, 60.0]  # Increasing delays for retries (shares may take time to settle)
         
         # Log entry point - this should always appear if function is called
         logger.info(
@@ -544,12 +544,88 @@ class ThresholdTrader:
                         logger.info(f"Trade {trade.id} already has sell order {trade.sell_order_id}, skipping")
                         return
                     
+                    # Check conditional token balance before attempting to sell
+                    # This helps diagnose "not enough balance" errors
+                    logger.info(
+                        f"  🔍 Pre-sell checks for trade {trade.id}: "
+                        f"token_id={trade.token_id[:20]}..., "
+                        f"filled_shares={trade.filled_shares}, "
+                        f"order_price=$0.99"
+                    )
+                    
+                    if hasattr(self.pm, 'get_conditional_token_balance'):
+                        try:
+                            balance = self.pm.get_conditional_token_balance(trade.token_id)
+                            if balance is not None:
+                                logger.info(
+                                    f"  📊 Balance check result: {balance:.6f} shares available "
+                                    f"(need {trade.filled_shares} shares, "
+                                    f"difference: {balance - trade.filled_shares:.6f})"
+                                )
+                                if balance < trade.filled_shares:
+                                    shortfall = trade.filled_shares - balance
+                                    logger.warning(
+                                        f"  ⚠️ INSUFFICIENT BALANCE: have {balance:.6f}, need {trade.filled_shares}. "
+                                        f"Shortfall: {shortfall:.6f} shares. "
+                                        f"Shares may still be settling after buy order fill..."
+                                    )
+                                    # Still try to place order (balance might update during order placement)
+                                else:
+                                    logger.info(
+                                        f"  ✅ Sufficient balance available "
+                                        f"({balance:.6f} >= {trade.filled_shares})"
+                                    )
+                            else:
+                                logger.warning(
+                                    f"  ⚠️ Could not retrieve balance (returned None). "
+                                    f"Will attempt sell order anyway."
+                                )
+                        except Exception as e:
+                            logger.warning(
+                                f"  ⚠️ Error checking conditional token balance: {e}. "
+                                f"Will attempt sell order anyway.",
+                                exc_info=True
+                            )
+                    else:
+                        logger.debug("  get_conditional_token_balance method not available")
+                    
+                    # Check conditional token allowances (critical for selling)
+                    # According to py-clob-client docs, exchange contracts need approval to transfer conditional tokens
+                    if attempt == 0:  # Only check on first attempt to avoid spam
+                        logger.info("  🔍 Checking conditional token allowances (first attempt only)...")
+                        if hasattr(self.pm, 'ensure_conditional_token_allowances'):
+                            try:
+                                allowances_ok = self.pm.ensure_conditional_token_allowances()
+                                if not allowances_ok:
+                                    logger.warning(
+                                        "  ⚠️ Conditional token allowances may not be set. "
+                                        "This could cause 'not enough balance / allowance' errors when selling."
+                                    )
+                                else:
+                                    logger.info("  ✅ Conditional token allowances verified")
+                            except Exception as e:
+                                logger.warning(
+                                    f"  ⚠️ Could not check conditional token allowances: {e}. "
+                                    f"Will attempt sell order anyway.",
+                                    exc_info=True
+                                )
+                        else:
+                            logger.debug("  ensure_conditional_token_allowances method not available")
+                    
+                    # Attempt to place sell order
+                    logger.info(
+                        f"  📤 Placing SELL order: price=$0.99, size={int(trade.filled_shares)} shares, "
+                        f"token_id={trade.token_id[:20]}..."
+                    )
+                    
                     sell_order_response = self.pm.execute_order(
                         price=0.99,
                         size=int(trade.filled_shares),  # Ensure integer size
                         side=SELL,
                         token_id=trade.token_id,
                     )
+                    
+                    logger.debug(f"  📥 Sell order response: {sell_order_response}")
                     
                     if sell_order_response:
                         sell_order_id = self.pm.extract_order_id(sell_order_response)
@@ -584,6 +660,19 @@ class ThresholdTrader:
                     error_str = str(e)
                     error_message = getattr(e, 'error_message', {})
                     
+                    logger.error(
+                        f"  ❌ Sell order attempt {attempt + 1}/{max_retries} FAILED for trade {trade.id}:",
+                        exc_info=True
+                    )
+                    logger.error(f"    Error type: {type(e).__name__}")
+                    logger.error(f"    Error message: {error_str}")
+                    logger.error(f"    Error details: {error_message}")
+                    logger.error(
+                        f"    Trade details: token_id={trade.token_id}, "
+                        f"filled_shares={trade.filled_shares}, "
+                        f"order_price=$0.99"
+                    )
+                    
                     # Check if it's a balance/allowance error
                     is_balance_error = (
                         'not enough balance' in error_str.lower() or
@@ -592,21 +681,57 @@ class ThresholdTrader:
                         'allowance' in str(error_message).lower()
                     )
                     
-                    if is_balance_error and attempt < max_retries - 1:
-                        # Balance/allowance error - retry with delay (shares might still be settling)
-                        delay = retry_delays[min(attempt, len(retry_delays) - 1)]
+                    if is_balance_error:
                         logger.warning(
-                            f"Attempt {attempt + 1} failed with balance/allowance error: {error_str}. "
-                            f"Waiting {delay}s before retry (shares may still be settling)..."
+                            f"  🔍 Detected balance/allowance error. "
+                            f"This usually means: (1) shares haven't settled yet, or "
+                            f"(2) conditional token allowances aren't set for exchange contracts."
                         )
-                        await asyncio.sleep(delay)
-                        continue
+                        
+                        if attempt < max_retries - 1:
+                            # Balance/allowance error - retry with delay (shares might still be settling)
+                            delay = retry_delays[min(attempt, len(retry_delays) - 1)]
+                            logger.warning(
+                                f"  ⏳ Waiting {delay}s before retry {attempt + 2}/{max_retries} "
+                                f"(shares may still be settling or allowances may need time to propagate)..."
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        else:
+                            logger.error(
+                                f"  ❌ Max retries reached for balance/allowance error. "
+                                f"Will retry via _retry_missing_sell_orders() on next order status check."
+                            )
                     else:
-                        # Other error or max retries reached
+                        # Other error
                         logger.error(
-                            f"Error placing initial sell order for trade {trade.id} "
-                            f"(attempt {attempt + 1}/{max_retries}): {e}"
+                            f"  ❌ Non-balance/allowance error. "
+                            f"This may be a different issue (API error, network issue, etc.)"
                         )
+                    
+                    # Log error to database for tracking
+                    try:
+                        self.db.update_sell_order(
+                            trade_id=trade.id,
+                            sell_order_id=None,
+                            sell_order_price=0.99,
+                            sell_order_size=trade.filled_shares,
+                            sell_order_status="failed",
+                        )
+                        # Update error message
+                        session = self.db.SessionLocal()
+                        try:
+                            from agents.trading.trade_db import RealTradeThreshold
+                            trade_obj = session.query(RealTradeThreshold).filter(
+                                RealTradeThreshold.id == trade.id
+                            ).first()
+                            if trade_obj:
+                                trade_obj.error_message = f"Sell order failed (attempt {attempt + 1}): {error_str}"
+                                session.commit()
+                        finally:
+                            session.close()
+                    except Exception as db_error:
+                        logger.debug(f"Could not log error to database: {db_error}")
                         if attempt == max_retries - 1:
                             logger.error(
                                 f"❌ FAILED to place sell order for trade {trade.id} after {max_retries} attempts. "
@@ -1476,12 +1601,13 @@ class ThresholdTrader:
                 ).all()
                 
                 for trade in trades_needing_sell:
-                    # Only retry if buy order filled more than 10 seconds ago (give shares time to settle)
+                    # Only retry if buy order filled more than 30 seconds ago (give shares time to settle)
+                    # Shares can take time to settle on Polymarket, especially with proxy wallets
                     if trade.order_filled_at:
                         from datetime import datetime, timezone, timedelta
                         time_since_fill = datetime.now(timezone.utc) - trade.order_filled_at
-                        if time_since_fill.total_seconds() < 10:
-                            continue  # Too soon, skip
+                        if time_since_fill.total_seconds() < 30:
+                            continue  # Too soon, skip (shares may still be settling)
                     
                     logger.info(
                         f"Found trade {trade.id} with filled buy order but no sell order. "
