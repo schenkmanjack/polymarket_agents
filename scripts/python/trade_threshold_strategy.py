@@ -58,8 +58,28 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     force=True
 )
+# Ensure all loggers are set to INFO level (including child loggers)
+logging.getLogger().setLevel(logging.INFO)
+logging.getLogger("agents").setLevel(logging.INFO)
+logging.getLogger("agents.polymarket").setLevel(logging.INFO)
+logging.getLogger("agents.polymarket.polymarket").setLevel(logging.INFO)
+logging.getLogger("agents.trading").setLevel(logging.INFO)
+logging.getLogger("agents.backtesting").setLevel(logging.INFO)
+# Ensure logs go to stdout
 logging.getLogger().handlers[0].stream = sys.stdout
+# Force flush after each log (important for Railway/streaming logs)
+for handler in logging.getLogger().handlers:
+    handler.flush()
 logger = logging.getLogger(__name__)
+
+# Test logging configuration
+logger.info("=" * 80)
+logger.info("LOGGING CONFIGURATION TEST")
+logger.info("=" * 80)
+logger.info("Root logger level: %s", logging.getLogger().level)
+logger.info("agents.polymarket.polymarket logger level: %s", logging.getLogger("agents.polymarket.polymarket").level)
+logger.info("trade_threshold_strategy logger level: %s", logger.level)
+logger.info("=" * 80)
 
 # Minimum bet size
 MIN_BET_SIZE = 1.0
@@ -688,9 +708,14 @@ class ThresholdTrader:
                             # Track in memory
                             self.open_sell_orders[sell_order_id] = trade.id
                             logger.info(
-                                f"✓ Initial sell order placed at $0.99: order_id={sell_order_id}, "
-                                f"size={sell_size_int} shares (filled_shares={trade.filled_shares}), "
-                                f"logged to database (attempt {attempt + 1})"
+                                f"✅✅✅ SELL ORDER PLACED SUCCESSFULLY ✅✅✅\n"
+                                f"  Sell Order ID: {sell_order_id}\n"
+                                f"  Trade ID: {trade.id}\n"
+                                f"  Price: $0.99\n"
+                                f"  Size: {sell_size_int} shares\n"
+                                f"  Filled Shares: {trade.filled_shares}\n"
+                                f"  Balance Used: {balance_str}\n"
+                                f"  Attempt: {attempt + 1}/5"
                             )
                             return  # Success!
                         else:
@@ -823,8 +848,13 @@ class ThresholdTrader:
                             await asyncio.sleep(delay)
             
             logger.error(
-                f"❌ FAILED to place initial sell order for trade {trade.id} after {max_retries} attempts. "
-                f"No sell order logged to database. Will retry via _retry_missing_sell_orders()."
+                f"❌❌❌ SELL ORDER FAILED AFTER ALL RETRIES ❌❌❌\n"
+                f"  Trade ID: {trade.id}\n"
+                f"  Attempts: {max_retries}/5\n"
+                f"  Filled Shares: {trade.filled_shares}\n"
+                f"  Token ID: {trade.token_id}\n"
+                f"  No sell order logged to database.\n"
+                f"  Will retry via _retry_missing_sell_orders() on next order status check."
             )
             # Log failure to database for tracking
             try:
@@ -1085,6 +1115,11 @@ class ThresholdTrader:
         order_response = None
         for attempt in range(3):
             try:
+                logger.info(
+                    f"🟢 BUY ORDER ATTEMPT {attempt + 1}/3: "
+                    f"Placing BUY order at ${order_price:.4f} for {order_size} shares "
+                    f"(market={market_slug}, side={side}, token_id={token_id[:20]}...)"
+                )
                 order_response = self.pm.execute_order(
                     price=order_price,
                     size=order_size,
@@ -1093,7 +1128,12 @@ class ThresholdTrader:
                 )
                 
                 if order_response:
+                    logger.info(
+                        f"✅ BUY ORDER SUCCESS: Received response from execute_order: {order_response}"
+                    )
                     break
+                else:
+                    logger.warning(f"⚠️ BUY ORDER ATTEMPT {attempt + 1}: execute_order returned None/empty")
             except Exception as e:
                 error_msg = str(e)
                 error_message = getattr(e, 'error_message', {})
@@ -1146,10 +1186,12 @@ class ThresholdTrader:
             return
         
         # Extract order ID
+        logger.info(f"🔍 Extracting order ID from response: {order_response}")
         order_id = self.pm.extract_order_id(order_response)
         if not order_id:
-            logger.error("Could not extract order ID from response")
+            logger.error(f"❌ Could not extract order ID from response: {order_response}")
             return
+        logger.info(f"✅ Extracted order ID: {order_id}")
         
         # Create trade record
         trade_id = self.db.create_trade(
@@ -1173,7 +1215,17 @@ class ThresholdTrader:
         # Track order (market already marked as bet on BEFORE placing order to prevent buying both YES and NO)
         self.open_trades[order_id] = trade_id
         # Note: markets_with_bets.add() is called in _check_orderbooks_for_triggers BEFORE _place_order
-        logger.info(f"Order placed: order_id={order_id}, trade_id={trade_id}")
+        logger.info(
+            f"✅✅✅ BUY ORDER PLACED SUCCESSFULLY ✅✅✅\n"
+            f"  Order ID: {order_id}\n"
+            f"  Trade ID: {trade_id}\n"
+            f"  Market: {market_slug}\n"
+            f"  Side: {side}\n"
+            f"  Price: ${order_price:.4f}\n"
+            f"  Size: {order_size} shares\n"
+            f"  Order Value: ${order_value:.2f}\n"
+            f"  Principal: ${self.principal:.2f}"
+        )
     
     async def _order_status_loop(self):
         """Check order status every 10 seconds."""
@@ -1271,13 +1323,24 @@ class ThresholdTrader:
                             )
                             self.open_trades.pop(fill_order_id, None)
                             self.orders_not_found.pop(fill_order_id, None)
-                            logger.info(f"Order {fill_order_id} filled (found in trades): {filled_shares} shares at ${fill_price:.4f}")
+                            logger.info(
+                                f"✅✅✅ BUY ORDER FILLED ✅✅✅\n"
+                                f"  Order ID: {fill_order_id}\n"
+                                f"  Trade ID: {trade_id}\n"
+                                f"  Filled Shares: {filled_shares}\n"
+                                f"  Fill Price: ${fill_price:.4f}\n"
+                                f"  Dollars Spent: ${filled_shares * fill_price:.2f}\n"
+                                f"  Fee: ${fee:.4f}"
+                            )
                             
                             # Reload trade from database to get updated filled_shares
                             trade = self.db.get_trade_by_id(trade_id)
                             if trade:
+                                logger.info(f"🔄 Placing initial sell order for trade {trade.id} after buy fill...")
                                 # Immediately place sell order at 0.99 when buy fills
                                 await self._place_initial_sell_order(trade)
+                            else:
+                                logger.error(f"❌ Trade {trade_id} not found after buy fill - cannot place sell order")
                             
                             # Remove from all_trades_to_check so we don't check it again below
                             all_trades_to_check.pop(fill_order_id, None)
@@ -1535,10 +1598,15 @@ class ThresholdTrader:
                                     session.close()
                             
                             logger.info(
-                                f"Sell order {fill_order_id} filled (found in trades): "
-                                f"{filled_shares} shares at ${sell_price:.4f}, "
-                                f"received ${sell_dollars_received:.2f}, net_proceeds=${net_proceeds:.2f}, "
-                                f"new principal: ${new_principal:.2f}"
+                                f"✅✅✅ SELL ORDER FILLED ✅✅✅\n"
+                                f"  Sell Order ID: {fill_order_id}\n"
+                                f"  Trade ID: {trade_id}\n"
+                                f"  Filled Shares: {filled_shares}\n"
+                                f"  Sell Price: ${sell_price:.4f}\n"
+                                f"  Dollars Received: ${sell_dollars_received:.2f}\n"
+                                f"  Sell Fee: ${sell_fee:.4f}\n"
+                                f"  Net Proceeds: ${net_proceeds:.2f}\n"
+                                f"  Principal: ${self.principal:.2f} -> ${new_principal:.2f}"
                             )
                             
                             self.open_sell_orders.pop(fill_order_id, None)
