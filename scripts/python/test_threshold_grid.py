@@ -218,12 +218,18 @@ def create_interactive_heatmap(
         dollar_amount_values = sorted(df['dollar_amount'].unique().tolist())
         default_dollar_amount = dollar_amount_values[0]  # Use first (minimum) as default
         
+        # Get all unique thresholds and margins from FULL dataset (for consistent grid structure)
+        all_thresholds = sorted(df['threshold'].unique().tolist())
+        all_margins = sorted(df['margin'].unique().tolist())
+        
         # Filter df by default dollar_amount for initial display
         df_filtered = df[df['dollar_amount'] == default_dollar_amount].copy()
     else:
         # No dollar_amount column - use all data
         dollar_amount_values = []
         default_dollar_amount = None
+        all_thresholds = sorted(df['threshold'].unique().tolist())
+        all_margins = sorted(df['margin'].unique().tolist())
         df_filtered = df.copy()
     
     # Create pivot table from filtered data
@@ -233,6 +239,10 @@ def create_interactive_heatmap(
         columns='margin',
         aggfunc='first'
     )
+    
+    # Reindex to ensure consistent grid structure (fill missing with NaN)
+    if has_dollar_amount:
+        pivot = pivot.reindex(index=all_thresholds, columns=all_margins)
     
     # Format values for display
     if metric == 'avg_roi':
@@ -256,20 +266,21 @@ def create_interactive_heatmap(
     threshold_labels = [f"{x:.3f}" for x in original_thresholds]
     margin_labels = [f"{x:.3f}" for x in original_margins]
     
-    # Create hover text with formatted values
+    # Create hover text with formatted values - use same values as pivot (for consistency)
     hover_texts = []
     for i, row in enumerate(pivot.values):
         hover_row = []
         for j, val in enumerate(row):
             if pd.notna(val):
+                dollar_amt_str = f"<br>Dollar Amount: ${int(default_dollar_amount)}" if has_dollar_amount else ""
                 if metric == 'avg_roi':
-                    hover_row.append(f"Threshold: {original_thresholds[i]:.3f}<br>Margin: {original_margins[j]:.3f}<br>Avg ROI: {val:.2%}")
+                    hover_row.append(f"Threshold: {original_thresholds[i]:.3f}<br>Margin: {original_margins[j]:.3f}{dollar_amt_str}<br>Avg ROI: {val:.2%}")
                 elif metric == 'win_rate':
-                    hover_row.append(f"Threshold: {original_thresholds[i]:.3f}<br>Margin: {original_margins[j]:.3f}<br>Win Rate: {val:.1%}")
+                    hover_row.append(f"Threshold: {original_thresholds[i]:.3f}<br>Margin: {original_margins[j]:.3f}{dollar_amt_str}<br>Win Rate: {val:.1%}")
                 elif metric == 'kelly_roi':
-                    hover_row.append(f"Threshold: {original_thresholds[i]:.3f}<br>Margin: {original_margins[j]:.3f}<br>Kelly ROI: {val:.2%}")
+                    hover_row.append(f"Threshold: {original_thresholds[i]:.3f}<br>Margin: {original_margins[j]:.3f}{dollar_amt_str}<br>Kelly ROI: {val:.2%}")
                 else:
-                    hover_row.append(f"Threshold: {original_thresholds[i]:.3f}<br>Margin: {original_margins[j]:.3f}<br>Value: {val:.2f}")
+                    hover_row.append(f"Threshold: {original_thresholds[i]:.3f}<br>Margin: {original_margins[j]:.3f}{dollar_amt_str}<br>Value: {val:.2f}")
             else:
                 hover_row.append("")
         hover_texts.append(hover_row)
@@ -285,13 +296,21 @@ def create_interactive_heatmap(
         horizontal_spacing=0.15
     )
     
+    # Format cell text to match hover format (percentage for ROI metrics)
+    if metric == 'avg_roi' or metric == 'kelly_roi':
+        cell_text = [[f"{(val * 100):.2f}%" if pd.notna(val) else "" for val in row] for row in pivot.values]
+    elif metric == 'win_rate':
+        cell_text = [[f"{(val * 100):.1f}%" if pd.notna(val) else "" for val in row] for row in pivot.values]
+    else:
+        cell_text = [[f"{val:.2f}" if pd.notna(val) else "" for val in row] for row in pivot.values]
+    
     # Add heatmap to left subplot
     heatmap = go.Heatmap(
         z=pivot.values,
         x=margin_labels,
         y=threshold_labels,
         colorscale='RdYlGn',
-        text=[[f"{val:.2f}" if pd.notna(val) else "" for val in row] for row in pivot.values],
+        text=cell_text,
         texttemplate='%{text}',
         textfont={"size": 8},
         hovertext=hover_texts,
@@ -397,16 +416,27 @@ def create_interactive_heatmap(
                 kelly_fractions_json[key] = None
         
         # Prepare data for all dollar_amount values (if dollar_amount exists)
+        # Use the SAME threshold/margin grid structure for all dollar amounts to ensure alignment
         all_data_by_dollar_amount = {}
         if has_dollar_amount:
+            # Get all unique thresholds and margins from the full dataset (for consistent grid)
+            all_thresholds = sorted(df['threshold'].unique().tolist())
+            all_margins = sorted(df['margin'].unique().tolist())
+            
             for dollar_amt in dollar_amount_values:
                 df_dollar = df[df['dollar_amount'] == dollar_amt]
+                
+                # Create pivot with consistent index/columns (reindex to match all_thresholds/all_margins)
                 pivot_dollar = df_dollar.pivot_table(
                     values=metric,
                     index='threshold',
                     columns='margin',
                     aggfunc='first'
                 )
+                
+                # Reindex to ensure all threshold/margin combinations exist (fill with NaN if missing)
+                pivot_dollar = pivot_dollar.reindex(index=all_thresholds, columns=all_margins)
+                
                 # Convert to list of lists for JavaScript
                 all_data_by_dollar_amount[str(int(dollar_amt))] = {
                     'values': pivot_dollar.values.tolist(),
@@ -436,11 +466,28 @@ def create_interactive_heatmap(
         const gd = document.getElementById('plotly-div');
         if (!gd) return;
         
+        // Format cell text to match hover format
+        let cellText;
+        if (data.text) {{
+            // Use pre-formatted text if available
+            cellText = [data.text];
+        }} else {{
+            // Format on the fly to match hover format
+            if ('{metric}' === 'avg_roi' || '{metric}' === 'kelly_roi') {{
+                cellText = [data.values.map(row => row.map(val => val !== null && !isNaN(val) ? (val * 100).toFixed(2) + '%' : ''))];
+            }} else if ('{metric}' === 'win_rate') {{
+                cellText = [data.values.map(row => row.map(val => val !== null && !isNaN(val) ? (val * 100).toFixed(1) + '%' : ''))];
+            }} else {{
+                cellText = [data.values.map(row => row.map(val => val !== null && !isNaN(val) ? val.toFixed(2) : ''))];
+            }}
+        }}
+        
         // Update heatmap data (first trace, index 0)
         Plotly.restyle(gd, {{
             z: [data.values],
             x: [data.margins.map(m => m.toFixed(3))],
-            y: [data.thresholds.map(t => t.toFixed(3))]
+            y: [data.thresholds.map(t => t.toFixed(3))],
+            text: cellText
         }}, {{}}, [0]);
         
         // Update hover texts

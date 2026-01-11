@@ -485,28 +485,37 @@ class ThresholdTrader:
         initial_delay = 2.0  # Wait 2 seconds before first attempt (shares need to settle)
         retry_delays = [3.0, 5.0, 10.0, 15.0]  # Increasing delays for retries
         
+        # Log entry point - this should always appear if function is called
+        logger.info(
+            f"🔵 _place_initial_sell_order() called for trade {trade_id} "
+            f"(current trade.sell_order_id={trade.sell_order_id if hasattr(trade, 'sell_order_id') else 'N/A'}, "
+            f"filled_shares={trade.filled_shares if hasattr(trade, 'filled_shares') else 'N/A'})"
+        )
+        
         try:
             # Reload trade from database to ensure we have latest data
             trade = self.db.get_trade_by_id(trade_id)
             if not trade:
-                logger.error(f"Trade {trade_id} not found in database when placing sell order")
+                logger.error(f"❌ Trade {trade_id} not found in database when placing sell order")
                 return
             
             # Skip if already have a sell order
             if trade.sell_order_id:
-                logger.debug(f"Trade {trade.id} already has sell order {trade.sell_order_id}, skipping")
+                logger.info(
+                    f"⏭️ Trade {trade.id} already has sell order {trade.sell_order_id}, skipping placement"
+                )
                 return
             
             # Skip if no filled shares
             if not trade.filled_shares or trade.filled_shares <= 0:
                 logger.warning(
-                    f"Trade {trade.id} has no filled shares (filled_shares={trade.filled_shares}), "
+                    f"⚠️ Trade {trade.id} has no filled shares (filled_shares={trade.filled_shares}), "
                     f"cannot place sell order"
                 )
                 return
             
             if not trade.token_id:
-                logger.error(f"Trade {trade.id} has no token_id, cannot place sell order")
+                logger.error(f"❌ Trade {trade.id} has no token_id, cannot place sell order")
                 return
             
             # Wait initial delay to allow shares to settle after buy order fills
@@ -600,9 +609,20 @@ class ThresholdTrader:
                         )
                         if attempt == max_retries - 1:
                             logger.error(
-                                f"Failed to place sell order after {max_retries} attempts. "
-                                f"Will retry on next order status check."
+                                f"❌ FAILED to place sell order for trade {trade.id} after {max_retries} attempts. "
+                                f"Error: {error_str}. "
+                                f"Will retry via _retry_missing_sell_orders() on next order status check. "
+                                f"Trade details: filled_shares={trade.filled_shares}, token_id={trade.token_id}"
                             )
+                            # Log failure to database error_message field for tracking
+                            try:
+                                self.db.update_order_status(
+                                    trade.id,
+                                    trade.order_status or "filled",
+                                    error_message=f"Sell order placement failed after {max_retries} attempts: {error_str}"
+                                )
+                            except Exception as db_error:
+                                logger.error(f"Could not log sell order failure to database: {db_error}")
                             # Don't raise - we'll retry later when checking order statuses
                             return
                         else:
@@ -611,8 +631,20 @@ class ThresholdTrader:
                             await asyncio.sleep(delay)
             
             logger.error(
-                f"Failed to place initial sell order for trade {trade.id} after {max_retries} attempts"
+                f"❌ FAILED to place initial sell order for trade {trade.id} after {max_retries} attempts. "
+                f"No sell order logged to database. Will retry via _retry_missing_sell_orders()."
             )
+            # Log failure to database for tracking
+            try:
+                trade = self.db.get_trade_by_id(trade_id)
+                if trade:
+                    self.db.update_order_status(
+                        trade.id,
+                        trade.order_status or "filled",
+                        error_message=f"Sell order placement failed: exhausted all {max_retries} retry attempts"
+                    )
+            except Exception as db_error:
+                logger.error(f"Could not log sell order failure to database: {db_error}")
             
         except Exception as e:
             logger.error(
