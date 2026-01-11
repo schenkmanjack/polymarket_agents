@@ -628,18 +628,40 @@ class ThresholdTrader:
                                 f"shares (actual balance). Difference likely due to fees."
                             )
                     
-                    # Ensure sell_size is at least 1 share and is an integer
-                    sell_size_int = max(1, int(sell_size))
+                    # Round down to integer (floor) to ensure we don't exceed balance
+                    # Must be at least 1 share
+                    import math
+                    sell_size_int = max(1, math.floor(sell_size))
+                    
+                    # Final safety check: ensure we're not trying to sell more than available balance
+                    if balance is not None and sell_size_int > balance:
+                        logger.warning(
+                            f"  ⚠️ sell_size_int ({sell_size_int}) exceeds balance ({balance:.6f}). "
+                            f"Adjusting to floor of balance."
+                        )
+                        sell_size_int = max(1, math.floor(balance))
+                    
                     if sell_size_int < sell_size:
                         logger.warning(
                             f"  ⚠️ Rounding sell size down from {sell_size:.6f} to {sell_size_int} "
-                            f"shares (must be integer)"
+                            f"shares (must be integer, cannot exceed balance)"
+                        )
+                    
+                    # Final balance check right before placing order (avoid race conditions)
+                    if balance is not None and sell_size_int > balance:
+                        logger.error(
+                            f"  ❌ Cannot place sell order: sell_size_int ({sell_size_int}) > balance ({balance:.6f}). "
+                            f"Skipping this attempt."
+                        )
+                        raise ValueError(
+                            f"Insufficient balance: trying to sell {sell_size_int} shares but only {balance:.6f} available"
                         )
                     
                     # Attempt to place sell order
+                    balance_str = f"{balance:.6f}" if balance is not None else "N/A"
                     logger.info(
                         f"  📤 Placing SELL order: price=$0.99, size={sell_size_int} shares "
-                        f"(filled_shares={trade.filled_shares}, balance={balance:.6f if balance else 'N/A'}), "
+                        f"(filled_shares={trade.filled_shares}, balance={balance_str}), "
                         f"token_id={trade.token_id[:20]}..."
                     )
                     
@@ -867,12 +889,40 @@ class ThresholdTrader:
                         f"shares (actual balance)"
                     )
             
-            sell_size_int = max(1, int(sell_size))
+            # Round down to integer (floor) to ensure we don't exceed balance
+            # Must be at least 1 share
+            import math
+            sell_size_int = max(1, math.floor(sell_size))
+            
+            # Final safety check: ensure we're not trying to sell more than available balance
+            if balance is not None and sell_size_int > balance:
+                logger.warning(
+                    f"  ⚠️ sell_size_int ({sell_size_int}) exceeds balance ({balance:.6f}). "
+                    f"Adjusting to floor of balance."
+                )
+                sell_size_int = max(1, math.floor(balance))
+            
+            if sell_size_int < sell_size:
+                logger.warning(
+                    f"  ⚠️ Rounding early sell size down from {sell_size:.6f} to {sell_size_int} "
+                    f"shares (must be integer, cannot exceed balance)"
+                )
+            
+            # Final balance check right before placing order (avoid race conditions)
+            if balance is not None and sell_size_int > balance:
+                logger.error(
+                    f"  ❌ Cannot place early sell order: sell_size_int ({sell_size_int}) > balance ({balance:.6f}). "
+                    f"Skipping."
+                )
+                raise ValueError(
+                    f"Insufficient balance: trying to sell {sell_size_int} shares but only {balance:.6f} available"
+                )
             
             # Place new early sell order
+            balance_str = f"{balance:.6f}" if balance is not None else "N/A"
             logger.info(
                 f"  📤 Placing EARLY SELL order: price=${sell_price:.4f}, size={sell_size_int} shares "
-                f"(filled_shares={trade.filled_shares}, balance={balance:.6f if balance else 'N/A'})"
+                f"(filled_shares={trade.filled_shares}, balance={balance_str})"
             )
             sell_order_response = self.pm.execute_order(
                 price=sell_price,
@@ -935,7 +985,46 @@ class ThresholdTrader:
                 f"but limited to ${amount_invested:.2f} (dollar_bet_limit=${self.config.dollar_bet_limit:.2f})"
             )
         
-        order_size = int(amount_invested / order_price)  # Round down to whole shares
+        # Calculate order size accounting for fees
+        # Fees reduce the shares received, so we need to order slightly more to get the desired shares
+        from agents.backtesting.backtesting_utils import calculate_polymarket_fee
+        
+        # Start with desired shares based on amount_invested
+        desired_shares = amount_invested / order_price
+        
+        # Estimate fee for this order size (iterative approach to account for fees)
+        # Fee = trade_value * 0.25 * (price * (1-price))^2
+        # After fee, shares_received = (trade_value - fee) / price
+        # We want: shares_received = desired_shares
+        # So: (trade_value - fee) / price = desired_shares
+        # trade_value - fee = desired_shares * price
+        # trade_value - (trade_value * fee_rate * (p*(1-p))^2) = desired_shares * price
+        # trade_value * (1 - fee_rate * (p*(1-p))^2) = desired_shares * price
+        # trade_value = desired_shares * price / (1 - fee_rate * (p*(1-p))^2)
+        
+        fee_rate = 0.25
+        exponent = 2
+        p_times_one_minus_p = order_price * (1.0 - order_price)
+        fee_multiplier = fee_rate * (p_times_one_minus_p ** exponent)
+        
+        # Calculate order value needed to get desired shares after fees
+        if fee_multiplier < 1.0:  # Avoid division by zero
+            order_value_with_fee = (desired_shares * order_price) / (1.0 - fee_multiplier)
+            # Cap at dollar_bet_limit
+            order_value_with_fee = min(order_value_with_fee, self.config.dollar_bet_limit)
+            # Recalculate desired shares based on capped value
+            desired_shares = order_value_with_fee / order_price
+            
+            # Log fee adjustment
+            estimated_fee = order_value_with_fee * fee_multiplier
+            estimated_shares_after_fee = (order_value_with_fee - estimated_fee) / order_price
+            logger.debug(
+                f"Fee adjustment: base_value=${amount_invested:.2f} -> adjusted_value=${order_value_with_fee:.2f}, "
+                f"estimated_fee=${estimated_fee:.4f}, estimated_shares_after_fee={estimated_shares_after_fee:.4f}"
+            )
+        
+        # Round down to whole shares (Polymarket requires whole shares - fractional shares not supported)
+        order_size = int(desired_shares)
         
         # Calculate actual order value
         order_value = order_size * order_price
