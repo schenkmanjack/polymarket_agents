@@ -690,9 +690,10 @@ class Polymarket:
             
             logger.debug(f"  Raw balance from contract: {balance_raw} (uint256)")
             
-            # ERC1155 balances are typically stored as integers (wei-like)
-            # For conditional tokens, 1 share = 1e18 (similar to ERC20)
-            balance_float = float(balance_raw) / 1e18
+            # ERC1155 conditional tokens on Polymarket use 1e6 (6 decimals), not 1e18
+            # Example: raw balance 1978900 = 1.9789 shares (with 6 decimals)
+            # This is different from ERC20 tokens which typically use 1e18
+            balance_float = float(balance_raw) / 1e6
             
             logger.info(
                 f"  ✓ Conditional token balance: {balance_float:.6f} shares "
