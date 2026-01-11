@@ -444,57 +444,100 @@ class ThresholdTrader:
                 # Place order
                 await self._place_order(market_slug, market_info, side, lowest_ask)
         
-        # Check for early sell conditions on filled buy orders
-        await self._check_early_sell_conditions()
+        # Check for early sell conditions on filled buy orders for currently monitored markets
+        await self._check_early_sell_conditions(list(self.monitored_markets.keys()))
     
-    async def _check_early_sell_conditions(self):
-        """Check if the most recent filled buy order should trigger early sell (stop-loss)."""
-        # Get only the most recent filled trade from current deployment that doesn't have a sell order yet
-        trade = self.db.get_most_recent_filled_trade_without_sell(deployment_id=self.deployment_id)
-        
-        if not trade:
+    async def _check_early_sell_conditions(self, monitored_market_slugs: List[str]):
+        """Check if filled buy orders should trigger early sell (stop-loss) for currently monitored markets."""
+        if not monitored_market_slugs:
             return
         
+        session = self.db.SessionLocal()
         try:
-            # Skip if market already resolved
-            if trade.market_resolved_at:
-                return
+            # Check trades without sell orders first - only for monitored markets
+            trades_without_sell = session.query(RealTradeThreshold).filter(
+                RealTradeThreshold.deployment_id == self.deployment_id,
+                RealTradeThreshold.order_status == "filled",
+                RealTradeThreshold.filled_shares.isnot(None),
+                RealTradeThreshold.filled_shares > 0,
+                RealTradeThreshold.sell_order_id.is_(None),  # No sell order yet
+                RealTradeThreshold.market_resolved_at.is_(None),  # Market not resolved yet
+                RealTradeThreshold.market_slug.in_(monitored_market_slugs),  # Only current markets
+            ).order_by(RealTradeThreshold.order_placed_at.desc()).all()
             
-            # Skip if already have a sell order (double-check)
-            if trade.sell_order_id:
-                return
+            for trade in trades_without_sell:
+                try:
+                    # Fetch orderbook for the token we bought
+                    orderbook = fetch_orderbook(trade.token_id)
+                    if not orderbook:
+                        continue
+                    
+                    # Get highest bid
+                    highest_bid = get_highest_bid(orderbook)
+                    if highest_bid is None:
+                        continue
+                    
+                    # Check if highest_bid < threshold_sell
+                    if highest_bid < self.config.threshold_sell:
+                        # Place early sell order
+                        sell_price = self.config.threshold_sell - self.config.margin_sell
+                        if sell_price < 0.01:
+                            sell_price = 0.01  # Minimum price
+                        
+                        logger.info(
+                            f"Early sell triggered for trade {trade.id} (market: {trade.market_slug}, no sell order yet): "
+                            f"highest_bid={highest_bid:.4f} < threshold_sell={self.config.threshold_sell:.4f}, "
+                            f"placing sell order at {sell_price:.4f}"
+                        )
+                        
+                        await self._place_early_sell_order(trade, sell_price)
+                except Exception as e:
+                    logger.error(f"Error checking early sell condition for trade {trade.id}: {e}", exc_info=True)
             
-            # Skip if no filled shares
-            if not trade.filled_shares or trade.filled_shares <= 0:
-                return
+            # Also check trades with open $0.99 sell orders - if price drops below threshold,
+            # cancel the $0.99 order and place an early sell order
+            trades_with_099_sell = session.query(RealTradeThreshold).filter(
+                RealTradeThreshold.deployment_id == self.deployment_id,
+                RealTradeThreshold.order_status == "filled",
+                RealTradeThreshold.filled_shares.isnot(None),
+                RealTradeThreshold.filled_shares > 0,
+                RealTradeThreshold.sell_order_id.isnot(None),
+                RealTradeThreshold.sell_order_status == "open",
+                RealTradeThreshold.sell_order_price == 0.99,
+                RealTradeThreshold.market_resolved_at.is_(None),  # Market not resolved yet
+                RealTradeThreshold.market_slug.in_(monitored_market_slugs),  # Only current markets
+            ).order_by(RealTradeThreshold.order_placed_at.desc()).all()
             
-            # Fetch orderbook for the token we bought
-            orderbook = fetch_orderbook(trade.token_id)
-            if not orderbook:
-                return
-            
-            # Get highest bid
-            highest_bid = get_highest_bid(orderbook)
-            if highest_bid is None:
-                return
-            
-            # Check if highest_bid < threshold_sell
-            if highest_bid < self.config.threshold_sell:
-                # Place early sell order
-                sell_price = self.config.threshold_sell - self.config.margin_sell
-                if sell_price < 0.01:
-                    sell_price = 0.01  # Minimum price
-                
-                logger.info(
-                    f"Early sell triggered for trade {trade.id} (most recent): "
-                    f"highest_bid={highest_bid:.4f} < threshold_sell={self.config.threshold_sell:.4f}, "
-                    f"placing sell order at {sell_price:.4f}"
-                )
-                
-                await self._place_early_sell_order(trade, sell_price)
-        
-        except Exception as e:
-            logger.error(f"Error checking early sell condition for trade {trade.id}: {e}", exc_info=True)
+            for trade in trades_with_099_sell:
+                try:
+                    # Fetch orderbook for the token we bought
+                    orderbook = fetch_orderbook(trade.token_id)
+                    if not orderbook:
+                        continue
+                    
+                    # Get highest bid
+                    highest_bid = get_highest_bid(orderbook)
+                    if highest_bid is None:
+                        continue
+                    
+                    # Check if highest_bid < threshold_sell
+                    if highest_bid < self.config.threshold_sell:
+                        # Place early sell order (this will cancel the $0.99 order first)
+                        sell_price = self.config.threshold_sell - self.config.margin_sell
+                        if sell_price < 0.01:
+                            sell_price = 0.01  # Minimum price
+                        
+                        logger.info(
+                            f"Early sell triggered for trade {trade.id} (market: {trade.market_slug}, has $0.99 sell order): "
+                            f"highest_bid={highest_bid:.4f} < threshold_sell={self.config.threshold_sell:.4f}, "
+                            f"canceling $0.99 order and placing early sell at {sell_price:.4f}"
+                        )
+                        
+                        await self._place_early_sell_order(trade, sell_price)
+                except Exception as e:
+                    logger.error(f"Error checking early sell condition for trade {trade.id}: {e}", exc_info=True)
+        finally:
+            session.close()
     
     async def _place_initial_sell_order(self, trade: RealTradeThreshold):
         """Place initial sell order at 0.99 immediately when buy order fills.
@@ -1117,6 +1160,7 @@ class ThresholdTrader:
         
         # Round UP to whole shares to ensure we get at least the desired shares after fees
         # (Polymarket requires whole shares - fractional shares not supported)
+        # Note: After rounding up, order_value may slightly exceed dollar_bet_limit, which is acceptable
         order_size = math.ceil(shares_to_order)
         
         # Calculate actual order value
@@ -1627,10 +1671,22 @@ class ThresholdTrader:
                                 sell_fee=sell_fee,
                             )
                             
-                            # Update principal now that sell order filled
-                            net_proceeds = sell_dollars_received - sell_fee - (trade.dollars_spent or 0) - (trade.fee or 0)
-                            new_principal = self.principal + net_proceeds
+                            # Calculate net profit: (what we received from selling) - (what we spent buying)
+                            # Note: Principal wasn't reduced when buying, so we need to account for the full cost
+                            total_cost = (trade.dollars_spent or 0) + (trade.fee or 0)  # Buy cost + buy fee
+                            total_received = sell_dollars_received - sell_fee  # Sell proceeds - sell fee
+                            net_profit = total_received - total_cost  # Net profit/loss
+                            
+                            # Update principal: add net profit (which may be negative if fees exceed gains)
+                            new_principal = self.principal + net_profit
                             self.principal = new_principal
+                            
+                            # Calculate ROI: net_profit / total_cost
+                            roi = net_profit / total_cost if total_cost > 0 else 0.0
+                            
+                            # If we sold at $0.99, the market resolved in our favor (we won the bet)
+                            # is_win should be True if we bet on the winning side (sold at $0.99 means we were right)
+                            is_win = (sell_price >= 0.99)  # Selling at $0.99 means market resolved in our favor
                             
                             # Update trade with final principal
                             if trade.market_resolved_at:
@@ -1639,19 +1695,23 @@ class ThresholdTrader:
                                     trade_id=trade_id,
                                     outcome_price=trade.outcome_price,
                                     payout=sell_dollars_received,
-                                    net_payout=net_proceeds,
-                                    roi=net_proceeds / ((trade.dollars_spent or 0) + (trade.fee or 0)) if (trade.dollars_spent or 0) + (trade.fee or 0) > 0 else 0.0,
-                                    is_win=trade.is_win,
+                                    net_payout=net_profit,
+                                    roi=roi,
+                                    is_win=is_win,
                                     principal_after=new_principal,
                                     winning_side=trade.winning_side,
                                 )
                             else:
-                                # Early sell - market not resolved yet, just update principal
+                                # Early sell - market not resolved yet, but we sold at $0.99 so we won
                                 session = self.db.SessionLocal()
                                 try:
                                     trade_obj = session.query(RealTradeThreshold).filter_by(id=trade_id).first()
                                     if trade_obj:
                                         trade_obj.principal_after = new_principal
+                                        trade_obj.roi = roi
+                                        trade_obj.is_win = is_win
+                                        trade_obj.net_payout = net_profit
+                                        trade_obj.payout = sell_dollars_received
                                         session.commit()
                                 except Exception as e:
                                     session.rollback()
@@ -1667,7 +1727,10 @@ class ThresholdTrader:
                                 f"  Sell Price: ${sell_price:.4f}\n"
                                 f"  Dollars Received: ${sell_dollars_received:.2f}\n"
                                 f"  Sell Fee: ${sell_fee:.4f}\n"
-                                f"  Net Proceeds: ${net_proceeds:.2f}\n"
+                                f"  Total Cost (buy): ${total_cost:.2f}\n"
+                                f"  Net Profit: ${net_profit:.2f}\n"
+                                f"  ROI: {roi*100:.2f}%\n"
+                                f"  Is Win: {is_win}\n"
                                 f"  Principal: ${self.principal:.2f} -> ${new_principal:.2f}"
                             )
                             
@@ -1721,34 +1784,45 @@ class ThresholdTrader:
                                             sell_fee=sell_fee,
                                         )
                                         
-                                        # Update principal now that sell order filled
-                                        # Calculate actual net payout from sell (works for both early sells and claim proceeds)
-                                        net_proceeds = sell_dollars_received - sell_fee - (trade.dollars_spent or 0) - (trade.fee or 0)
-                                        new_principal = self.principal + net_proceeds
+                                        # Calculate net profit: (what we received from selling) - (what we spent buying)
+                                        total_cost = (trade.dollars_spent or 0) + (trade.fee or 0)  # Buy cost + buy fee
+                                        total_received = sell_dollars_received - sell_fee  # Sell proceeds - sell fee
+                                        net_profit = total_received - total_cost  # Net profit/loss
+                                        
+                                        # Update principal: add net profit (which may be negative if fees exceed gains)
+                                        new_principal = self.principal + net_profit
                                         self.principal = new_principal
                                         
+                                        # Calculate ROI: net_profit / total_cost
+                                        roi = net_profit / total_cost if total_cost > 0 else 0.0
+                                        
+                                        # If we sold at $0.99, the market resolved in our favor (we won the bet)
+                                        is_win = (trade.sell_order_price >= 0.99)  # Selling at $0.99 means market resolved in our favor
+                                        
                                         # Update trade with final principal
-                                        # If market already resolved, update with outcome info
-                                        # If market not resolved yet (early sell), just update principal
                                         if trade.market_resolved_at:
                                             # Market already resolved - update with outcome info
                                             self.db.update_trade_outcome(
                                                 trade_id=trade_id,
                                                 outcome_price=trade.outcome_price,
                                                 payout=sell_dollars_received,
-                                                net_payout=net_proceeds,
-                                                roi=net_proceeds / ((trade.dollars_spent or 0) + (trade.fee or 0)) if (trade.dollars_spent or 0) + (trade.fee or 0) > 0 else 0.0,
-                                                is_win=trade.is_win,
+                                                net_payout=net_profit,
+                                                roi=roi,
+                                                is_win=is_win,
                                                 principal_after=new_principal,
                                                 winning_side=trade.winning_side,
                                             )
                                         else:
-                                            # Early sell - market not resolved yet, just update principal
+                                            # Early sell - market not resolved yet, but we sold at $0.99 so we won
                                             session = self.db.SessionLocal()
                                             try:
                                                 trade_obj = session.query(RealTradeThreshold).filter_by(id=trade_id).first()
                                                 if trade_obj:
                                                     trade_obj.principal_after = new_principal
+                                                    trade_obj.roi = roi
+                                                    trade_obj.is_win = is_win
+                                                    trade_obj.net_payout = net_profit
+                                                    trade_obj.payout = sell_dollars_received
                                                     session.commit()
                                             except Exception as e:
                                                 session.rollback()
@@ -1813,35 +1887,45 @@ class ThresholdTrader:
                             sell_fee=sell_fee,
                         )
                         
-                        # Update principal now that sell order filled
-                        # Calculate actual net payout from sell (works for both early sells and claim proceeds)
-                        net_proceeds = sell_dollars_received - sell_fee - (trade.dollars_spent or 0) - (trade.fee or 0)
-                        new_principal = self.principal + net_proceeds
+                        # Calculate net profit: (what we received from selling) - (what we spent buying)
+                        total_cost = (trade.dollars_spent or 0) + (trade.fee or 0)  # Buy cost + buy fee
+                        total_received = sell_dollars_received - sell_fee  # Sell proceeds - sell fee
+                        net_profit = total_received - total_cost  # Net profit/loss
+                        
+                        # Update principal: add net profit (which may be negative if fees exceed gains)
+                        new_principal = self.principal + net_profit
                         self.principal = new_principal
                         
+                        # Calculate ROI: net_profit / total_cost
+                        roi = net_profit / total_cost if total_cost > 0 else 0.0
+                        
+                        # If we sold at $0.99, the market resolved in our favor (we won the bet)
+                        is_win = (sell_price >= 0.99)  # Selling at $0.99 means market resolved in our favor
+                        
                         # Update trade with final principal
-                        # If market already resolved, update with outcome info
-                        # If market not resolved yet (early sell), just update principal
                         if trade.market_resolved_at:
                             # Market already resolved - update with outcome info
                             self.db.update_trade_outcome(
                                 trade_id=trade_id,
                                 outcome_price=trade.outcome_price,
                                 payout=sell_dollars_received,
-                                net_payout=net_proceeds,
-                                roi=net_proceeds / ((trade.dollars_spent or 0) + (trade.fee or 0)) if (trade.dollars_spent or 0) + (trade.fee or 0) > 0 else 0.0,
-                                is_win=trade.is_win,
+                                net_payout=net_profit,
+                                roi=roi,
+                                is_win=is_win,
                                 principal_after=new_principal,
                                 winning_side=trade.winning_side,
                             )
                         else:
-                            # Early sell - market not resolved yet, just update principal
-                            # We'll update outcome when market resolves
+                            # Early sell - market not resolved yet, but we sold at $0.99 so we won
                             session = self.db.SessionLocal()
                             try:
                                 trade_obj = session.query(RealTradeThreshold).filter_by(id=trade_id).first()
                                 if trade_obj:
                                     trade_obj.principal_after = new_principal
+                                    trade_obj.roi = roi
+                                    trade_obj.is_win = is_win
+                                    trade_obj.net_payout = net_profit
+                                    trade_obj.payout = sell_dollars_received
                                     session.commit()
                             except Exception as e:
                                 session.rollback()
