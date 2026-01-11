@@ -437,6 +437,16 @@ class ThresholdTrader:
                 
                 logger.info(f"Threshold triggered for {market_slug}: {side} side, lowest_ask={lowest_ask:.4f}")
                 
+                # Final check: verify no bet exists in database (double-check before placing)
+                # This prevents race conditions where order fills immediately and database hasn't updated yet
+                if self.db.has_bet_on_market(market_slug):
+                    logger.warning(
+                        f"⚠️ Threshold triggered for {market_slug}, but database shows active bet exists. "
+                        f"Skipping order to prevent duplicate."
+                    )
+                    self.markets_with_bets.add(market_slug)  # Add to memory set
+                    continue
+                
                 # Mark market as bet on IMMEDIATELY to prevent buying both YES and NO
                 # This prevents race condition where both sides trigger in same loop iteration
                 self.markets_with_bets.add(market_slug)
@@ -1381,6 +1391,14 @@ class ThresholdTrader:
                         trade_id = all_trades_to_check[fill_order_id]
                         trade = self.db.get_trade_by_id(trade_id)
                         if trade and not trade.filled_shares:
+                            # Verify this fill belongs to this trade by checking order_id matches
+                            if trade.order_id != fill_order_id:
+                                logger.warning(
+                                    f"⚠️ Fill order_id {fill_order_id} doesn't match trade.order_id {trade.order_id} "
+                                    f"for trade {trade_id}. Skipping to prevent placing sell order for wrong trade."
+                                )
+                                continue
+                            
                             # Order was filled - extract fill details
                             # The 'size' field contains the filled shares
                             filled_shares = fill.get("size")
@@ -1640,6 +1658,17 @@ class ThresholdTrader:
                     # Order is not in open orders - check if it's already marked as filled
                     trade = self.db.get_trade_by_id(trade_id)
                     if trade and trade.sell_order_status == "open":
+                        # Don't mark as filled if order was placed very recently (within last 10 seconds)
+                        # It might not have appeared in open orders list yet, or might still be processing
+                        if trade.sell_order_placed_at:
+                            time_since_placed = (datetime.now(timezone.utc) - trade.sell_order_placed_at).total_seconds()
+                            if time_since_placed < 10.0:
+                                logger.debug(
+                                    f"Sell order {sell_order_id} (trade {trade_id}) not in open orders, "
+                                    f"but was placed only {time_since_placed:.1f}s ago - waiting before marking as filled"
+                                )
+                                continue  # Skip this order, check again next time
+                        
                         logger.info(
                             f"Sell order {sell_order_id} (trade {trade_id}) not found in open orders - "
                             f"marking as filled (order was placed at {trade.sell_order_placed_at})"
