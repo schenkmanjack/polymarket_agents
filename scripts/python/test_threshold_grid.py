@@ -910,6 +910,7 @@ def run_grid_search_for_market_type(
     min_dollar_amount: float = 1.0,
     max_dollar_amount: float = 1000.0,
     dollar_amount_interval: float = 50.0,
+    max_minutes_until_resolution: float = None,
     max_markets: int = None,
     start_date: datetime = None,
     end_date: datetime = None,
@@ -958,6 +959,7 @@ def run_grid_search_for_market_type(
         min_dollar_amount=min_dollar_amount,
         max_dollar_amount=max_dollar_amount,
         dollar_amount_interval=dollar_amount_interval,
+        max_minutes_until_resolution=max_minutes_until_resolution,
         return_individual_trades=True  # Return individual trade ROI values for histogram
     )
     
@@ -1011,6 +1013,7 @@ def main():
     parser.add_argument("--min-dollar-amount", type=float, default=1.0, help="Minimum dollar amount (default: 1)")
     parser.add_argument("--max-dollar-amount", type=float, default=1000.0, help="Maximum dollar amount (default: 1000)")
     parser.add_argument("--dollar-amount-interval", type=float, default=50.0, help="Dollar amount interval (default: 50)")
+    parser.add_argument("--max-minutes-until-resolution", type=float, default=None, help="Only trigger trades if <= X minutes until resolution (default: None = no filter)")
     parser.add_argument("--max-markets", type=int, default=None, help="Maximum number of markets to test per type")
     parser.add_argument("--start-date", type=str, default=None, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end-date", type=str, default=None, help="End date (YYYY-MM-DD)")
@@ -1035,6 +1038,8 @@ def main():
     print(f"Threshold range: {args.threshold_min:.2f} to {args.threshold_max:.2f} (step {args.threshold_step:.2f})")
     print(f"Margin range: {args.margin_min:.2f} to auto (step {args.margin_step:.2f})")
     print(f"Dollar amount range: ${args.min_dollar_amount:.0f} to ${args.max_dollar_amount:.0f} (step ${args.dollar_amount_interval:.0f})")
+    if args.max_minutes_until_resolution:
+        print(f"Time filter: Only trade if <= {args.max_minutes_until_resolution:.1f} minutes until resolution")
     print(f"Max markets per type: {args.max_markets or 'all'}")
     print()
     
@@ -1057,6 +1062,7 @@ def main():
             min_dollar_amount=args.min_dollar_amount,
             max_dollar_amount=args.max_dollar_amount,
             dollar_amount_interval=args.dollar_amount_interval,
+            max_minutes_until_resolution=args.max_minutes_until_resolution,
             max_markets=args.max_markets,
             start_date=start_date,
             end_date=end_date,
@@ -1086,6 +1092,7 @@ def main():
             min_dollar_amount=args.min_dollar_amount,
             max_dollar_amount=args.max_dollar_amount,
             dollar_amount_interval=args.dollar_amount_interval,
+            max_minutes_until_resolution=args.max_minutes_until_resolution,
             max_markets=args.max_markets,
             start_date=start_date,
             end_date=end_date,

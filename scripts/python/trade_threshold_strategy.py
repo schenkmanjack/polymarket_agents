@@ -550,10 +550,20 @@ class ThresholdTrader:
                 
                 # Mark market as bet on IMMEDIATELY to prevent buying both YES and NO
                 # This prevents race condition where both sides trigger in same loop iteration
+                # NOTE: We'll remove it if order placement fails (e.g., due to time restriction)
                 self.markets_with_bets.add(market_slug)
                 
-                # Place order
-                await self._place_order(market_slug, market_info, side, lowest_ask)
+                # Place order - returns True if order was placed, False otherwise
+                order_placed = await self._place_order(market_slug, market_info, side, lowest_ask)
+                
+                # If order was not placed (e.g., due to time restriction), remove from markets_with_bets
+                # so it can be checked again in future iterations
+                if not order_placed:
+                    self.markets_with_bets.discard(market_slug)
+                    logger.info(
+                        f"🔄 Order not placed for {market_slug} - removed from markets_with_bets. "
+                        f"Will check again on next iteration."
+                    )
     
     async def _check_early_sell_conditions(self, monitored_market_slugs: List[str]):
         """Check if filled buy orders should trigger early sell (stop-loss) for currently monitored markets."""
@@ -1333,8 +1343,13 @@ class ThresholdTrader:
         market_info: Dict,
         side: str,
         trigger_price: float,
-    ):
-        """Place a limit order when threshold is triggered."""
+    ) -> bool:
+        """Place a limit order when threshold is triggered.
+        
+        Returns:
+            True if order was successfully placed, False otherwise
+            (False can occur due to time restriction, order size issues, etc.)
+        """
         market = market_info["market"]
         market_id = market.get("id", "unknown")
         token_id = market_info["yes_token_id"] if side == "YES" else market_info["no_token_id"]
@@ -1347,16 +1362,16 @@ class ThresholdTrader:
                     f"Could not determine time remaining for market {market_slug}. "
                     f"Skipping order to be safe."
                 )
-                return
+                return False
             
             if minutes_remaining > self.config.max_minutes_before_resolution:
                 logger.info(
                     f"⏰ Threshold triggered for {market_slug} ({side} side, lowest_ask={trigger_price:.4f}), "
                     f"but trade NOT PLACED: {minutes_remaining:.2f} minutes remaining exceeds "
                     f"max_minutes_before_resolution ({self.config.max_minutes_before_resolution:.1f} minutes). "
-                    f"Skipping order."
+                    f"Skipping order. Will check again when time remaining decreases."
                 )
-                return
+                return False
             
             logger.info(
                 f"⏰ Time check passed: {minutes_remaining:.2f} minutes remaining <= "
@@ -1392,7 +1407,7 @@ class ThresholdTrader:
         
         if order_size is None:
             logger.warning(f"Order size calculation failed (amount_invested=${amount_invested:.2f})")
-            return
+            return False
         
         # Log fee adjustment
         logger.info(
@@ -1406,7 +1421,7 @@ class ThresholdTrader:
         # Verify market is still active before placing order
         if not is_market_active(market):
             logger.warning(f"Market {market_slug} is no longer active, skipping order")
-            return
+            return False
         
         logger.info(
             f"Placing LIMIT order: {side} side, limit_price={order_price:.4f}, size={order_size} shares, "
@@ -1456,7 +1471,7 @@ class ThresholdTrader:
                     )
                     # Don't retry - order is too small
                     logger.error("Stopping retries due to order size below minimum")
-                    return
+                    return False
                 
                 # Check for specific error types
                 if "not enough balance" in error_msg.lower() or "allowance" in error_msg.lower():
@@ -1478,7 +1493,7 @@ class ThresholdTrader:
                     
                     # Don't retry balance errors - they won't resolve quickly
                     logger.error("Stopping retries due to balance/allowance error")
-                    return
+                    return False
                 
                 if attempt < 2:
                     await asyncio.sleep(5.0)  # Wait 5 seconds before retry
@@ -1486,17 +1501,17 @@ class ThresholdTrader:
                     logger.error(f"Failed to place order after 3 attempts - not creating trade record")
                     # Don't create trade record for failed orders - principal shouldn't change
                     # Only log the error without creating a database entry
-                    return
+                    return False
         
         if not order_response:
-            return
+            return False
         
         # Extract order ID
         logger.info(f"🔍 Extracting order ID from response: {order_response}")
         order_id = self.pm.extract_order_id(order_response)
         if not order_id:
             logger.error(f"❌ Could not extract order ID from response: {order_response}")
-            return
+            return False
         logger.info(f"✅ Extracted order ID: {order_id}")
         
         # Log buy order placement
@@ -1544,6 +1559,8 @@ class ThresholdTrader:
             f"  Order Value: ${order_value:.2f}\n"
             f"  Principal: ${self.principal:.2f}"
         )
+        
+        return True
     
     async def _order_status_loop(self):
         """Check order status every 10 seconds."""

@@ -461,6 +461,14 @@ class ThresholdBacktester:
                 logger.debug(f"Could not parse outcomePrices JSON string: {outcome_prices_raw}")
                 outcome_prices_raw = None
         
+        # Store market end date for time-remaining calculations
+        market_end = None
+        if market_start and market_end:
+            market_end = market_end
+        else:
+            # Parse from market dict if not already parsed
+            _, market_end = parse_market_dates(market)
+        
         return {
             "market_id": market_id,
             "yes_snapshots": yes_snapshots,
@@ -468,6 +476,7 @@ class ThresholdBacktester:
             "outcome_prices": outcome_prices_raw,  # Store raw, will parse in process_market_with_snapshots
             "_yes_max_bid": yes_max_bid,  # For early termination
             "_no_max_bid": no_max_bid,  # For early termination
+            "_market_end": market_end,  # Market resolution time for time-remaining filter
         }
     
     def process_market_with_snapshots(
@@ -475,7 +484,8 @@ class ThresholdBacktester:
         market_data: Dict,
         threshold: float,
         margin: float,
-        dollar_amount: float = 100.0
+        dollar_amount: float = 100.0,
+        max_minutes_until_resolution: Optional[float] = None
     ) -> Optional[Dict]:
         """
         Process market with pre-fetched snapshots (faster for grid search).
@@ -485,6 +495,8 @@ class ThresholdBacktester:
             threshold: Threshold percentage
             margin: Margin percentage
             dollar_amount: Dollar amount to bet (full principal for ROI calculation)
+            max_minutes_until_resolution: Optional filter - only trigger if <= X minutes until resolution.
+                                        If None, no time filter is applied.
         
         Returns:
             Dict with trade results or None
@@ -497,6 +509,9 @@ class ThresholdBacktester:
         if not outcome_prices_raw:
             return None
         
+        # Get market end time for time-remaining filter
+        market_end = market_data.get("_market_end")
+        
         # Monitor both sides: check when threshold is reached using HIGHEST BID from bids column
         trigger_side = None
         trigger_time = None
@@ -504,7 +519,16 @@ class ThresholdBacktester:
         
         # Check YES side - trigger when highest bid >= threshold
         for snapshot in yes_snapshots:
-            highest_bid = get_highest_bid_from_orderbook(snapshot)
+            # Apply time-remaining filter if specified
+            if max_minutes_until_resolution is not None and market_end:
+                snapshot_time = snapshot.timestamp
+                if snapshot_time.tzinfo is None:
+                    snapshot_time = snapshot_time.replace(tzinfo=timezone.utc)
+                minutes_remaining = (market_end - snapshot_time).total_seconds() / 60.0
+                if minutes_remaining > max_minutes_until_resolution:
+                    continue  # Skip - too much time remaining
+            
+            highest_bid = snapshot._highest_bid  # Use pre-computed value
             if highest_bid is not None and highest_bid >= threshold:
                 trigger_side = "YES"
                 trigger_time = snapshot.timestamp
@@ -514,7 +538,16 @@ class ThresholdBacktester:
         # Check NO side (only if YES didn't trigger) - trigger when highest bid >= threshold
         if trigger_side is None:
             for snapshot in no_snapshots:
-                highest_bid = get_highest_bid_from_orderbook(snapshot)
+                # Apply time-remaining filter if specified
+                if max_minutes_until_resolution is not None and market_end:
+                    snapshot_time = snapshot.timestamp
+                    if snapshot_time.tzinfo is None:
+                        snapshot_time = snapshot_time.replace(tzinfo=timezone.utc)
+                    minutes_remaining = (market_end - snapshot_time).total_seconds() / 60.0
+                    if minutes_remaining > max_minutes_until_resolution:
+                        continue  # Skip - too much time remaining
+                
+                highest_bid = snapshot._highest_bid  # Use pre-computed value
                 if highest_bid is not None and highest_bid >= threshold:
                     trigger_side = "NO"
                     trigger_time = snapshot.timestamp
@@ -522,7 +555,7 @@ class ThresholdBacktester:
                     break
         
         if trigger_side is None:
-            return None  # Threshold never reached
+            return None  # Threshold never reached (or filtered out by time constraint)
         
         # Calculate BID order price (we're buying/placing a bid order)
         bid_price = threshold + margin
@@ -666,6 +699,7 @@ class ThresholdBacktester:
         min_dollar_amount: float = 1.0,
         max_dollar_amount: float = 1000.0,
         dollar_amount_interval: float = 50.0,
+        max_minutes_until_resolution: Optional[float] = None,
         return_individual_trades: bool = False
     ) -> pd.DataFrame:
         """
@@ -684,6 +718,9 @@ class ThresholdBacktester:
             min_dollar_amount: Minimum dollar amount to test (default: 1.0)
             max_dollar_amount: Maximum dollar amount to test (default: 1000.0)
             dollar_amount_interval: Dollar amount increment (default: 50.0)
+            max_minutes_until_resolution: Optional filter - only trigger trades if <= X minutes until resolution.
+                                        If None, no time filter is applied. Useful for strategies that only
+                                        trade near market close (e.g., only trade if < 5 minutes remaining).
             return_individual_trades: If True, return individual trades dict (default: False)
             
         Note: ROI is calculated on the full principal (dollar_amount), not the actual amount filled.
@@ -772,9 +809,14 @@ class ThresholdBacktester:
                     # Note: Parallel processing infrastructure is in place but uses sequential
                     # processing for now due to pickling constraints. The pre-computed orderbook
                     # metrics and early termination provide significant speedups already.
-                    trades = self._process_markets_parallel(
-                        processed_markets, threshold, margin, dollar_amount
-                    )
+                    trades = []
+                    for market_data in processed_markets:
+                        trade_result = self.process_market_with_snapshots(
+                            market_data, threshold, margin, dollar_amount,
+                            max_minutes_until_resolution=max_minutes_until_resolution
+                        )
+                        if trade_result:
+                            trades.append(trade_result)
                     
                     if not trades:
                         continue  # Skip if no trades executed
