@@ -8,5 +8,6 @@
   "kelly_scale_factor": 0.6,
   "market_type": "15m",
   "initial_principal": 20.0,
-  "dollar_bet_limit": 160.0
+  "dollar_bet_limit": 160.0,
+  "max_minutes_before_resolution": 5.0
 }

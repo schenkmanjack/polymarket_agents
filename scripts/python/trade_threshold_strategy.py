@@ -64,6 +64,7 @@ from agents.trading.utils import (
     is_order_partial_fill,
     validate_trade_for_resolution,
     check_order_belongs_to_market,
+    get_minutes_until_resolution,
 )
 
 logging.basicConfig(
@@ -1330,6 +1331,30 @@ class ThresholdTrader:
         market = market_info["market"]
         market_id = market.get("id", "unknown")
         token_id = market_info["yes_token_id"] if side == "YES" else market_info["no_token_id"]
+        
+        # Check if we're within the allowed time window before resolution
+        if self.config.max_minutes_before_resolution is not None:
+            minutes_remaining = get_minutes_until_resolution(market)
+            if minutes_remaining is None:
+                logger.warning(
+                    f"Could not determine time remaining for market {market_slug}. "
+                    f"Skipping order to be safe."
+                )
+                return
+            
+            if minutes_remaining > self.config.max_minutes_before_resolution:
+                logger.info(
+                    f"⏰ Threshold triggered for {market_slug} ({side} side, lowest_ask={trigger_price:.4f}), "
+                    f"but trade NOT PLACED: {minutes_remaining:.2f} minutes remaining exceeds "
+                    f"max_minutes_before_resolution ({self.config.max_minutes_before_resolution:.1f} minutes). "
+                    f"Skipping order."
+                )
+                return
+            
+            logger.info(
+                f"⏰ Time check passed: {minutes_remaining:.2f} minutes remaining <= "
+                f"{self.config.max_minutes_before_resolution:.1f} minutes limit - proceeding with order"
+            )
         
         # Calculate order parameters
         order_price = trigger_price + self.config.margin

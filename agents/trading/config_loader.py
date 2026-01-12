@@ -102,6 +102,12 @@ class TradingConfig:
         if not isinstance(dollar_bet_limit, (int, float)) or dollar_bet_limit <= 0.0:
             raise ValueError(f"dollar_bet_limit must be a positive float, got {dollar_bet_limit}")
         
+        # Validate max_minutes_before_resolution (optional)
+        max_minutes = self.config.get('max_minutes_before_resolution')
+        if max_minutes is not None:
+            if not isinstance(max_minutes, (int, float)) or max_minutes <= 0.0:
+                raise ValueError(f"max_minutes_before_resolution must be a positive float or null, got {max_minutes}")
+        
         logger.info("✓ Config validation passed")
     
     @property
@@ -143,6 +149,12 @@ class TradingConfig:
     @property
     def dollar_bet_limit(self) -> float:
         return float(self.config['dollar_bet_limit'])
+    
+    @property
+    def max_minutes_before_resolution(self) -> Optional[float]:
+        """Maximum minutes before resolution to allow buying. None means no limit."""
+        value = self.config.get('max_minutes_before_resolution')
+        return float(value) if value is not None else None
     
     def get_amount_invested(self, principal: float) -> float:
         """

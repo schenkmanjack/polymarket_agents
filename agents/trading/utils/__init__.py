@@ -29,6 +29,9 @@ from agents.trading.utils.trade_validation import (
     validate_trade_for_resolution,
     check_order_belongs_to_market,
 )
+from agents.trading.utils.market_time_helpers import (
+    get_minutes_until_resolution,
+)
 
 __all__ = [
     # Order calculations
@@ -48,4 +51,6 @@ __all__ = [
     # Validation
     "validate_trade_for_resolution",
     "check_order_belongs_to_market",
+    # Market time
+    "get_minutes_until_resolution",
 ]
