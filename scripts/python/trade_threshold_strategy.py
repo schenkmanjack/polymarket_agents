@@ -421,6 +421,11 @@ class ThresholdTrader:
     
     async def _check_orderbooks_for_triggers(self):
         """Check all monitored markets for threshold triggers."""
+        # ALWAYS check for early sell conditions first (threshold sell/stop-loss)
+        # This should run independently of whether we have open trades or sell orders
+        # because it's checking existing filled trades to see if they need to be sold early
+        await self._check_early_sell_conditions(list(self.monitored_markets.keys()))
+        
         # Don't place new bets if we have open buy orders
         if self.open_trades:
             return
@@ -528,9 +533,6 @@ class ThresholdTrader:
                 
                 # Place order
                 await self._place_order(market_slug, market_info, side, lowest_ask)
-        
-        # Check for early sell conditions on filled buy orders for currently monitored markets
-        await self._check_early_sell_conditions(list(self.monitored_markets.keys()))
     
     async def _check_early_sell_conditions(self, monitored_market_slugs: List[str]):
         """Check if filled buy orders should trigger early sell (stop-loss) for currently monitored markets."""
