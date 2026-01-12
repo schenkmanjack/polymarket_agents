@@ -155,6 +155,9 @@ class ThresholdTrader:
         self.sell_orders_not_found: Dict[str, int] = {}  # sell_order_id -> retry_count
         self.max_order_not_found_retries = 3  # Retry 3 times before giving up
         
+        # Track orders that were checked and found to be open (for cancellation after 5 checks)
+        self.orders_checked_open: Dict[str, int] = {}  # order_id -> check_count (cancel after 5 checks)
+        
         # Timing
         self.orderbook_poll_interval = 1.0  # seconds - check prices every 1 second for placing orders and threshold sells
         self.order_status_check_interval = 10.0  # seconds
@@ -1190,7 +1193,10 @@ class ThresholdTrader:
                 )
                 cancel_response = self.pm.cancel_order(trade.sell_order_id)
                 if cancel_response:
-                    logger.info(f"✓ Canceled sell order {trade.sell_order_id}")
+                    logger.info(
+                        f"🚫 ORDER CANCELLED: Sell order {trade.sell_order_id} (trade {trade.id}, market {trade.market_slug}) "
+                        f"was cancelled to place threshold sell order at ${sell_price:.4f}"
+                    )
                     # Remove from tracking
                     self.open_sell_orders.pop(trade.sell_order_id, None)
                     # Update database to mark as cancelled AND clear sell_order_id
@@ -1563,14 +1569,26 @@ class ThresholdTrader:
         return True
     
     async def _order_status_loop(self):
-        """Check order status every 10 seconds."""
+        """Check order status every 2 seconds if orders are open, otherwise every 10 seconds."""
         while self.running:
             try:
                 await self._check_order_statuses()
             except Exception as e:
                 logger.error(f"Error checking order status: {e}", exc_info=True)
             
-            await asyncio.sleep(self.order_status_check_interval)
+            # Use 2 seconds if there are open orders, otherwise use default 10 seconds
+            # Check memory first (fast), only check database if memory is empty (handles script restart)
+            has_open_orders = self.open_trades or self.open_sell_orders
+            if not has_open_orders:
+                # Check database only if memory is empty (e.g., after script restart)
+                open_trades_db = self.db.get_open_trades(deployment_id=self.deployment_id)
+                open_sell_orders_db = self.db.get_open_sell_orders(deployment_id=self.deployment_id)
+                has_open_orders = bool(open_trades_db or open_sell_orders_db)
+            
+            if has_open_orders:
+                await asyncio.sleep(2.0)  # Check every 2 seconds when orders are open
+            else:
+                await asyncio.sleep(self.order_status_check_interval)  # Default 10 seconds when no open orders
     
     async def _check_order_statuses(self):
         """Check status of all open orders."""
@@ -1675,6 +1693,7 @@ class ThresholdTrader:
                             )
                             self.open_trades.pop(fill_order_id, None)
                             self.orders_not_found.pop(fill_order_id, None)
+                            self.orders_checked_open.discard(fill_order_id)  # Clear from checked open set
                             logger.info(
                                 f"✅✅✅ BUY ORDER FILLED ✅✅✅\n"
                                 f"  Order ID: {fill_order_id}\n"
@@ -1738,6 +1757,7 @@ class ThresholdTrader:
                             )
                             self.open_trades.pop(order_id, None)
                             self.orders_not_found.pop(order_id, None)
+                            self.orders_checked_open.pop(order_id, None)  # Clear from checked open dict
                             logger.info(f"Order {order_id} marked as filled (not in open orders): {trade.order_size} shares")
                             
                             # Reload trade from database to get updated filled_shares
@@ -1779,6 +1799,7 @@ class ThresholdTrader:
                         # If still not found, remove from tracking
                         self.open_trades.pop(order_id, None)
                         self.orders_not_found.pop(order_id, None)
+                        self.orders_checked_open.discard(order_id)  # Clear from checked open set
                     continue
                 
                 # Order found - clear retry count
@@ -1826,6 +1847,7 @@ class ThresholdTrader:
                     # Remove from open trades and clear retry count
                     self.open_trades.pop(order_id, None)
                     self.orders_not_found.pop(order_id, None)
+                    self.orders_checked_open.discard(order_id)  # Clear from checked open set
                 
                 elif status == "open" and filled_amount and float(filled_amount) > 0:
                     # Partial fill - update trade
@@ -1851,6 +1873,84 @@ class ThresholdTrader:
                         logger.info(f"Cancelled remaining portion of order {order_id}")
                     except Exception as e:
                         logger.warning(f"Could not cancel order {order_id}: {e}")
+                
+                elif status == "open" and (not filled_amount or float(filled_amount) == 0):
+                    # Order is still open with no fills - check if it should be cancelled
+                    # 1. Check if market has resolved
+                    market = get_market_by_slug(trade.market_slug) if trade.market_slug else None
+                    if market and not is_market_active(market):
+                        # Market has resolved but order never filled - cancel it
+                        logger.warning(
+                            f"⚠️ Buy order {order_id} (trade {trade_id}) is still open but market {trade.market_slug} "
+                            f"has resolved. Cancelling order and marking as cancelled."
+                        )
+                        try:
+                            cancel_result = self.pm.cancel_order(order_id)
+                            if cancel_result:
+                                logger.info(f"✅ Successfully cancelled buy order {order_id} via API")
+                            else:
+                                logger.warning(f"⚠️ Failed to cancel buy order {order_id} via API")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Error cancelling buy order {order_id}: {e}")
+                        
+                        # Mark as cancelled in database
+                        self.db.update_order_status(
+                            trade_id,
+                            "cancelled",
+                            error_message="Order never filled before market resolution - cancelled"
+                        )
+                        # Remove from tracking
+                        self.open_trades.pop(order_id, None)
+                        self.orders_not_found.pop(order_id, None)
+                        self.orders_checked_open.pop(order_id, None)
+                        logger.info(
+                            f"🚫 ORDER CANCELLED: Buy order {order_id} (trade {trade_id}, market {trade.market_slug}) "
+                            f"was cancelled because market resolved before order filled. "
+                            f"Order never filled, so principal remains unchanged."
+                        )
+                        continue
+                    
+                    # 2. Track how many times we've checked this order - cancel after 5 checks
+                    check_count = self.orders_checked_open.get(order_id, 0) + 1
+                    self.orders_checked_open[order_id] = check_count
+                    
+                    if check_count >= 5:
+                        # Order has been checked 5 times and still open - cancel it
+                        logger.warning(
+                            f"⚠️ Buy order {order_id} (trade {trade_id}) is still open after {check_count} status checks. "
+                            f"Cancelling order immediately."
+                        )
+                        try:
+                            cancel_result = self.pm.cancel_order(order_id)
+                            if cancel_result:
+                                logger.info(f"✅ Successfully cancelled buy order {order_id} via API")
+                            else:
+                                logger.warning(f"⚠️ Failed to cancel buy order {order_id} via API")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Error cancelling buy order {order_id}: {e}")
+                        
+                        # Mark as cancelled in database
+                        self.db.update_order_status(
+                            trade_id,
+                            "cancelled",
+                            error_message=f"Order still open after {check_count} status checks - cancelled"
+                        )
+                        # Remove from tracking
+                        self.open_trades.pop(order_id, None)
+                        self.orders_not_found.pop(order_id, None)
+                        self.orders_checked_open.pop(order_id, None)
+                        logger.info(
+                            f"🚫 ORDER CANCELLED: Buy order {order_id} (trade {trade_id}, market {trade.market_slug}) "
+                            f"was cancelled after {check_count} status checks (still open, never filled). "
+                            f"Order never filled, so principal remains unchanged."
+                        )
+                        continue
+                    else:
+                        # Not yet at 5 checks - log progress
+                        logger.debug(
+                            f"📝 Buy order {order_id} (trade {trade_id}) is open - check {check_count}/5 "
+                            f"(will cancel after 5 checks if still open)"
+                        )
             
             except Exception as e:
                 logger.error(f"Error checking order {order_id}: {e}", exc_info=True)
@@ -2547,7 +2647,10 @@ class ThresholdTrader:
                                             logger.info(f"🔄 Cancelling sell order {trade.sell_order_id} for market {trade.market_slug} via API...")
                                             cancel_result = self.pm.cancel_order(trade.sell_order_id)
                                             if cancel_result:
-                                                logger.info(f"✅ Successfully cancelled sell order {trade.sell_order_id} for market {trade.market_slug}")
+                                                logger.info(
+                                                    f"🚫 ORDER CANCELLED: Sell order {trade.sell_order_id} (trade {trade.id}, market {trade.market_slug}) "
+                                                    f"was cancelled because market resolved and order did not fill after {max_retries} retry attempts."
+                                                )
                                             else:
                                                 logger.warning(f"⚠️ Failed to cancel sell order {trade.sell_order_id} via API")
                                     # Update database to reflect that order is cancelled
