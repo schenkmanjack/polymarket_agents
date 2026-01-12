@@ -2573,17 +2573,17 @@ class ThresholdTrader:
                         if final_order_status:
                             final_status = final_order_status.get("status", "unknown")
                             if final_status in ["live", "LIVE", "open", "OPEN"]:
-                            # Verify order belongs to this market before canceling using utility function
-                            order_belongs_to_market = check_order_belongs_to_market(
-                                final_order_status,
-                                trade.market_id,
-                                trade.token_id,
-                            )
-                            if not order_belongs_to_market:
-                                logger.warning(
-                                    f"⚠️ Order {trade.sell_order_id} does not belong to market {trade.market_slug} "
-                                    f"(order_market={final_order_status.get('market')}, trade_market_id={trade.market_id}). Skipping cancellation."
+                                # Verify order belongs to this market before canceling using utility function
+                                order_belongs_to_market = check_order_belongs_to_market(
+                                    final_order_status,
+                                    trade.market_id,
+                                    trade.token_id,
                                 )
+                                if not order_belongs_to_market:
+                                    logger.warning(
+                                        f"⚠️ Order {trade.sell_order_id} does not belong to market {trade.market_slug} "
+                                        f"(order_market={final_order_status.get('market')}, trade_market_id={trade.market_id}). Skipping cancellation."
+                                    )
                                 
                                 if order_belongs_to_market:
                                     logger.info(
@@ -2828,7 +2828,8 @@ class ThresholdTrader:
             # IMPORTANT: principal_after_value should be the new principal after this trade
             # This is what gets saved to the database for this specific trade
             # It should reflect the actual principal after processing this trade's outcome
-            principal_after_value = new_principal if principal_updated else None
+            # Formula: principal_after = principal_before + net_payout
+            # We use self.principal (which was updated above) as the source of truth
             
             # Verify principal consistency: check the absolute latest principal_after in database
             # (including negative values) to see what the database actually has
@@ -2871,13 +2872,37 @@ class ThresholdTrader:
             finally:
                 session.close()
             
-            # Ensure principal_after_value is set correctly for this trade
-            # This is what gets saved to the database - it should be the new principal after this trade
+            # Calculate principal_after_value correctly: principal_before + net_payout
+            # Use trade.principal_before (stored when trade was created) + net_payout
+            # This ensures we're using the correct starting point, not relying on self.principal
+            # which might have been updated incorrectly
             if principal_updated:
-                principal_after_value = self.principal
+                # Use the trade's principal_before as the starting point to avoid any state issues
+                principal_before_from_trade = trade.principal_before or self.principal
+                principal_after_calculated = principal_before_from_trade + net_payout
+                
+                # Verify the calculation matches self.principal (with small tolerance for rounding)
+                if abs(principal_after_calculated - self.principal) > 0.01:
+                    logger.warning(
+                        f"⚠️ Principal calculation discrepancy! "
+                        f"principal_before (from trade): ${principal_before_from_trade:.2f}, "
+                        f"net_payout: ${net_payout:.2f}, "
+                        f"calculated principal_after: ${principal_after_calculated:.2f}, "
+                        f"self.principal: ${self.principal:.2f}. "
+                        f"Using calculated value to ensure correctness."
+                    )
+                    principal_after_value = principal_after_calculated
+                    # Also update self.principal to match
+                    self.principal = principal_after_calculated
+                else:
+                    principal_after_value = self.principal
+                
                 logger.info(
-                    f"💾 Saving principal_after=${principal_after_value:.2f} to database for trade {trade.id}"
+                    f"💾 Saving principal_after=${principal_after_value:.2f} to database for trade {trade.id} "
+                    f"(principal_before=${principal_before_from_trade:.2f}, net_payout=${net_payout:.2f})"
                 )
+            else:
+                principal_after_value = None
             
             # If sell order already filled (verified via API), use the recalculated values from API
             if trade.sell_order_id and sell_order_filled_via_api:
