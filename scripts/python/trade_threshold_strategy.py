@@ -1562,14 +1562,20 @@ class ThresholdTrader:
                             if trade:
                                 logger.info(f"🔄 Placing initial sell order for trade {trade.id} after buy fill...")
                                 # Immediately place sell order at 0.99 when buy fills
-                                await self._place_initial_sell_order(trade)
+                                try:
+                                    await self._place_initial_sell_order(trade)
+                                except Exception as sell_error:
+                                    logger.error(
+                                        f"❌ Failed to place initial sell order for trade {trade.id} after buy fill: {sell_error}",
+                                        exc_info=True
+                                    )
                             else:
                                 logger.error(f"❌ Trade {trade_id} not found after buy fill - cannot place sell order")
                             
                             # Remove from all_trades_to_check so we don't check it again below
                             all_trades_to_check.pop(fill_order_id, None)
         except Exception as e:
-            logger.debug(f"Could not check fills/trades: {e}")
+            logger.error(f"Error checking fills/trades for buy orders: {e}", exc_info=True)
         
         # Also check open orders - if order is NOT in open orders, it's likely filled
         try:
@@ -1609,8 +1615,15 @@ class ThresholdTrader:
                             # Reload trade from database to get updated filled_shares
                             trade = self.db.get_trade_by_id(trade_id)
                             if trade:
+                                logger.info(f"🔄 Placing initial sell order for trade {trade.id} after buy fill (detected via open orders check)...")
                                 # Immediately place sell order at 0.99 when buy fills
-                                await self._place_initial_sell_order(trade)
+                                try:
+                                    await self._place_initial_sell_order(trade)
+                                except Exception as sell_error:
+                                    logger.error(
+                                        f"❌ Failed to place initial sell order for trade {trade.id} after buy fill: {sell_error}",
+                                        exc_info=True
+                                    )
                             
                             # Remove from all_trades_to_check so we don't check it again below
                             all_trades_to_check.pop(order_id, None)
@@ -1744,105 +1757,6 @@ class ThresholdTrader:
         if not all_sell_orders_to_check:
             return
         
-        # First, check notifications for order fills (most reliable method)
-        # Notifications are pushed by Polymarket when orders fill
-        notifications_processed = set()
-        try:
-            if hasattr(self.pm, 'get_notifications'):
-                notifications = self.pm.get_notifications()
-                if notifications:
-                    logger.info(f"📬 Checking {len(notifications)} notifications for sell order fills...")
-                    for idx, notification in enumerate(notifications):
-                        # Log all notification details for debugging
-                        # Check payload first (where order_id is actually stored in Polymarket notifications)
-                        payload = notification.get("payload") or {}
-                        order_id = (
-                            payload.get("order_id") or 
-                            payload.get("orderID") or
-                            notification.get("orderID") or 
-                            notification.get("order_id") or 
-                            notification.get("id")
-                        )
-                        notification_type = str(notification.get("type") or notification.get("notification_type") or "unknown")
-                        notification_message = notification.get("message") or notification.get("text") or notification.get("content") or ""
-                        notification_title = notification.get("title") or ""
-                        notification_timestamp = notification.get("timestamp") or notification.get("created_at") or notification.get("time") or ""
-                        
-                        # Extract additional info from payload
-                        payload_side = payload.get("side") or ""
-                        payload_matched_size = payload.get("matched_size") or ""
-                        payload_price = payload.get("price") or ""
-                        
-                        logger.info(
-                            f"📬 Notification {idx + 1}/{len(notifications)}: "
-                            f"order_id={order_id}, type={notification_type}, "
-                            f"side={payload_side}, matched_size={payload_matched_size}, price={payload_price}, "
-                            f"title={notification_title}, message={notification_message[:200]}, "
-                            f"timestamp={notification_timestamp}"
-                        )
-                        
-                        if order_id and order_id in all_sell_orders_to_check:
-                            trade_id = all_sell_orders_to_check[order_id]
-                            trade = self.db.get_trade_by_id(trade_id)
-                            
-                            # Only process notifications for orders that are still open
-                            if not trade or trade.sell_order_status != "open":
-                                logger.debug(
-                                    f"⏭️ Skipping notification for order {order_id} (trade {trade_id}): "
-                                    f"order status is '{trade.sell_order_status if trade else 'not found'}' (not open)"
-                                )
-                                continue
-                            
-                            # Check if this is a fill notification
-                            # Notification type 2 appears to be order fill/match notifications
-                            # Only treat as filled if remaining_size is 0 (order fully filled)
-                            # matched_size > 0 alone doesn't mean filled - could be partial fill or old notification
-                            remaining_size = payload.get("remaining_size") or ""
-                            matched_size = payload.get("matched_size") or ""
-                            
-                            # Only treat as fully filled if remaining_size is explicitly "0" and matched_size > 0
-                            is_fully_filled = (
-                                remaining_size == "0" and 
-                                matched_size and 
-                                matched_size != "0" and 
-                                float(matched_size) > 0
-                            )
-                            
-                            # Also check message/title for explicit fill indicators
-                            has_fill_keywords = (
-                                "fill" in notification_message.lower() or
-                                "filled" in notification_message.lower() or
-                                "fill" in notification_title.lower() or
-                                "filled" in notification_title.lower()
-                            )
-                            
-                            is_fill_notification = is_fully_filled or has_fill_keywords
-                            
-                            logger.debug(
-                                f"🔍 Notification analysis for order {order_id} (trade {trade_id}): "
-                                f"type={notification_type}, remaining_size={remaining_size}, matched_size={matched_size}, "
-                                f"is_fully_filled={is_fully_filled}, has_fill_keywords={has_fill_keywords}, "
-                                f"is_fill_notification={is_fill_notification}"
-                            )
-                            
-                            if is_fill_notification:
-                                logger.info(
-                                    f"🔔🔔🔔 NOTIFICATION MATCH: Sell order {order_id} (trade {trade_id}) FILLED via notification! "
-                                    f"Type: {notification_type}, remaining_size={remaining_size}, matched_size={matched_size}, "
-                                    f"Title: {notification_title}, Message: {notification_message[:200]}"
-                                )
-                                # Mark this order for immediate processing (skip the 10-second delay)
-                                notifications_processed.add(order_id)
-                            else:
-                                logger.debug(
-                                    f"⏭️ Notification for order {order_id} (trade {trade_id}) does not indicate fill: "
-                                    f"remaining_size={remaining_size}, matched_size={matched_size}"
-                                )
-                else:
-                    logger.debug("No notifications returned from API")
-        except Exception as e:
-            logger.warning(f"Could not check notifications: {e}", exc_info=True)
-        
         # Check fills/trades to see if any sell orders have been filled
         # This is more reliable than get_order_status for filled orders
         # Trade records are created when orders are partially or fully filled
@@ -1851,7 +1765,8 @@ class ThresholdTrader:
         if not all_sell_orders_to_check:
             return
         
-        # Filter by our wallet address to get only our trades (more efficient)
+        # Get trade records - check both with and without maker_address filter
+        # If we're the maker, filtering helps. If we're the taker, we need unfiltered results.
         try:
             # Get our wallet address for filtering
             wallet_address = None
@@ -1860,7 +1775,49 @@ class ThresholdTrader:
             elif hasattr(self.pm, 'get_address_for_private_key'):
                 wallet_address = self.pm.get_address_for_private_key()
             
+            # First try with maker_address filter (more efficient if we're the maker)
             fills = self.pm.get_trades(maker_address=wallet_address)
+            
+            # Also get trades without filter to catch cases where we're the taker
+            # Only do this if we didn't find any matches in filtered results
+            if fills:
+                # Quick check: see if any of our sell orders appear in filtered results
+                found_any_match = False
+                for fill in fills:
+                    maker_orders = fill.get("maker_orders") or []
+                    taker_order_id = fill.get("taker_order_id")
+                    # Extract order IDs from maker_orders
+                    maker_order_ids = []
+                    if isinstance(maker_orders, list):
+                        for maker_order in maker_orders:
+                            if isinstance(maker_order, dict):
+                                maker_order_id = maker_order.get("order_id") or maker_order.get("orderID")
+                                if maker_order_id:
+                                    maker_order_ids.append(maker_order_id)
+                    # Check if any of our sell orders match
+                    for sell_order_id in all_sell_orders_to_check.keys():
+                        if sell_order_id in maker_order_ids or taker_order_id == sell_order_id:
+                            found_any_match = True
+                            break
+                    if found_any_match:
+                        break
+                
+                # If we didn't find any matches, also check unfiltered trades (we might be the taker)
+                if not found_any_match:
+                    logger.info(
+                        f"🔍 No sell orders found in filtered trade records (maker_address={wallet_address[:10] if wallet_address else 'N/A'}...). "
+                        f"Checking unfiltered trade records (in case we were the taker)..."
+                    )
+                    fills_unfiltered = self.pm.get_trades()  # No filter - get all trades
+                    if fills_unfiltered:
+                        # Combine both lists, removing duplicates
+                        existing_order_ids = {f.get("taker_order_id") for f in fills if f.get("taker_order_id")}
+                        fills.extend([f for f in fills_unfiltered if f.get("taker_order_id") not in existing_order_ids])
+                        logger.info(f"📊 Combined {len(fills)} trade records (filtered + unfiltered)")
+            else:
+                # No filtered results - try unfiltered
+                logger.info(f"🔍 No filtered trade records found. Checking unfiltered trade records...")
+                fills = self.pm.get_trades()  # No filter
             if fills:
                 logger.info(f"📊 Checking {len(fills)} trade records for sell order fills...")
                 logger.info(f"🔍 Looking for sell orders: {list(all_sell_orders_to_check.keys())}")
@@ -1890,16 +1847,27 @@ class ThresholdTrader:
                     )
                     
                     # Try to find our sell order ID in either maker_orders or taker_order_id
+                    # maker_orders is a list of dictionaries, each with an 'order_id' field
                     fill_order_id = None
                     matched_in = None
                     for sell_order_id in all_sell_orders_to_check.keys():
-                        if sell_order_id in maker_orders:
+                        # Check if our order ID is in the maker_orders list (extract order_id from each dict)
+                        maker_order_ids = []
+                        if isinstance(maker_orders, list):
+                            for maker_order in maker_orders:
+                                if isinstance(maker_order, dict):
+                                    maker_order_id = maker_order.get("order_id") or maker_order.get("orderID")
+                                    if maker_order_id:
+                                        maker_order_ids.append(maker_order_id)
+                        
+                        if sell_order_id in maker_order_ids:
                             fill_order_id = sell_order_id
                             matched_in = "maker_orders"
                             logger.info(
                                 f"✅✅✅ MATCH FOUND: Sell order {sell_order_id} found in maker_orders list "
                                 f"(we were the maker). Trade record: status={fill.get('status')}, "
-                                f"size={fill.get('size')}, price={fill.get('price')}"
+                                f"size={fill.get('size')}, price={fill.get('price')}, "
+                                f"maker_order_ids={maker_order_ids}"
                             )
                             break
                         elif taker_order_id == sell_order_id:
@@ -2324,6 +2292,27 @@ class ThresholdTrader:
             
             if trade.order_status in ["cancelled", "failed"]:
                 logger.info(f"Trade {trade.id} has status '{trade.order_status}' - skipping resolution (order did not execute)")
+                return
+            
+            # Check if sell order already filled - if so, skip market resolution processing
+            # The sell order fill handler already updated principal and ROI correctly
+            if trade.sell_order_id and trade.sell_order_status == "filled" and trade.sell_dollars_received:
+                logger.info(
+                    f"Trade {trade.id} sell order already filled (sell_order_id={trade.sell_order_id}, "
+                    f"sell_order_status={trade.sell_order_status}) - skipping market resolution processing. "
+                    f"Principal and ROI already updated from sell order fill."
+                )
+                # Just mark market as resolved without recalculating
+                self.db.update_trade_outcome(
+                    trade_id=trade.id,
+                    outcome_price=trade.sell_order_price if trade.sell_order_price else 0.99,
+                    payout=trade.payout if trade.payout else trade.sell_dollars_received,
+                    net_payout=trade.net_payout,
+                    roi=trade.roi,
+                    is_win=True,  # If we sold at $0.99, we won
+                    principal_after=trade.principal_after,
+                    winning_side=trade.order_side,  # We sold at $0.99, so our bet was correct
+                )
                 return
             
             # Check if order was actually filled
