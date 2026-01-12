@@ -53,6 +53,18 @@ from agents.polymarket.btc_market_detector import (
 from agents.polymarket.market_finder import get_token_ids_from_market
 from agents.backtesting.backtesting_utils import parse_outcome_price, enrich_market_from_api
 from agents.backtesting.market_fetcher import HistoricalMarketFetcher
+from agents.trading.utils import (
+    calculate_order_size_with_fees,
+    calculate_kelly_amount,
+    calculate_payout_for_filled_sell,
+    calculate_payout_for_unfilled_sell,
+    parse_order_status,
+    is_order_filled,
+    is_order_cancelled,
+    is_order_partial_fill,
+    validate_trade_for_resolution,
+    check_order_belongs_to_market,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1327,104 +1339,37 @@ class ThresholdTrader:
         amount_invested = self.config.get_amount_invested(self.principal)
         
         # Log if bet limit is capping the Kelly-calculated amount
-        kelly_amount = self.principal * self.config.kelly_fraction * self.config.kelly_scale_factor
+        kelly_amount = calculate_kelly_amount(
+            self.principal,
+            self.config.kelly_fraction,
+            self.config.kelly_scale_factor,
+        )
         if amount_invested < kelly_amount:
             logger.info(
                 f"Bet size capped by dollar_bet_limit: Kelly suggests ${kelly_amount:.2f}, "
                 f"but limited to ${amount_invested:.2f} (dollar_bet_limit=${self.config.dollar_bet_limit:.2f})"
             )
         
-        # Calculate order size accounting for fees
-        # IMPORTANT: Fees reduce the SHARES RECEIVED, not just add to cost
-        # If we order X shares at price P:
-        #   - Cost = X * P
-        #   - Fee = (X * P) * fee_multiplier
-        #   - Shares lost = Fee / P = X * fee_multiplier
-        #   - Shares received = X - X * fee_multiplier = X * (1 - fee_multiplier)
-        # To get N shares after fees: N = X * (1 - fee_multiplier)
-        # Therefore: X = N / (1 - fee_multiplier)
+        # Calculate order size accounting for fees using utility function
+        order_size, order_value, estimated_shares_received, estimated_fee = calculate_order_size_with_fees(
+            amount_invested=amount_invested,
+            order_price=order_price,
+            dollar_bet_limit=self.config.dollar_bet_limit,
+            min_order_value=1.0,
+        )
         
-        from agents.backtesting.backtesting_utils import calculate_polymarket_fee
-        
-        # Start with desired shares based on amount_invested (this is what we want AFTER fees)
-        desired_shares_after_fee = amount_invested / order_price
-        
-        # Calculate fee multiplier
-        fee_rate = 0.25
-        exponent = 2
-        p_times_one_minus_p = order_price * (1.0 - order_price)
-        fee_multiplier = fee_rate * (p_times_one_minus_p ** exponent)
-        
-        # Calculate how many shares we need to ORDER to get desired_shares_after_fee
-        # shares_received = shares_ordered * (1 - fee_multiplier)
-        # So: shares_ordered = shares_received / (1 - fee_multiplier)
-        if fee_multiplier < 1.0:  # Avoid division by zero
-            shares_to_order = desired_shares_after_fee / (1.0 - fee_multiplier)
-            
-            # Calculate order value and cap at dollar_bet_limit
-            order_value_with_fee = shares_to_order * order_price
-            if order_value_with_fee > self.config.dollar_bet_limit:
-                # Cap at dollar_bet_limit, recalculate shares
-                order_value_with_fee = self.config.dollar_bet_limit
-                shares_to_order = order_value_with_fee / order_price
-                # Recalculate what we'll get after fees
-                desired_shares_after_fee = shares_to_order * (1.0 - fee_multiplier)
-            
-            # Log fee adjustment
-            estimated_fee = order_value_with_fee * fee_multiplier
-            estimated_shares_received = shares_to_order * (1.0 - fee_multiplier)
-            logger.info(
-                f"Fee adjustment for shares: ordering {shares_to_order:.4f} shares to get ~{estimated_shares_received:.4f} shares after fees. "
-                f"Order value: ${order_value_with_fee:.2f}, estimated fee: ${estimated_fee:.4f}"
-            )
-        else:
-            shares_to_order = desired_shares_after_fee
-            order_value_with_fee = shares_to_order * order_price
-        
-        # Round UP to whole shares to ensure we get at least the desired shares after fees
-        # (Polymarket requires whole shares - fractional shares not supported)
-        # Note: After rounding up, order_value may slightly exceed dollar_bet_limit, which is acceptable
-        order_size = math.ceil(shares_to_order)
-        
-        # Calculate actual order value
-        order_value = order_size * order_price
-        
-        # Polymarket minimum order value is $1.00
-        MIN_ORDER_VALUE = 1.00
-        
-        if order_size < 1:
-            logger.warning(f"Order size too small: {order_size} shares (amount_invested=${amount_invested:.2f})")
+        if order_size is None:
+            logger.warning(f"Order size calculation failed (amount_invested=${amount_invested:.2f})")
             return
         
-        # Check if order value meets minimum requirement
-        if order_value < MIN_ORDER_VALUE:
-            # Try to increase order size to meet minimum
-            # Use math.ceil to properly round up: ceil(1.00 / 0.97) = ceil(1.031) = 2
-            min_order_size = math.ceil(MIN_ORDER_VALUE / order_price)
-            new_order_value = min_order_size * order_price
-            
-            # Check if rounded-up amount exceeds dollar_bet_limit
-            if new_order_value > self.config.dollar_bet_limit:
-                logger.warning(
-                    f"Order value ${order_value:.2f} below minimum ${MIN_ORDER_VALUE:.2f}, "
-                    f"but rounding up to ${new_order_value:.2f} would exceed dollar_bet_limit "
-                    f"${self.config.dollar_bet_limit:.2f}. Skipping order."
-                )
-                return
-            
-            # Round up to meet minimum (using Kelly-calculated amount_invested)
-            # Kelly amount is already calculated, so we just need to round up the order size
-            logger.info(
-                f"Order value ${order_value:.2f} below minimum ${MIN_ORDER_VALUE:.2f}. "
-                f"Rounding up order size from {order_size} to {min_order_size} shares "
-                f"(new order_value=${new_order_value:.2f}, "
-                f"Kelly amount_invested=${amount_invested:.2f}, "
-                f"within dollar_bet_limit=${self.config.dollar_bet_limit:.2f})"
-            )
-            order_size = min_order_size
-            order_value = new_order_value
-            # Update amount_invested to reflect the larger order (for logging/record keeping)
-            amount_invested = new_order_value
+        # Log fee adjustment
+        logger.info(
+            f"Fee adjustment for shares: ordering {order_size} shares to get ~{estimated_shares_received:.4f} shares after fees. "
+            f"Order value: ${order_value:.2f}, estimated fee: ${estimated_fee:.4f}"
+        )
+        
+        # Update amount_invested to reflect the actual order value (for logging/record keeping)
+        amount_invested = order_value
         
         # Verify market is still active before placing order
         if not is_market_active(market):
@@ -1790,21 +1735,16 @@ class ThresholdTrader:
                 # Order found - clear retry count
                 self.orders_not_found.pop(order_id, None)
                 
-                # Parse order status
-                status = order_status.get("status", "unknown")
-                filled_amount = order_status.get("filledAmount", order_status.get("filled_amount", 0))
-                total_amount = order_status.get("totalAmount", order_status.get("total_amount", 0))
+                # Parse order status using utility function
+                status, filled_amount, total_amount = parse_order_status(order_status)
                 
                 trade = self.db.get_trade_by_id(trade_id)
                 if not trade:
                     continue
                 
-                # Check if order is filled or cancelled
-                # Handle various status values that might indicate filled
-                is_filled = status in ["filled", "FILLED", "complete", "COMPLETE"] or (
-                    filled_amount and total_amount and float(filled_amount) >= float(total_amount)
-                )
-                is_cancelled = status in ["cancelled", "CANCELLED", "canceled", "CANCELED"]
+                # Check if order is filled or cancelled using utility functions
+                is_filled = is_order_filled(status, filled_amount, total_amount)
+                is_cancelled = is_order_cancelled(status)
                 
                 if is_filled or is_cancelled:
                     if is_filled and not trade.filled_shares:
@@ -2165,44 +2105,16 @@ class ThresholdTrader:
                 # Sell order found - clear retry count
                 self.sell_orders_not_found.pop(sell_order_id, None)
                 
-                # Parse order status
-                # Check multiple field names (API may return different field names)
-                # Gemini's code uses size_matched and original_size, which might be more reliable
-                status = order_status.get("status", "unknown")
-                filled_amount = (
-                    order_status.get("size_matched") or  # Gemini's code uses this
-                    order_status.get("filledAmount") or 
-                    order_status.get("filled_amount") or 
-                    0
-                )
-                total_amount = (
-                    order_status.get("original_size") or  # Gemini's code uses this
-                    order_status.get("totalAmount") or 
-                    order_status.get("total_amount") or 
-                    0
-                )
-                
-                # Convert to float if they're strings
-                try:
-                    filled_amount = float(filled_amount) if filled_amount else 0
-                except (ValueError, TypeError):
-                    filled_amount = 0
-                try:
-                    total_amount = float(total_amount) if total_amount else 0
-                except (ValueError, TypeError):
-                    total_amount = 0
+                # Parse order status using utility function
+                status, filled_amount, total_amount = parse_order_status(order_status)
                 
                 trade = self.db.get_trade_by_id(trade_id)
                 if not trade:
                     continue
                 
-                # Check if sell order is filled or cancelled
-                # Also check for "matched" status which indicates the order was filled immediately
-                # Check if filled_amount equals or exceeds total_amount (order is fully filled)
-                is_filled = status in ["filled", "FILLED", "complete", "COMPLETE", "matched", "MATCHED"] or (
-                    filled_amount > 0 and total_amount > 0 and filled_amount >= total_amount
-                )
-                is_cancelled = status in ["cancelled", "CANCELLED", "canceled", "CANCELED"]
+                # Check if sell order is filled or cancelled using utility functions
+                is_filled = is_order_filled(status, filled_amount, total_amount)
+                is_cancelled = is_order_cancelled(status)
                 
                 # Log order status for debugging
                 if trade.sell_order_status == "open":
@@ -2279,9 +2191,9 @@ class ThresholdTrader:
                     self.open_sell_orders.pop(sell_order_id, None)
                     self.sell_orders_not_found.pop(sell_order_id, None)
                 
-                elif status == "open" and filled_amount and float(filled_amount) > 0:
+                elif is_order_partial_fill(status, filled_amount, total_amount):
                     # Partial fill - update sell order
-                    filled_shares = float(filled_amount)
+                    filled_shares = filled_amount
                     sell_price = trade.sell_order_price or 0.99
                     sell_dollars_received = filled_shares * sell_price
                     
@@ -2377,14 +2289,10 @@ class ThresholdTrader:
     async def _process_market_resolution(self, trade: RealTradeThreshold, market: Dict):
         """Process market resolution and update principal."""
         try:
-            # Only process trades that actually executed
-            # Skip if order was never placed, cancelled, or never filled
-            if not trade.order_id:
-                logger.warning(f"Trade {trade.id} has no order_id - skipping resolution (order never placed)")
-                return
-            
-            if trade.order_status in ["cancelled", "failed"]:
-                logger.info(f"Trade {trade.id} has status '{trade.order_status}' - skipping resolution (order did not execute)")
+            # Validate trade using utility function
+            is_valid, error_message = validate_trade_for_resolution(trade)
+            if not is_valid:
+                logger.warning(f"Trade {trade.id}: {error_message} - skipping resolution")
                 return
             
             # Wait 5 seconds after market resolution to allow API to update
@@ -2437,37 +2345,14 @@ class ThresholdTrader:
                         
                         order_status = self.pm.get_order_status(trade.sell_order_id)
                         if order_status:
-                            sell_order_api_status = order_status.get("status", "unknown")
-                            filled_amount = (
-                                order_status.get("size_matched") or
-                                order_status.get("filledAmount") or
-                                order_status.get("filled_amount") or
-                                0
-                            )
-                            total_amount = (
-                                order_status.get("original_size") or
-                                order_status.get("totalAmount") or
-                                order_status.get("total_amount") or
-                                0
-                            )
-                            try:
-                                sell_order_filled_amount = float(filled_amount) if filled_amount else 0
-                            except (ValueError, TypeError):
-                                sell_order_filled_amount = 0
-                            try:
-                                sell_order_total_amount = float(total_amount) if total_amount else 0
-                            except (ValueError, TypeError):
-                                sell_order_total_amount = 0
+                            # Parse order status using utility function
+                            sell_order_api_status, sell_order_filled_amount, sell_order_total_amount = parse_order_status(order_status)
                             
-                            # Determine if order is filled based on API response
-                            is_filled_by_status = sell_order_api_status in ["filled", "FILLED", "complete", "COMPLETE", "matched", "MATCHED"]
-                            is_filled_by_amount = sell_order_filled_amount > 0 and sell_order_total_amount > 0 and sell_order_filled_amount >= sell_order_total_amount
-                            sell_order_filled_via_api = is_filled_by_status or is_filled_by_amount
+                            # Determine if order is filled based on API response using utility function
+                            sell_order_filled_via_api = is_order_filled(sell_order_api_status, sell_order_filled_amount, sell_order_total_amount)
                             
-                            # Check for partial fills - if filled_amount > 0 but < total_amount, it's partial
-                            is_partial_fill = (sell_order_filled_amount > 0 and 
-                                             sell_order_total_amount > 0 and 
-                                             sell_order_filled_amount < sell_order_total_amount)
+                            # Check for partial fills using utility function
+                            is_partial_fill = is_order_partial_fill(sell_order_api_status, sell_order_filled_amount, sell_order_total_amount)
                             
                             logger.info(
                                 f"🔍 Sell order API check (attempt {attempt + 1}/{max_retries}): "
@@ -2688,18 +2573,17 @@ class ThresholdTrader:
                         if final_order_status:
                             final_status = final_order_status.get("status", "unknown")
                             if final_status in ["live", "LIVE", "open", "OPEN"]:
-                                # Verify order belongs to this market before canceling
-                                order_belongs_to_market = False
-                                order_market = final_order_status.get("market")
-                                order_asset_id = final_order_status.get("asset_id")
-                                # Check if order's market or asset_id matches this trade's market
-                                if order_market == trade.market_id or order_asset_id == trade.token_id:
-                                    order_belongs_to_market = True
-                                else:
-                                    logger.warning(
-                                        f"⚠️ Order {trade.sell_order_id} does not belong to market {trade.market_slug} "
-                                        f"(order_market={order_market}, trade_market_id={trade.market_id}). Skipping cancellation."
-                                    )
+                            # Verify order belongs to this market before canceling using utility function
+                            order_belongs_to_market = check_order_belongs_to_market(
+                                final_order_status,
+                                trade.market_id,
+                                trade.token_id,
+                            )
+                            if not order_belongs_to_market:
+                                logger.warning(
+                                    f"⚠️ Order {trade.sell_order_id} does not belong to market {trade.market_slug} "
+                                    f"(order_market={final_order_status.get('market')}, trade_market_id={trade.market_id}). Skipping cancellation."
+                                )
                                 
                                 if order_belongs_to_market:
                                     logger.info(
@@ -2736,15 +2620,10 @@ class ThresholdTrader:
                     except Exception as e:
                         logger.warning(f"Could not check final order status for cancellation: {e}")
             
-            # Check if order was actually filled
-            filled_shares = trade.filled_shares or 0.0
-            dollars_spent = trade.dollars_spent or 0.0
-            
-            if filled_shares <= 0 or dollars_spent <= 0:
-                logger.warning(
-                    f"Trade {trade.id} was not filled (filled_shares={filled_shares}, "
-                    f"dollars_spent=${dollars_spent:.2f}) - skipping resolution (order did not execute)"
-                )
+            # Validate trade again (in case state changed)
+            is_valid, error_message = validate_trade_for_resolution(trade)
+            if not is_valid:
+                logger.warning(f"Trade {trade.id}: {error_message} - skipping resolution")
                 # Mark as cancelled/unfilled if not already marked
                 if trade.order_status not in ["cancelled", "failed"]:
                     self.db.update_order_status(
@@ -2753,6 +2632,9 @@ class ThresholdTrader:
                         error_message="Order never filled before market resolution"
                     )
                 return
+            
+            filled_shares = trade.filled_shares or 0.0
+            dollars_spent = trade.dollars_spent or 0.0
             
             # Get outcome prices
             outcome_prices_raw = market.get("outcomePrices")
@@ -2832,11 +2714,13 @@ class ThresholdTrader:
                     from agents.backtesting.backtesting_utils import calculate_polymarket_fee
                     sell_fee = calculate_polymarket_fee(sell_price, sell_dollars_received)
                 
-                payout = sell_dollars_received
-                net_payout = sell_dollars_received - sell_fee - dollars_spent - fee
-                # ROI = (after - before) / before
-                # where after = sell_dollars_received - sell_fee, before = dollars_spent + fee
-                roi = net_payout / (dollars_spent + fee) if (dollars_spent + fee) > 0 else 0.0
+                # Calculate payout, net_payout, and ROI using utility function
+                payout, net_payout, roi = calculate_payout_for_filled_sell(
+                    sell_dollars_received=sell_dollars_received,
+                    sell_fee=sell_fee,
+                    dollars_spent=dollars_spent,
+                    buy_fee=fee,
+                )
                 
                 logger.info(
                     f"Trade {trade.id} sell order FILLED (verified via API): "
@@ -2846,19 +2730,16 @@ class ThresholdTrader:
                 )
             elif not trade.sell_order_id or not sell_order_filled_via_api or trade.sell_order_status == "cancelled" or trade.sell_order_status == "failed":
                 # Sell order didn't fill, doesn't exist, was cancelled, or failed
-                # Determine win/loss based on outcome_price
-                # If we bet YES: we won if outcome_price > 0.5, lost if outcome_price < 0.5
-                # If we bet NO: we won if outcome_price < 0.5, lost if outcome_price > 0.5
-                if trade.order_side == "YES":
-                    bet_won = outcome_price > 0.5
-                else:  # NO
-                    bet_won = outcome_price < 0.5
+                # Calculate payout, net_payout, and ROI using utility function
+                bet_won, payout, net_payout, roi = calculate_payout_for_unfilled_sell(
+                    outcome_price=outcome_price,
+                    filled_shares=filled_shares,
+                    order_side=trade.order_side,
+                    dollars_spent=dollars_spent,
+                    buy_fee=fee,
+                )
                 
                 if not bet_won:
-                    # We lost - shares are worthless
-                    payout = 0.0
-                    net_payout = -dollars_spent - fee  # Lost the entire bet (buy cost + buy fee)
-                    roi = net_payout / (dollars_spent + fee) if (dollars_spent + fee) > 0 else 0.0
                     logger.info(
                         f"Trade {trade.id} lost - market resolved against us (outcome_price={outcome_price:.4f}). "
                         f"Sell order did not fill, was cancelled, or failed (sell_order_id={trade.sell_order_id}, "
@@ -2866,16 +2747,11 @@ class ThresholdTrader:
                         f"All shares lost. Calculating ROI and updating principal."
                     )
                 else:
-                    # We won but sell order didn't fill or was cancelled
-                    # Market resolved in our favor - shares are worth $1 each (outcome_price = 1.0)
-                    # Calculate as if we claim at $1 per share, accounting for sell fees
-                    payout = outcome_price * filled_shares  # Should be $1 * shares = total claimable
-                    
-                    # Calculate sell fee as if we sold at $1 per share
+                    # Update sell_fee in database if not already set (for tracking)
+                    # Calculate estimated sell fee for logging
                     from agents.backtesting.backtesting_utils import calculate_polymarket_fee
                     estimated_sell_fee = calculate_polymarket_fee(1.0, payout)  # Fee for selling at $1
                     
-                    # Update sell_fee in database if not already set (for tracking)
                     if not trade.sell_fee:
                         session = self.db.SessionLocal()
                         try:
@@ -2889,10 +2765,6 @@ class ThresholdTrader:
                             logger.warning(f"Could not update sell_fee: {e}")
                         finally:
                             session.close()
-                    
-                    # Net payout accounts for both buy and sell fees
-                    net_payout = payout - estimated_sell_fee - dollars_spent - fee
-                    roi = net_payout / (dollars_spent + fee) if (dollars_spent + fee) > 0 else 0.0
                     
                     logger.info(
                         f"Trade {trade.id} won but sell order did not fill, was cancelled, or failed "
