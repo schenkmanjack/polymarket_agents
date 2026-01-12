@@ -323,7 +323,7 @@ class TradeDatabase:
         payout: float,
         net_payout: float,
         roi: float,
-        is_win: bool,
+        is_win: Optional[bool],
         principal_after: float,
         winning_side: Optional[str] = None,
     ):
@@ -336,7 +336,7 @@ class TradeDatabase:
                 trade.payout = payout
                 trade.net_payout = net_payout
                 trade.roi = roi
-                trade.is_win = is_win
+                trade.is_win = is_win  # Can be None (NULL in database)
                 trade.principal_after = principal_after
                 trade.market_resolved_at = datetime.now(timezone.utc)
                 if winning_side:
@@ -592,30 +592,6 @@ class TradeDatabase:
             
             count = query.count()
             return count > 0
-        finally:
-            session.close()
-    
-    def get_resolved_trades(self, deployment_id: Optional[str] = None) -> List[RealTradeThreshold]:
-        """
-        Get all resolved trades.
-        
-        Args:
-            deployment_id: Optional deployment ID to filter by. If provided, only returns
-                          trades from that deployment. If None, returns all resolved trades.
-        """
-        session = self.SessionLocal()
-        try:
-            query = session.query(RealTradeThreshold).filter(
-                RealTradeThreshold.market_resolved_at.isnot(None),
-                RealTradeThreshold.is_win == True,  # Only winning trades
-                RealTradeThreshold.outcome_price.isnot(None),
-            )
-            
-            # Filter by deployment_id if provided
-            if deployment_id is not None:
-                query = query.filter(RealTradeThreshold.deployment_id == deployment_id)
-            
-            return query.all()
         finally:
             session.close()
     

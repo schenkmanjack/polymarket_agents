@@ -2069,10 +2069,6 @@ class ThresholdTrader:
                                 # Calculate ROI: net_profit / total_cost
                                 roi = net_profit / total_cost if total_cost > 0 else 0.0
                                 
-                                # If we sold at $0.99, the market resolved in our favor (we won the bet)
-                                # is_win should be True if we bet on the winning side (sold at $0.99 means we were right)
-                                is_win = (sell_price >= 0.99)  # Selling at $0.99 means market resolved in our favor
-                                
                                 # Update trade with final principal
                                 if trade.market_resolved_at:
                                     # Market already resolved - update with outcome info
@@ -2082,25 +2078,22 @@ class ThresholdTrader:
                                         payout=sell_dollars_received,
                                         net_payout=net_profit,
                                         roi=roi,
-                                        is_win=is_win,
+                                        is_win=None,  # Leave is_win as NULL
                                         principal_after=new_principal,
                                         winning_side=trade.winning_side,
                                     )
                                 else:
-                                    # Early sell - market not resolved yet, but we sold at $0.99 so we won
-                                    # Set winning_side to the side we bet on (since selling at $0.99 means we were right)
-                                    winning_side = trade.order_side if is_win else None
-                                    
+                                    # Early sell - market not resolved yet
                                     session = self.db.SessionLocal()
                                     try:
                                         trade_obj = session.query(RealTradeThreshold).filter_by(id=trade_id).first()
                                         if trade_obj:
                                             trade_obj.principal_after = new_principal
                                             trade_obj.roi = roi
-                                            trade_obj.is_win = is_win
+                                            trade_obj.is_win = None  # Leave is_win as NULL
                                             trade_obj.net_payout = net_profit
                                             trade_obj.payout = sell_dollars_received
-                                            trade_obj.winning_side = winning_side
+                                            # winning_side not set here - leave as is
                                             session.commit()
                                     except Exception as e:
                                         session.rollback()
@@ -2120,7 +2113,6 @@ class ThresholdTrader:
                                     f"  Total Cost (buy): ${total_cost:.2f}\n"
                                     f"  Net Profit: ${net_profit:.2f}\n"
                                     f"  ROI: {roi*100:.2f}%\n"
-                                    f"  Is Win: {is_win}\n"
                                     f"  Principal: ${self.principal:.2f} -> ${new_principal:.2f}"
                                 )
                                 
@@ -2267,9 +2259,6 @@ class ThresholdTrader:
                         # Calculate ROI: net_profit / total_cost
                         roi = net_profit / total_cost if total_cost > 0 else 0.0
                         
-                        # If we sold at $0.99, the market resolved in our favor (we won the bet)
-                        is_win = (sell_price >= 0.99)  # Selling at $0.99 means market resolved in our favor
-                        
                         # Update trade with final principal
                         if trade.market_resolved_at:
                             # Market already resolved - update with outcome info
@@ -2279,25 +2268,22 @@ class ThresholdTrader:
                                 payout=sell_dollars_received,
                                 net_payout=net_profit,
                                 roi=roi,
-                                is_win=is_win,
+                                is_win=None,  # Leave is_win as NULL
                                 principal_after=new_principal,
                                 winning_side=trade.winning_side,
                             )
                         else:
-                            # Early sell - market not resolved yet, but we sold at $0.99 so we won
-                            # Set winning_side to the side we bet on (since selling at $0.99 means we were right)
-                            winning_side = trade.order_side if is_win else None
-                            
+                            # Early sell - market not resolved yet
                             session = self.db.SessionLocal()
                             try:
                                 trade_obj = session.query(RealTradeThreshold).filter_by(id=trade_id).first()
                                 if trade_obj:
                                     trade_obj.principal_after = new_principal
                                     trade_obj.roi = roi
-                                    trade_obj.is_win = is_win
+                                    trade_obj.is_win = None  # Leave is_win as NULL
                                     trade_obj.net_payout = net_profit
                                     trade_obj.payout = sell_dollars_received
-                                    trade_obj.winning_side = winning_side
+                                    # winning_side not set here - leave as is
                                     session.commit()
                             except Exception as e:
                                 session.rollback()
@@ -2511,6 +2497,14 @@ class ThresholdTrader:
                                         logger.error(f"Error updating sell order status from API: {e}")
                                     finally:
                                         session.close()
+                                
+                                # Remove from open_sell_orders so new trades can proceed
+                                self.open_sell_orders.pop(trade.sell_order_id, None)
+                                logger.info(
+                                    f"✅ Removed sell order {trade.sell_order_id} from open_sell_orders "
+                                    f"(now {len(self.open_sell_orders)} open sell orders)"
+                                )
+                                
                                 break  # Exit retry loop - order is filled
                             else:
                                 # Order not filled yet - retry if we haven't exhausted attempts
@@ -2570,6 +2564,13 @@ class ThresholdTrader:
                                         logger.error(f"Error updating sell order status: {e}")
                                     finally:
                                         session.close()
+                                    
+                                    # Remove from open_sell_orders so new trades can proceed
+                                    self.open_sell_orders.pop(trade.sell_order_id, None)
+                                    logger.info(
+                                        f"✅ Removed cancelled sell order {trade.sell_order_id} from open_sell_orders "
+                                        f"(now {len(self.open_sell_orders)} open sell orders)"
+                                    )
                         else:
                             # Order not found in API - retry if we haven't exhausted attempts
                             if attempt < max_retries - 1:
@@ -2597,6 +2598,13 @@ class ThresholdTrader:
                                     logger.error(f"Error updating sell order status: {e}")
                                 finally:
                                     session.close()
+                                
+                                # Remove from open_sell_orders so new trades can proceed
+                                self.open_sell_orders.pop(trade.sell_order_id, None)
+                                logger.info(
+                                    f"✅ Removed cancelled sell order {trade.sell_order_id} from open_sell_orders "
+                                    f"(now {len(self.open_sell_orders)} open sell orders)"
+                                )
                     except Exception as e:
                         logger.error(
                             f"Error checking sell order status via API (attempt {attempt + 1}/{max_retries}): {e}",
@@ -2652,6 +2660,13 @@ class ThresholdTrader:
                                     logger.error(f"Error updating sell order status: {e}")
                                 finally:
                                     session.close()
+                                
+                                # Remove from open_sell_orders so new trades can proceed
+                                self.open_sell_orders.pop(trade.sell_order_id, None)
+                                logger.info(
+                                    f"✅ Removed cancelled sell order {trade.sell_order_id} from open_sell_orders "
+                                    f"(now {len(self.open_sell_orders)} open sell orders)"
+                                )
                     except Exception as e:
                         logger.warning(f"Could not check final order status for cancellation: {e}")
             
@@ -2715,10 +2730,6 @@ class ThresholdTrader:
                 elif outcome_prices_raw.get("No") == 1:
                     winning_side = "NO"
             
-            # Calculate is_win: check if we bet on the winning side (YES/NO question)
-            # This is independent of ROI - it's simply: did we bet on the side that won?
-            is_win = (winning_side is not None and trade.order_side == winning_side)
-            
             # Calculate payout and ROI based on actual proceeds from selling
             # ROI accounts for fees on both buy and sell orders
             # Use API result (sell_order_filled_via_api) not database field
@@ -2760,22 +2771,30 @@ class ThresholdTrader:
                     f"payout=${payout:.2f}, sell_fee=${sell_fee:.4f}, "
                     f"net_payout=${net_payout:.2f}, roi={roi*100:.2f}%"
                 )
-            elif not is_win:
-                # We lost - shares are worthless
-                # Sell order didn't fill (verified via API) - we lost the bet
-                payout = 0.0
-                net_payout = -dollars_spent - fee  # Lost the entire bet (buy cost + buy fee)
-                roi = net_payout / (dollars_spent + fee) if (dollars_spent + fee) > 0 else 0.0
-                logger.info(
-                    f"Trade {trade.id} lost - market resolved against us. "
-                    f"Sell order did not fill (api_status={sell_order_api_status or 'N/A'}). "
-                    f"Calculating ROI and updating principal."
-                )
-            else:
-                # We won but sell order didn't fill (verified via API)
-                # Market resolved in our favor - shares are worth $1 each (outcome_price = 1.0)
-                # Calculate as if we claim at $1 per share, accounting for sell fees
-                payout = outcome_price * filled_shares  # Should be $1 * shares = total claimable
+            elif not trade.sell_order_id or not sell_order_filled_via_api:
+                # Sell order didn't fill (or doesn't exist) - determine win/loss based on outcome_price
+                # If we bet YES: we won if outcome_price > 0.5, lost if outcome_price < 0.5
+                # If we bet NO: we won if outcome_price < 0.5, lost if outcome_price > 0.5
+                if trade.order_side == "YES":
+                    bet_won = outcome_price > 0.5
+                else:  # NO
+                    bet_won = outcome_price < 0.5
+                
+                if not bet_won:
+                    # We lost - shares are worthless
+                    payout = 0.0
+                    net_payout = -dollars_spent - fee  # Lost the entire bet (buy cost + buy fee)
+                    roi = net_payout / (dollars_spent + fee) if (dollars_spent + fee) > 0 else 0.0
+                    logger.info(
+                        f"Trade {trade.id} lost - market resolved against us (outcome_price={outcome_price:.4f}). "
+                        f"Sell order did not fill (api_status={sell_order_api_status or 'N/A'}). "
+                        f"Calculating ROI and updating principal."
+                    )
+                else:
+                    # We won but sell order didn't fill (verified via API)
+                    # Market resolved in our favor - shares are worth $1 each (outcome_price = 1.0)
+                    # Calculate as if we claim at $1 per share, accounting for sell fees
+                    payout = outcome_price * filled_shares  # Should be $1 * shares = total claimable
                 
                 # Calculate sell fee as if we sold at $1 per share
                 from agents.backtesting.backtesting_utils import calculate_polymarket_fee
@@ -2809,7 +2828,7 @@ class ThresholdTrader:
             # Log outcome for debugging
             logger.info(
                 f"Trade {trade.id} outcome: side={trade.order_side}, winning_side={winning_side}, "
-                f"is_win={is_win}, outcome_price={outcome_price:.4f}, "
+                f"outcome_price={outcome_price:.4f}, "
                 f"payout=${payout:.2f}, net_payout=${net_payout:.2f}, roi={roi*100:.2f}%"
             )
             
@@ -2830,31 +2849,24 @@ class ThresholdTrader:
                     f"${self.principal:.2f} -> ${new_principal:.2f} "
                     f"(net_payout=${net_payout:.2f}, market resolution for trade {trade.id})"
                 )
-            elif not is_win:
-                # We lost - market ended, shares are worthless, no sell order needed
-                # Neither the 0.99 limit sell nor threshold sell triggered, and market resolved against us
-                # Update principal now so we can move on to the next market
-                old_principal = self.principal
-                new_principal = self.principal + net_payout
-                self.principal = new_principal
-                principal_updated = True
-                logger.info(
-                    f"Market ended - we lost. Updating principal: ${old_principal:.2f} -> ${new_principal:.2f} "
-                    f"(net_payout=${net_payout:.2f})"
-                )
             else:
-                # We won but sell order hasn't filled yet (neither 0.99 limit sell nor threshold sell triggered)
-                # Market resolved in our favor - update principal now using estimated claim value
-                # This allows us to move on to the next market even if sell order didn't fill
+                # Sell order didn't fill (or doesn't exist) - update principal based on calculated net_payout
+                # net_payout was already calculated above based on whether we won or lost (using outcome_price)
                 old_principal = self.principal
                 new_principal = self.principal + net_payout
                 self.principal = new_principal
                 principal_updated = True
-                logger.info(
-                    f"Market ended - we won but sell order didn't fill. "
-                    f"Updating principal based on estimated claim value: ${old_principal:.2f} -> ${new_principal:.2f} "
-                    f"(net_payout=${net_payout:.2f}, estimated sell_fee included)"
-                )
+                if net_payout < 0:
+                    logger.info(
+                        f"Market ended - we lost. Updating principal: ${old_principal:.2f} -> ${new_principal:.2f} "
+                        f"(net_payout=${net_payout:.2f})"
+                    )
+                else:
+                    logger.info(
+                        f"Market ended - we won but sell order didn't fill. "
+                        f"Updating principal based on estimated claim value: ${old_principal:.2f} -> ${new_principal:.2f} "
+                        f"(net_payout=${net_payout:.2f}, estimated sell_fee included)"
+                    )
             
             # Update trade in database
             # Set principal_after to match self.principal (which was just updated above)
@@ -2871,7 +2883,7 @@ class ThresholdTrader:
                     payout=payout,  # Use recalculated payout from API
                     net_payout=net_payout,  # Use recalculated net_payout from API
                     roi=roi,  # Use recalculated ROI from API
-                    is_win=is_win,
+                    is_win=None,  # Leave is_win as NULL
                     principal_after=principal_after_value,  # Use recalculated principal_after
                     winning_side=winning_side,
                 )
@@ -2883,7 +2895,7 @@ class ThresholdTrader:
                     payout=payout,
                     net_payout=net_payout,
                     roi=roi,
-                    is_win=is_win,
+                    is_win=None,  # Leave is_win as NULL
                     principal_after=principal_after_value,
                     winning_side=winning_side,
                 )
