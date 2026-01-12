@@ -74,23 +74,31 @@ async def run_trading(config_path: str):
         raise
 
 
-async def run_all(config_path: str):
-    """Run both services concurrently."""
+async def run_all(config_path: str, enable_monitoring: bool = False):
+    """Run services. By default, only runs trading (monitoring disabled)."""
     logger.info("=" * 80)
-    logger.info("STARTING ALL SERVICES")
+    logger.info("STARTING SERVICES")
     logger.info("=" * 80)
     logger.info("Services:")
-    logger.info("  1. BTC Markets Monitoring")
-    logger.info("  2. Threshold Strategy Trading")
+    if enable_monitoring:
+        logger.info("  1. BTC Markets Monitoring")
+        logger.info("  2. Threshold Strategy Trading")
+    else:
+        logger.info("  1. Threshold Strategy Trading (Monitoring disabled)")
     logger.info("=" * 80)
     
-    # Run both services concurrently
+    # Run services
     try:
-        await asyncio.gather(
-            run_monitoring(),
-            run_trading(config_path),
-            return_exceptions=True
-        )
+        if enable_monitoring:
+            # Run both services concurrently
+            await asyncio.gather(
+                run_monitoring(),
+                run_trading(config_path),
+                return_exceptions=True
+            )
+        else:
+            # Run only trading
+            await run_trading(config_path)
     except KeyboardInterrupt:
         logger.info("Received shutdown signal")
     except Exception as e:
@@ -106,6 +114,12 @@ def main():
         required=True,
         help="Path to JSON config file for trading",
     )
+    parser.add_argument(
+        "--enable-monitoring",
+        action="store_true",
+        default=False,
+        help="Enable BTC markets monitoring (disabled by default)",
+    )
     
     args = parser.parse_args()
     
@@ -118,7 +132,7 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     
     try:
-        asyncio.run(run_all(args.config))
+        asyncio.run(run_all(args.config, enable_monitoring=args.enable_monitoring))
     except KeyboardInterrupt:
         logger.info("Shutting down...")
 

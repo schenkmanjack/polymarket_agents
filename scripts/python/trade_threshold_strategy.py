@@ -187,43 +187,64 @@ class ThresholdTrader:
         
         self.running = True
         
-        # Start background tasks with error handling
-        tasks = []
-        task_names = [
-            ("market_detection", self._market_detection_loop),
-            ("orderbook_monitoring", self._orderbook_monitoring_loop),
-            ("order_status", self._order_status_loop),
-            ("market_resolution", self._market_resolution_loop),
-        ]
+        # Map of task names to their coroutines
+        task_coros = {
+            "market_detection": self._market_detection_loop,
+            "orderbook_monitoring": self._orderbook_monitoring_loop,
+            "order_status": self._order_status_loop,
+            "market_resolution": self._market_resolution_loop,
+        }
         
-        for name, coro in task_names:
+        # Start all tasks
+        tasks = {}
+        for name, coro in task_coros.items():
             task = asyncio.create_task(coro())
-            task.set_name(name)  # Set name for better error messages
-            tasks.append(task)
+            task.set_name(name)
+            tasks[name] = task
             logger.info(f"Started background task: {name}")
         
         sys.stdout.flush()
         sys.stderr.flush()
         
         try:
-            # Use return_exceptions=True to prevent one task crash from killing all tasks
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Check for exceptions in task results
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    task_name = task_names[i][0] if i < len(task_names) else f"task_{i}"
-                    logger.error("=" * 80)
-                    logger.error(f"CRITICAL ERROR: Background task '{task_name}' crashed")
-                    logger.error("=" * 80)
-                    logger.error(f"Error type: {type(result).__name__}")
-                    logger.error(f"Error message: {str(result)}")
-                    # Log full traceback
-                    import traceback
-                    tb_str = ''.join(traceback.format_exception(type(result), result, result.__traceback__))
-                    logger.error(f"Full traceback:\n{tb_str}")
-                    sys.stdout.flush()
-                    sys.stderr.flush()
+            # Monitor tasks and restart them if they crash
+            # This keeps the system running even if individual tasks fail
+            while self.running:
+                await asyncio.sleep(5.0)  # Check every 5 seconds
+                
+                # Check each task and restart if it crashed
+                for name, task in list(tasks.items()):
+                    if task.done():
+                        # Task completed (either normally or crashed)
+                        try:
+                            exception = task.exception()
+                            if exception:
+                                # Task crashed with an exception
+                                logger.error("=" * 80)
+                                logger.error(f"⚠️ Background task '{name}' crashed - restarting...")
+                                logger.error("=" * 80)
+                                logger.error(f"Error type: {type(exception).__name__}")
+                                logger.error(f"Error message: {str(exception)}")
+                                import traceback
+                                tb_str = ''.join(traceback.format_exception(type(exception), exception, exception.__traceback__))
+                                logger.error(f"Full traceback:\n{tb_str}")
+                                sys.stdout.flush()
+                                sys.stderr.flush()
+                            else:
+                                # Task completed normally (shouldn't happen with while loops)
+                                logger.warning(f"⚠️ Background task '{name}' completed normally (unexpected) - restarting...")
+                        except Exception as e:
+                            logger.error(f"Error checking task '{name}' status: {e}", exc_info=True)
+                        
+                        # Restart the crashed task
+                        if self.running and name in task_coros:
+                            logger.info(f"🔄 Restarting background task: {name}")
+                            new_task = asyncio.create_task(task_coros[name]())
+                            new_task.set_name(name)
+                            tasks[name] = new_task
+                            logger.info(f"✅ Successfully restarted background task: {name}")
+                            sys.stdout.flush()
+                            sys.stderr.flush()
                     
         except KeyboardInterrupt:
             logger.info("Received shutdown signal")
@@ -239,7 +260,21 @@ class ThresholdTrader:
             raise
         finally:
             self.running = False
-            logger.info("Trading stopped")
+            logger.info("Trading stopped - cancelling all background tasks...")
+            
+            # Cancel all tasks
+            for name, task in tasks.items():
+                if not task.done():
+                    logger.info(f"Cancelling task: {name}")
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as e:
+                        logger.error(f"Error cancelling task '{name}': {e}")
+            
+            logger.info("All tasks cancelled")
             sys.stdout.flush()
             sys.stderr.flush()
     
@@ -515,17 +550,40 @@ class ThresholdTrader:
                 RealTradeThreshold.market_slug.in_(monitored_market_slugs),  # Only current markets
             ).order_by(RealTradeThreshold.order_placed_at.desc()).all()
             
+            logger.info(
+                f"🔍 Checking {len(trades_without_sell)} trades without sell orders for threshold sell "
+                f"(monitored markets: {len(monitored_market_slugs)})"
+            )
+            
             for trade in trades_without_sell:
                 try:
+                    logger.info(
+                        f"🔍 Checking threshold sell for trade {trade.id} (market: {trade.market_slug}, "
+                        f"token_id: {trade.token_id[:20] if trade.token_id else 'N/A'}...)"
+                    )
+                    
                     # Fetch orderbook for the token we bought
                     orderbook = fetch_orderbook(trade.token_id)
                     if not orderbook:
+                        logger.info(
+                            f"⚠️ Could not fetch orderbook for trade {trade.id} (token_id: {trade.token_id[:20] if trade.token_id else 'N/A'}...)"
+                        )
                         continue
                     
                     # Get highest bid
                     highest_bid = get_highest_bid(orderbook)
                     if highest_bid is None:
+                        logger.info(
+                            f"⚠️ No highest_bid found in orderbook for trade {trade.id} "
+                            f"(market: {trade.market_slug})"
+                        )
                         continue
+                    
+                    logger.info(
+                        f"📊 Trade {trade.id}: highest_bid={highest_bid:.4f}, "
+                        f"threshold_sell={self.config.threshold_sell:.4f}, "
+                        f"condition: {highest_bid:.4f} < {self.config.threshold_sell:.4f} = {highest_bid < self.config.threshold_sell}"
+                    )
                     
                     # Check if highest_bid < threshold_sell
                     if highest_bid < self.config.threshold_sell:
@@ -557,6 +615,10 @@ class ThresholdTrader:
                 RealTradeThreshold.market_resolved_at.is_(None),  # Market not resolved yet
                 RealTradeThreshold.market_slug.in_(monitored_market_slugs),  # Only current markets
             ).order_by(RealTradeThreshold.order_placed_at.desc()).all()
+            
+            logger.info(
+                f"🔍 Checking {len(trades_with_099_sell)} trades with open $0.99 sell orders for threshold sell"
+            )
             
             # Also check trades that were incorrectly marked as "filled" but might not actually be filled
             # This handles cases where API delays caused false positives
@@ -599,15 +661,34 @@ class ThresholdTrader:
             
             for trade in trades_with_099_sell:
                 try:
+                    logger.info(
+                        f"🔍 Checking threshold sell for trade {trade.id} with $0.99 sell order "
+                        f"(market: {trade.market_slug}, token_id: {trade.token_id[:20] if trade.token_id else 'N/A'}...)"
+                    )
+                    
                     # Fetch orderbook for the token we bought
                     orderbook = fetch_orderbook(trade.token_id)
                     if not orderbook:
+                        logger.info(
+                            f"⚠️ Could not fetch orderbook for trade {trade.id} with $0.99 sell order "
+                            f"(token_id: {trade.token_id[:20] if trade.token_id else 'N/A'}...)"
+                        )
                         continue
                     
                     # Get highest bid
                     highest_bid = get_highest_bid(orderbook)
                     if highest_bid is None:
+                        logger.info(
+                            f"⚠️ No highest_bid found in orderbook for trade {trade.id} with $0.99 sell order "
+                            f"(market: {trade.market_slug})"
+                        )
                         continue
+                    
+                    logger.info(
+                        f"📊 Trade {trade.id} ($0.99 sell): highest_bid={highest_bid:.4f}, "
+                        f"threshold_sell={self.config.threshold_sell:.4f}, "
+                        f"condition: {highest_bid:.4f} < {self.config.threshold_sell:.4f} = {highest_bid < self.config.threshold_sell}"
+                    )
                     
                     # Check if highest_bid < threshold_sell
                     if highest_bid < self.config.threshold_sell:
@@ -2659,23 +2740,25 @@ class ThresholdTrader:
                 # We lost - market ended, shares are worthless, no sell order needed
                 # Neither the 0.99 limit sell nor threshold sell triggered, and market resolved against us
                 # Update principal now so we can move on to the next market
+                old_principal = self.principal
                 new_principal = self.principal + net_payout
                 self.principal = new_principal
                 principal_updated = True
                 logger.info(
-                    f"Market ended - we lost. Updating principal: ${self.principal:.2f} -> ${new_principal:.2f} "
+                    f"Market ended - we lost. Updating principal: ${old_principal:.2f} -> ${new_principal:.2f} "
                     f"(net_payout=${net_payout:.2f})"
                 )
             else:
                 # We won but sell order hasn't filled yet (neither 0.99 limit sell nor threshold sell triggered)
                 # Market resolved in our favor - update principal now using estimated claim value
                 # This allows us to move on to the next market even if sell order didn't fill
+                old_principal = self.principal
                 new_principal = self.principal + net_payout
                 self.principal = new_principal
                 principal_updated = True
                 logger.info(
                     f"Market ended - we won but sell order didn't fill. "
-                    f"Updating principal based on estimated claim value: ${self.principal:.2f} -> ${new_principal:.2f} "
+                    f"Updating principal based on estimated claim value: ${old_principal:.2f} -> ${new_principal:.2f} "
                     f"(net_payout=${net_payout:.2f}, estimated sell_fee included)"
                 )
             
