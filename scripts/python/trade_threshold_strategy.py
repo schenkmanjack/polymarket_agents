@@ -1757,6 +1757,22 @@ class ThresholdTrader:
         if not all_sell_orders_to_check:
             return
         
+        # Log heartbeat periodically to show monitoring is still running
+        # Use a counter to log every 10 checks (every ~100 seconds with 10s interval)
+        if not hasattr(self, '_sell_order_check_count'):
+            self._sell_order_check_count = 0
+        self._sell_order_check_count += 1
+        
+        if self._sell_order_check_count % 10 == 0:
+            logger.info(
+                f"🔍 Monitoring {len(all_sell_orders_to_check)} sell order(s) (check #{self._sell_order_check_count}): "
+                f"{list(all_sell_orders_to_check.keys())[:3]}..."
+            )
+        else:
+            logger.debug(
+                f"🔍 Checking {len(all_sell_orders_to_check)} sell order(s): {list(all_sell_orders_to_check.keys())[:3]}..."
+            )
+        
         # Check fills/trades to see if any sell orders have been filled
         # This is more reliable than get_order_status for filled orders
         # Trade records are created when orders are partially or fully filled
@@ -1839,27 +1855,22 @@ class ThresholdTrader:
                     
                     taker_order_id = fill.get("taker_order_id")
                     
-                    # Log what we found in this trade record (INFO level to see actual values)
-                    logger.info(
-                        f"📊 Trade record: maker_orders={maker_orders} (type={type(maker_orders).__name__}), "
-                        f"taker_order_id={taker_order_id}, status={fill.get('status')}, "
-                        f"size={fill.get('size')}, price={fill.get('price')}"
-                    )
-                    
                     # Try to find our sell order ID in either maker_orders or taker_order_id
                     # maker_orders is a list of dictionaries, each with an 'order_id' field
                     fill_order_id = None
                     matched_in = None
+                    
+                    # Extract all order IDs from maker_orders for matching
+                    maker_order_ids = []
+                    if isinstance(maker_orders, list):
+                        for maker_order in maker_orders:
+                            if isinstance(maker_order, dict):
+                                maker_order_id = maker_order.get("order_id") or maker_order.get("orderID")
+                                if maker_order_id:
+                                    maker_order_ids.append(maker_order_id)
+                    
+                    # Check if any tracked sell order matches this trade record
                     for sell_order_id in all_sell_orders_to_check.keys():
-                        # Check if our order ID is in the maker_orders list (extract order_id from each dict)
-                        maker_order_ids = []
-                        if isinstance(maker_orders, list):
-                            for maker_order in maker_orders:
-                                if isinstance(maker_order, dict):
-                                    maker_order_id = maker_order.get("order_id") or maker_order.get("orderID")
-                                    if maker_order_id:
-                                        maker_order_ids.append(maker_order_id)
-                        
                         if sell_order_id in maker_order_ids:
                             fill_order_id = sell_order_id
                             matched_in = "maker_orders"
@@ -1867,7 +1878,7 @@ class ThresholdTrader:
                                 f"✅✅✅ MATCH FOUND: Sell order {sell_order_id} found in maker_orders list "
                                 f"(we were the maker). Trade record: status={fill.get('status')}, "
                                 f"size={fill.get('size')}, price={fill.get('price')}, "
-                                f"maker_order_ids={maker_order_ids}"
+                                f"maker_order_ids={maker_order_ids}, taker_order_id={taker_order_id}"
                             )
                             break
                         elif taker_order_id == sell_order_id:
@@ -1876,21 +1887,26 @@ class ThresholdTrader:
                             logger.info(
                                 f"✅✅✅ MATCH FOUND: Sell order {sell_order_id} found in taker_order_id "
                                 f"(we were the taker). Trade record: status={fill.get('status')}, "
-                                f"size={fill.get('size')}, price={fill.get('price')}"
+                                f"size={fill.get('size')}, price={fill.get('price')}, "
+                                f"maker_order_ids={maker_order_ids}"
                             )
                             break
                     
-                    # If no match found, try legacy field names for logging purposes only
+                    # Only log trade records that don't match if they have order IDs we're tracking
+                    # This reduces noise from unrelated trade records
                     if not fill_order_id:
-                        fill_order_id = (
-                            fill.get("orderID") or 
-                            fill.get("order_id") or 
-                            fill.get("id")
+                        # Check if this trade record has any order IDs that might be relevant
+                        all_order_ids_in_record = maker_order_ids.copy()
+                        if taker_order_id:
+                            all_order_ids_in_record.append(taker_order_id)
+                        
+                        # Only log at DEBUG level if it doesn't match - reduces noise
+                        logger.debug(
+                            f"📊 Trade record (no match): maker_order_ids={maker_order_ids}, "
+                            f"taker_order_id={taker_order_id}, status={fill.get('status')}, "
+                            f"size={fill.get('size')}, price={fill.get('price')}. "
+                            f"Tracked sell orders: {list(all_sell_orders_to_check.keys())[:3]}..."
                         )
-                        if fill_order_id:
-                            logger.debug(
-                                f"📊 Trade record has legacy order_id={fill_order_id} but doesn't match any tracked sell orders"
-                            )
                     
                     # Check trade status (MATCHED, MINED, CONFIRMED, FAILED)
                     trade_status = fill.get("status") or fill.get("trade_status") or ""
@@ -2032,7 +2048,7 @@ class ThresholdTrader:
                                 # Remove from all_sell_orders_to_check so we don't check it again below
                                 all_sell_orders_to_check.pop(fill_order_id, None)
         except Exception as e:
-            logger.debug(f"Could not check fills/trades for sell orders: {e}")
+            logger.error(f"Error checking fills/trades for sell orders: {e}", exc_info=True)
         
         for sell_order_id, trade_id in list(all_sell_orders_to_check.items()):
             try:
@@ -2063,9 +2079,31 @@ class ThresholdTrader:
                 self.sell_orders_not_found.pop(sell_order_id, None)
                 
                 # Parse order status
+                # Check multiple field names (API may return different field names)
+                # Gemini's code uses size_matched and original_size, which might be more reliable
                 status = order_status.get("status", "unknown")
-                filled_amount = order_status.get("filledAmount", order_status.get("filled_amount", 0))
-                total_amount = order_status.get("totalAmount", order_status.get("total_amount", 0))
+                filled_amount = (
+                    order_status.get("size_matched") or  # Gemini's code uses this
+                    order_status.get("filledAmount") or 
+                    order_status.get("filled_amount") or 
+                    0
+                )
+                total_amount = (
+                    order_status.get("original_size") or  # Gemini's code uses this
+                    order_status.get("totalAmount") or 
+                    order_status.get("total_amount") or 
+                    0
+                )
+                
+                # Convert to float if they're strings
+                try:
+                    filled_amount = float(filled_amount) if filled_amount else 0
+                except (ValueError, TypeError):
+                    filled_amount = 0
+                try:
+                    total_amount = float(total_amount) if total_amount else 0
+                except (ValueError, TypeError):
+                    total_amount = 0
                 
                 trade = self.db.get_trade_by_id(trade_id)
                 if not trade:
@@ -2075,21 +2113,23 @@ class ThresholdTrader:
                 # Also check for "matched" status which indicates the order was filled immediately
                 # Check if filled_amount equals or exceeds total_amount (order is fully filled)
                 is_filled = status in ["filled", "FILLED", "complete", "COMPLETE", "matched", "MATCHED"] or (
-                    filled_amount and total_amount and float(filled_amount) >= float(total_amount)
+                    filled_amount > 0 and total_amount > 0 and filled_amount >= total_amount
                 )
                 is_cancelled = status in ["cancelled", "CANCELLED", "canceled", "CANCELED"]
                 
                 # Log order status for debugging
                 if trade.sell_order_status == "open":
+                    # Log all available fields from order_status to help debug field name issues
                     logger.info(
                         f"🔍 Sell order {sell_order_id} (trade {trade_id}) status check: "
                         f"status={status}, filled_amount={filled_amount}, total_amount={total_amount}, "
-                        f"is_filled={is_filled}, is_cancelled={is_cancelled}"
+                        f"is_filled={is_filled}, is_cancelled={is_cancelled}. "
+                        f"Order status fields: {list(order_status.keys())[:10]}..."
                     )
                     
                     # If status is "live" but filled_amount equals total_amount, it's actually filled
-                    if status in ["live", "LIVE", "open", "OPEN"] and filled_amount and total_amount:
-                        if float(filled_amount) >= float(total_amount):
+                    if status in ["live", "LIVE", "open", "OPEN"] and filled_amount > 0 and total_amount > 0:
+                        if filled_amount >= total_amount:
                             logger.info(
                                 f"⚠️ Sell order {sell_order_id} shows status='{status}' but filled_amount ({filled_amount}) >= total_amount ({total_amount}) - "
                                 f"treating as filled"
@@ -2314,6 +2354,59 @@ class ThresholdTrader:
                     winning_side=trade.order_side,  # We sold at $0.99, so our bet was correct
                 )
                 return
+            
+            # Final check: If sell order exists but hasn't been filled or cancelled, check its status via API
+            # This helps diagnose cases where sell orders weren't detected as filled
+            if trade.sell_order_id and trade.sell_order_status not in ["filled", "cancelled", "failed"]:
+                try:
+                    logger.debug(
+                        f"🔍 Final check: Market resolved for trade {trade.id}, checking sell order status "
+                        f"(sell_order_id={trade.sell_order_id}, db_status={trade.sell_order_status})"
+                    )
+                    order_status = self.pm.get_order_status(trade.sell_order_id)
+                    if order_status:
+                        status = order_status.get("status", "unknown")
+                        filled_amount = (
+                            order_status.get("size_matched") or
+                            order_status.get("filledAmount") or
+                            order_status.get("filled_amount") or
+                            0
+                        )
+                        total_amount = (
+                            order_status.get("original_size") or
+                            order_status.get("totalAmount") or
+                            order_status.get("total_amount") or
+                            0
+                        )
+                        try:
+                            filled_amount = float(filled_amount) if filled_amount else 0
+                        except (ValueError, TypeError):
+                            filled_amount = 0
+                        try:
+                            total_amount = float(total_amount) if total_amount else 0
+                        except (ValueError, TypeError):
+                            total_amount = 0
+                        
+                        logger.debug(
+                            f"🔍 Final sell order check for trade {trade.id} (market resolved): "
+                            f"sell_order_id={trade.sell_order_id}, "
+                            f"api_status={status}, "
+                            f"filled_amount={filled_amount}, "
+                            f"total_amount={total_amount}, "
+                            f"db_status={trade.sell_order_status}, "
+                            f"all_fields={list(order_status.keys())}"
+                        )
+                    else:
+                        logger.debug(
+                            f"🔍 Final sell order check for trade {trade.id} (market resolved): "
+                            f"sell_order_id={trade.sell_order_id} not found in API, "
+                            f"db_status={trade.sell_order_status}"
+                        )
+                except Exception as e:
+                    logger.debug(
+                        f"🔍 Final sell order check for trade {trade.id} (market resolved): "
+                        f"Error checking sell_order_id={trade.sell_order_id}: {e}"
+                    )
             
             # Check if order was actually filled
             filled_shares = trade.filled_shares or 0.0
