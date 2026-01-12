@@ -171,7 +171,10 @@ class ThresholdTrader:
         logger.info(f"Threshold: {self.config.threshold:.4f}")
         logger.info(f"Upper threshold: {self.config.upper_threshold:.4f}")
         logger.info(f"Margin: {self.config.margin:.4f}")
-        logger.info(f"Threshold sell (stop-loss): {self.config.threshold_sell:.4f}")
+        if self.config.threshold_sell > 0.0:
+            logger.info(f"Threshold sell (stop-loss): {self.config.threshold_sell:.4f}")
+        else:
+            logger.info("Threshold sell (stop-loss): DISABLED (set to 0)")
         logger.info(f"Margin sell: {self.config.margin_sell:.4f}")
         logger.info(f"Kelly fraction: {self.config.kelly_fraction:.4f}")
         logger.info(f"Kelly scale factor: {self.config.kelly_scale_factor:.4f}")
@@ -554,6 +557,10 @@ class ThresholdTrader:
     
     async def _check_early_sell_conditions(self, monitored_market_slugs: List[str]):
         """Check if filled buy orders should trigger early sell (stop-loss) for currently monitored markets."""
+        # Skip if threshold sell is disabled (set to 0)
+        if self.config.threshold_sell <= 0.0:
+            return
+        
         if not monitored_market_slugs:
             return
         

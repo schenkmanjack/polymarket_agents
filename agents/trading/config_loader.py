@@ -75,8 +75,9 @@ class TradingConfig:
             raise ValueError(f"margin must be a non-negative float, got {margin}")
         
         threshold_sell = self.config['threshold_sell']
-        if not isinstance(threshold_sell, (int, float)) or not (0.0 < threshold_sell <= 1.0):
-            raise ValueError(f"threshold_sell must be a float between 0.0 and 1.0, got {threshold_sell}")
+        # Allow 0.0 as a special value to disable threshold sell
+        if not isinstance(threshold_sell, (int, float)) or not (0.0 <= threshold_sell <= 1.0):
+            raise ValueError(f"threshold_sell must be a float between 0.0 and 1.0 (0.0 disables it), got {threshold_sell}")
         
         margin_sell = self.config['margin_sell']
         if not isinstance(margin_sell, (int, float)) or margin_sell < 0.0:
