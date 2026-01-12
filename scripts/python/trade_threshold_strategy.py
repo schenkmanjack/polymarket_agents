@@ -2334,38 +2334,26 @@ class ThresholdTrader:
                 logger.info(f"Trade {trade.id} has status '{trade.order_status}' - skipping resolution (order did not execute)")
                 return
             
-            # Check if sell order already filled - if so, skip market resolution processing
-            # The sell order fill handler already updated principal and ROI correctly
-            if trade.sell_order_id and trade.sell_order_status == "filled" and trade.sell_dollars_received:
-                logger.info(
-                    f"Trade {trade.id} sell order already filled (sell_order_id={trade.sell_order_id}, "
-                    f"sell_order_status={trade.sell_order_status}) - skipping market resolution processing. "
-                    f"Principal and ROI already updated from sell order fill."
-                )
-                # Just mark market as resolved without recalculating
-                self.db.update_trade_outcome(
-                    trade_id=trade.id,
-                    outcome_price=trade.sell_order_price if trade.sell_order_price else 0.99,
-                    payout=trade.payout if trade.payout else trade.sell_dollars_received,
-                    net_payout=trade.net_payout,
-                    roi=trade.roi,
-                    is_win=True,  # If we sold at $0.99, we won
-                    principal_after=trade.principal_after,
-                    winning_side=trade.order_side,  # We sold at $0.99, so our bet was correct
-                )
-                return
+            # Wait 5 seconds after market resolution to allow API to update
+            logger.info(f"Market resolved for trade {trade.id}, waiting 5 seconds before checking sell order status...")
+            await asyncio.sleep(5.0)
             
-            # Final check: If sell order exists but hasn't been filled or cancelled, check its status via API
-            # This helps diagnose cases where sell orders weren't detected as filled
-            if trade.sell_order_id and trade.sell_order_status not in ["filled", "cancelled", "failed"]:
+            # ALWAYS check sell order status via API when market resolves (don't trust database)
+            # The database field might be stale or incorrect
+            sell_order_filled_via_api = False
+            sell_order_api_status = None
+            sell_order_filled_amount = 0.0
+            sell_order_total_amount = 0.0
+            
+            if trade.sell_order_id:
                 try:
-                    logger.debug(
-                        f"🔍 Final check: Market resolved for trade {trade.id}, checking sell order status "
+                    logger.info(
+                        f"🔍 Market resolved: Checking sell order status via API "
                         f"(sell_order_id={trade.sell_order_id}, db_status={trade.sell_order_status})"
                     )
                     order_status = self.pm.get_order_status(trade.sell_order_id)
                     if order_status:
-                        status = order_status.get("status", "unknown")
+                        sell_order_api_status = order_status.get("status", "unknown")
                         filled_amount = (
                             order_status.get("size_matched") or
                             order_status.get("filledAmount") or
@@ -2379,33 +2367,80 @@ class ThresholdTrader:
                             0
                         )
                         try:
-                            filled_amount = float(filled_amount) if filled_amount else 0
+                            sell_order_filled_amount = float(filled_amount) if filled_amount else 0
                         except (ValueError, TypeError):
-                            filled_amount = 0
+                            sell_order_filled_amount = 0
                         try:
-                            total_amount = float(total_amount) if total_amount else 0
+                            sell_order_total_amount = float(total_amount) if total_amount else 0
                         except (ValueError, TypeError):
-                            total_amount = 0
+                            sell_order_total_amount = 0
                         
-                        logger.debug(
-                            f"🔍 Final sell order check for trade {trade.id} (market resolved): "
-                            f"sell_order_id={trade.sell_order_id}, "
-                            f"api_status={status}, "
-                            f"filled_amount={filled_amount}, "
-                            f"total_amount={total_amount}, "
-                            f"db_status={trade.sell_order_status}, "
-                            f"all_fields={list(order_status.keys())}"
-                        )
-                    else:
-                        logger.debug(
-                            f"🔍 Final sell order check for trade {trade.id} (market resolved): "
-                            f"sell_order_id={trade.sell_order_id} not found in API, "
+                        # Determine if order is filled based on API response
+                        is_filled_by_status = sell_order_api_status in ["filled", "FILLED", "complete", "COMPLETE", "matched", "MATCHED"]
+                        is_filled_by_amount = sell_order_filled_amount > 0 and sell_order_total_amount > 0 and sell_order_filled_amount >= sell_order_total_amount
+                        sell_order_filled_via_api = is_filled_by_status or is_filled_by_amount
+                        
+                        logger.info(
+                            f"🔍 Sell order API check (market resolved): "
+                            f"Trade {trade.id}, sell_order_id={trade.sell_order_id}, "
+                            f"api_status={sell_order_api_status}, "
+                            f"filled_amount={sell_order_filled_amount}, "
+                            f"total_amount={sell_order_total_amount}, "
+                            f"is_filled={sell_order_filled_via_api}, "
                             f"db_status={trade.sell_order_status}"
                         )
+                        
+                        # Update database with API result
+                        if sell_order_filled_via_api and trade.sell_order_status != "filled":
+                            logger.info(
+                                f"⚠️ Database says sell order is '{trade.sell_order_status}' but API says it's filled. "
+                                f"Updating database to match API."
+                            )
+                            # Update database to reflect API status
+                            session = self.db.SessionLocal()
+                            try:
+                                trade_obj = session.query(RealTradeThreshold).filter_by(id=trade.id).first()
+                                if trade_obj:
+                                    trade_obj.sell_order_status = "filled"
+                                    # If we don't have sell_dollars_received, estimate it
+                                    if not trade_obj.sell_dollars_received and trade_obj.sell_order_price:
+                                        trade_obj.sell_dollars_received = sell_order_filled_amount * trade_obj.sell_order_price
+                                    session.commit()
+                                    # Reload trade object to get updated values
+                                    trade = self.db.get_trade_by_id(trade.id)
+                            except Exception as e:
+                                session.rollback()
+                                logger.error(f"Error updating sell order status from API: {e}")
+                            finally:
+                                session.close()
+                        elif not sell_order_filled_via_api and trade.sell_order_status == "filled":
+                            logger.warning(
+                                f"⚠️ Database says sell order is 'filled' but API says it's '{sell_order_api_status}'. "
+                                f"API takes precedence - treating as not filled."
+                            )
+                            # Update database to reflect API status
+                            session = self.db.SessionLocal()
+                            try:
+                                trade_obj = session.query(RealTradeThreshold).filter_by(id=trade.id).first()
+                                if trade_obj:
+                                    trade_obj.sell_order_status = "open" if sell_order_api_status in ["live", "LIVE", "open", "OPEN"] else "cancelled"
+                                    session.commit()
+                                    # Reload trade object to get updated values
+                                    trade = self.db.get_trade_by_id(trade.id)
+                            except Exception as e:
+                                session.rollback()
+                                logger.error(f"Error updating sell order status from API: {e}")
+                            finally:
+                                session.close()
+                    else:
+                        logger.warning(
+                            f"🔍 Sell order {trade.sell_order_id} not found in API (market resolved). "
+                            f"Treating as not filled."
+                        )
                 except Exception as e:
-                    logger.debug(
-                        f"🔍 Final sell order check for trade {trade.id} (market resolved): "
-                        f"Error checking sell_order_id={trade.sell_order_id}: {e}"
+                    logger.error(
+                        f"Error checking sell order status via API (market resolved): {e}",
+                        exc_info=True
                     )
             
             # Check if order was actually filled
@@ -2474,35 +2509,56 @@ class ThresholdTrader:
             
             # Calculate payout and ROI based on actual proceeds from selling
             # ROI accounts for fees on both buy and sell orders
+            # Use API result (sell_order_filled_via_api) not database field
             fee = trade.fee or 0.0
             sell_fee = trade.sell_fee or 0.0
             
-            if trade.sell_order_id and trade.sell_order_status == "filled" and trade.sell_dollars_received:
-                # We already sold (either at 0.99 or early sell) - use actual proceeds
-                # Preserve the values that were calculated when the sell order filled
-                # These are already correct (accounting for fees properly)
-                payout = trade.payout if trade.payout is not None else trade.sell_dollars_received
-                net_payout = trade.net_payout if trade.net_payout is not None else (payout - sell_fee - dollars_spent - fee)
-                roi = trade.roi if trade.roi is not None else (net_payout / (dollars_spent + fee) if (dollars_spent + fee) > 0 else 0.0)
-                # Use the sell price as outcome_price (if we sold at $0.99, we won, so outcome should reflect that)
-                outcome_price = trade.sell_order_price if trade.sell_order_price else outcome_price
+            # Check if order was actually filled
+            filled_shares = trade.filled_shares or 0.0
+            dollars_spent = trade.dollars_spent or 0.0
+            
+            if filled_shares <= 0 or dollars_spent <= 0:
+                logger.warning(
+                    f"Trade {trade.id} was not filled (filled_shares={filled_shares}, "
+                    f"dollars_spent=${dollars_spent:.2f}) - skipping resolution (order did not execute)"
+                )
+                return
+            
+            if trade.sell_order_id and sell_order_filled_via_api:
+                # Sell order filled (verified via API) - use actual proceeds
+                # Calculate based on what we actually received from selling
+                sell_price = trade.sell_order_price or 0.99
+                filled_shares_sold = sell_order_filled_amount if sell_order_filled_amount > 0 else (trade.sell_order_size or filled_shares)
+                sell_dollars_received = trade.sell_dollars_received or (filled_shares_sold * sell_price)
+                
+                # Calculate sell fee if not already set
+                if not sell_fee:
+                    from agents.backtesting.backtesting_utils import calculate_polymarket_fee
+                    sell_fee = calculate_polymarket_fee(sell_price, sell_dollars_received)
+                
+                payout = sell_dollars_received
+                net_payout = sell_dollars_received - sell_fee - dollars_spent - fee
+                roi = net_payout / (dollars_spent + fee) if (dollars_spent + fee) > 0 else 0.0
+                
                 logger.info(
-                    f"Trade {trade.id} sell order already filled - preserving values from sell: "
-                    f"payout=${payout:.2f}, net_payout=${net_payout:.2f}, roi={roi*100:.2f}%, "
-                    f"outcome_price={outcome_price:.4f}"
+                    f"Trade {trade.id} sell order FILLED (verified via API): "
+                    f"sell_price=${sell_price:.4f}, filled_shares={filled_shares_sold}, "
+                    f"payout=${payout:.2f}, sell_fee=${sell_fee:.4f}, "
+                    f"net_payout=${net_payout:.2f}, roi={roi*100:.2f}%"
                 )
             elif not is_win:
-                # We lost - shares are worthless, no sell order needed
-                # Neither the 0.99 limit sell nor threshold sell triggered, and market resolved against us
+                # We lost - shares are worthless
+                # Sell order didn't fill (verified via API) - we lost the bet
                 payout = 0.0
                 net_payout = -dollars_spent - fee  # Lost the entire bet (buy cost + buy fee)
                 roi = net_payout / (dollars_spent + fee) if (dollars_spent + fee) > 0 else 0.0
                 logger.info(
                     f"Trade {trade.id} lost - market resolved against us. "
-                    f"No sell order triggered. Calculating ROI and updating principal."
+                    f"Sell order did not fill (api_status={sell_order_api_status or 'N/A'}). "
+                    f"Calculating ROI and updating principal."
                 )
             else:
-                # We won but sell order hasn't filled yet (neither 0.99 limit sell nor threshold sell triggered)
+                # We won but sell order didn't fill (verified via API)
                 # Market resolved in our favor - shares are worth $1 each (outcome_price = 1.0)
                 # Calculate as if we claim at $1 per share, accounting for sell fees
                 payout = outcome_price * filled_shares  # Should be $1 * shares = total claimable
@@ -2531,7 +2587,7 @@ class ThresholdTrader:
                 roi = net_payout / (dollars_spent + fee) if (dollars_spent + fee) > 0 else 0.0
                 
                 logger.info(
-                    f"Trade {trade.id} won but sell order not filled - market resolved. "
+                    f"Trade {trade.id} won but sell order did not fill (api_status={sell_order_api_status or 'N/A'}) - market resolved. "
                     f"Assuming claim at $1 per share (outcome_price={outcome_price:.4f}). "
                     f"Calculating ROI with estimated sell fee (${estimated_sell_fee:.2f}) and updating principal."
                 )
