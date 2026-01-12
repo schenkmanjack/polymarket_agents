@@ -60,6 +60,7 @@ class RealTradeThreshold(Base):
     sell_order_id = Column(String, nullable=True, index=True)
     sell_order_price = Column(Float, nullable=True)  # Usually 0.99
     sell_order_size = Column(Float, nullable=True)  # Number of shares to sell
+    sell_shares_filled = Column(Float, nullable=True)  # Number of shares actually filled (may be partial)
     sell_order_status = Column(String, nullable=True)  # 'open', 'filled', 'cancelled', 'partial'
     sell_order_placed_at = Column(DateTime, nullable=True)
     sell_order_filled_at = Column(DateTime, nullable=True)
@@ -162,6 +163,7 @@ class TradeDatabase:
                 'sell_order_id': 'VARCHAR',
                 'sell_order_price': 'FLOAT',
                 'sell_order_size': 'FLOAT',
+                'sell_shares_filled': 'FLOAT',
                 'sell_order_status': 'VARCHAR',
                 'sell_order_placed_at': 'TIMESTAMP',
                 'sell_order_filled_at': 'TIMESTAMP',
@@ -404,6 +406,7 @@ class TradeDatabase:
         self,
         trade_id: int,
         sell_order_status: str,
+        sell_shares_filled: Optional[float] = None,
         sell_dollars_received: Optional[float] = None,
         sell_fee: Optional[float] = None,
     ):
@@ -413,6 +416,8 @@ class TradeDatabase:
             trade = session.query(RealTradeThreshold).filter_by(id=trade_id).first()
             if trade:
                 trade.sell_order_status = sell_order_status
+                if sell_shares_filled is not None:
+                    trade.sell_shares_filled = sell_shares_filled
                 if sell_dollars_received is not None:
                     trade.sell_dollars_received = sell_dollars_received
                 if sell_fee is not None:

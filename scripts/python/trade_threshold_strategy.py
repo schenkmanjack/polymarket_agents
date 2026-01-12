@@ -112,9 +112,9 @@ class ThresholdTrader:
         latest_principal = self.db.get_latest_principal(deployment_id=self.deployment_id)
         if latest_principal is not None and latest_principal > 0:
             self.principal = latest_principal
-            logger.info(f"Loaded principal from database (deployment {self.deployment_id[:8]}...): ${self.principal:.2f}")
+            logger.info(f"✓ Loaded principal from database (deployment {self.deployment_id[:8]}...): ${self.principal:.2f}")
         else:
-            # Check if there are any resolved trades from previous deployments
+            # Check if there are any resolved trades from previous deployments (for logging only)
             any_principal = self.db.get_latest_principal(deployment_id=None)
             if any_principal is not None and any_principal > 0:
                 logger.info(
@@ -123,8 +123,11 @@ class ThresholdTrader:
                 )
             
             self.principal = self.config.initial_principal
-            logger.info(f"Using initial principal from config: ${self.principal:.2f}")
+            logger.info(f"✓ Using initial principal from config: ${self.principal:.2f}")
             logger.info("(No resolved trades found for current deployment, using initial principal)")
+        
+        # Log final principal value for debugging
+        logger.info(f"📊 Starting principal: ${self.principal:.2f}")
         
         # Track markets we're monitoring
         self.monitored_markets: Dict[str, Dict] = {}  # market_slug -> market info
@@ -440,6 +443,8 @@ class ThresholdTrader:
             return
         
         # Don't place new bets if principal is too low
+        # Note: We only check this after confirming there are no open trades/sell orders,
+        # so principal reflects the actual available capital (all previous trades have resolved)
         if self.principal < MIN_BET_SIZE:
             logger.warning(f"Principal ${self.principal:.2f} is below minimum bet size ${MIN_BET_SIZE:.2f}")
             return
@@ -1146,6 +1151,8 @@ class ThresholdTrader:
         """Place an early sell order (stop-loss), canceling the 0.99 order first if it exists."""
         try:
             # If there's an existing sell order at 0.99, cancel it first
+            # Only proceed with threshold sell if cancellation succeeds
+            order_cancelled = False
             if trade.sell_order_id and trade.sell_order_status == "open":
                 logger.info(
                     f"Canceling existing sell order {trade.sell_order_id} at $0.99 "
@@ -1156,13 +1163,41 @@ class ThresholdTrader:
                     logger.info(f"✓ Canceled sell order {trade.sell_order_id}")
                     # Remove from tracking
                     self.open_sell_orders.pop(trade.sell_order_id, None)
-                    # Update database to mark as cancelled
-                    self.db.update_sell_order_fill(
-                        trade_id=trade.id,
-                        sell_order_status="cancelled",
-                    )
+                    # Update database to mark as cancelled AND clear sell_order_id
+                    # This prevents _place_initial_sell_order() from placing a new 0.99 order
+                    # We'll set the new sell_order_id when we place the threshold sell order below
+                    session = self.db.SessionLocal()
+                    try:
+                        trade_obj = session.query(RealTradeThreshold).filter_by(id=trade.id).first()
+                        if trade_obj:
+                            trade_obj.sell_order_status = "cancelled"
+                            trade_obj.sell_order_id = None  # Clear it so we can place new order
+                            session.commit()
+                            logger.debug(f"Updated database: cancelled sell order and cleared sell_order_id for trade {trade.id}")
+                            order_cancelled = True
+                    except Exception as e:
+                        session.rollback()
+                        logger.error(f"Error updating database after cancellation: {e}")
+                    finally:
+                        session.close()
                 else:
-                    logger.warning(f"Failed to cancel sell order {trade.sell_order_id}, proceeding anyway")
+                    logger.warning(
+                        f"❌ Failed to cancel sell order {trade.sell_order_id}. "
+                        f"Cannot place threshold sell order - keeping existing 0.99 order. "
+                        f"The 0.99 order will remain active and will be handled normally."
+                    )
+                    # Don't clear sell_order_id - keep the existing order
+                    # Don't place threshold sell - return early
+                    return
+            
+            # Only proceed if we successfully cancelled the order (or there was no order to cancel)
+            if not order_cancelled and trade.sell_order_id:
+                # This shouldn't happen, but be safe
+                logger.warning(
+                    f"⚠️ Cannot place threshold sell: order cancellation status unclear. "
+                    f"Keeping existing sell order {trade.sell_order_id}."
+                )
+                return
             
             # Check actual balance before placing early sell order
             balance = None
@@ -1216,6 +1251,21 @@ class ThresholdTrader:
                     f"Insufficient balance: trying to sell {sell_size_int} shares but only {balance:.6f} available"
                 )
             
+            # Reload trade from database right before placing order to ensure we have latest state
+            # This prevents race conditions where another process might have placed a sell order
+            trade = self.db.get_trade_by_id(trade.id)
+            if not trade:
+                logger.error(f"Trade {trade.id} not found in database when placing early sell order")
+                return
+            
+            # Double-check: if a sell order already exists (shouldn't happen, but be safe)
+            if trade.sell_order_id and trade.sell_order_status == "open":
+                logger.warning(
+                    f"⚠️ Trade {trade.id} already has an open sell order {trade.sell_order_id} "
+                    f"when trying to place early sell. Skipping to avoid overwriting."
+                )
+                return
+            
             # Place new early sell order
             balance_str = f"{balance:.6f}" if balance is not None else "N/A"
             logger.info(
@@ -1233,10 +1283,11 @@ class ThresholdTrader:
                 sell_order_id = self.pm.extract_order_id(sell_order_response)
                 if sell_order_id:
                     # Log sell order to database (use actual sell size)
+                    # IMPORTANT: This MUST update sell_order_price to the threshold price, not 0.99
                     self.db.update_sell_order(
                         trade_id=trade.id,
                         sell_order_id=sell_order_id,
-                        sell_order_price=sell_price,
+                        sell_order_price=sell_price,  # Use threshold sell price, not 0.99
                         sell_order_size=float(sell_size_int),  # Use actual sell size
                         sell_order_status="open",
                     )
@@ -2051,71 +2102,32 @@ class ThresholdTrader:
                                 from agents.backtesting.backtesting_utils import calculate_polymarket_fee
                                 sell_fee = calculate_polymarket_fee(sell_price, sell_dollars_received)
                                 
+                                # Determine if this is a partial or full fill
+                                # If filled_shares equals sell_order_size, it's a full fill
+                                is_full_fill = (trade.sell_order_size and abs(filled_shares - trade.sell_order_size) < 0.01)
+                                sell_status = "filled" if is_full_fill else "partial"
+                                
+                                # Update sell order fill information
+                                # NOTE: ROI and principal_after will be calculated at market resolution
                                 self.db.update_sell_order_fill(
                                     trade_id=trade_id,
-                                    sell_order_status="filled",
+                                    sell_order_status=sell_status,
+                                    sell_shares_filled=filled_shares,  # Track actual filled shares
                                     sell_dollars_received=sell_dollars_received,
                                     sell_fee=sell_fee,
                                 )
-                                
-                                # Calculate net profit: (what we received from selling) - (what we spent buying)
-                                # Note: Principal wasn't reduced when buying, so we need to account for the full cost
-                                total_cost = (trade.dollars_spent or 0) + (trade.fee or 0)  # Buy cost + buy fee
-                                total_received = sell_dollars_received - sell_fee  # Sell proceeds - sell fee
-                                net_profit = total_received - total_cost  # Net profit/loss
-                                
-                                # Calculate what principal_after should be (but don't update self.principal yet)
-                                # self.principal will be updated at market resolution after final API verification
-                                new_principal = self.principal + net_profit
-                                
-                                # Calculate ROI: net_profit / total_cost
-                                roi = net_profit / total_cost if total_cost > 0 else 0.0
-                                
-                                # Update trade with final principal
-                                if trade.market_resolved_at:
-                                    # Market already resolved - update with outcome info
-                                    self.db.update_trade_outcome(
-                                        trade_id=trade_id,
-                                        outcome_price=trade.outcome_price,
-                                        payout=sell_dollars_received,
-                                        net_payout=net_profit,
-                                        roi=roi,
-                                        is_win=None,  # Leave is_win as NULL
-                                        principal_after=new_principal,
-                                        winning_side=trade.winning_side,
-                                    )
-                                else:
-                                    # Early sell - market not resolved yet
-                                    session = self.db.SessionLocal()
-                                    try:
-                                        trade_obj = session.query(RealTradeThreshold).filter_by(id=trade_id).first()
-                                        if trade_obj:
-                                            trade_obj.principal_after = new_principal
-                                            trade_obj.roi = roi
-                                            trade_obj.is_win = None  # Leave is_win as NULL
-                                            trade_obj.net_payout = net_profit
-                                            trade_obj.payout = sell_dollars_received
-                                            # winning_side not set here - leave as is
-                                            session.commit()
-                                    except Exception as e:
-                                        session.rollback()
-                                        logger.error(f"Error updating principal for early sell: {e}")
-                                    finally:
-                                        session.close()
                                 
                                 logger.info(
                                     f"✅✅✅ SELL ORDER FILLED (via trade record) ✅✅✅\n"
                                     f"  Sell Order ID: {fill_order_id}\n"
                                     f"  Trade ID: {trade_id}\n"
                                     f"  Trade Status: {trade_status_upper}\n"
-                                    f"  Filled Shares: {filled_shares}\n"
+                                    f"  Filled Shares: {filled_shares} / {trade.sell_order_size or 'N/A'}\n"
                                     f"  Sell Price: ${sell_price:.4f}\n"
                                     f"  Dollars Received: ${sell_dollars_received:.2f}\n"
                                     f"  Sell Fee: ${sell_fee:.4f}\n"
-                                    f"  Total Cost (buy): ${total_cost:.2f}\n"
-                                    f"  Net Profit: ${net_profit:.2f}\n"
-                                    f"  ROI: {roi*100:.2f}%\n"
-                                    f"  Principal: ${self.principal:.2f} -> ${new_principal:.2f}"
+                                    f"  Status: {sell_status}\n"
+                                    f"  (ROI and principal_after will be calculated at market resolution)"
                                 )
                                 
                                 self.open_sell_orders.pop(fill_order_id, None)
@@ -2242,61 +2254,25 @@ class ThresholdTrader:
                         from agents.backtesting.backtesting_utils import calculate_polymarket_fee
                         sell_fee = calculate_polymarket_fee(sell_price, sell_dollars_received)
                         
+                        # Determine if this is a partial or full fill
+                        is_full_fill = (trade.sell_order_size and abs(filled_shares - trade.sell_order_size) < 0.01)
+                        sell_status = "filled" if is_full_fill else "partial"
+                        
+                        # Update sell order fill information
+                        # NOTE: ROI and principal_after will be calculated at market resolution
                         self.db.update_sell_order_fill(
                             trade_id=trade_id,
-                            sell_order_status="filled",
+                            sell_order_status=sell_status,
+                            sell_shares_filled=filled_shares,  # Track actual filled shares
                             sell_dollars_received=sell_dollars_received,
                             sell_fee=sell_fee,
                         )
                         
-                        # Calculate net profit: (what we received from selling) - (what we spent buying)
-                        total_cost = (trade.dollars_spent or 0) + (trade.fee or 0)  # Buy cost + buy fee
-                        total_received = sell_dollars_received - sell_fee  # Sell proceeds - sell fee
-                        net_profit = total_received - total_cost  # Net profit/loss
-                        
-                        # Calculate what principal_after should be (but don't update self.principal yet)
-                        # self.principal will be updated at market resolution after final API verification
-                        new_principal = self.principal + net_profit
-                        
-                        # Calculate ROI: net_profit / total_cost
-                        roi = net_profit / total_cost if total_cost > 0 else 0.0
-                        
-                        # Update trade with final principal
-                        if trade.market_resolved_at:
-                            # Market already resolved - update with outcome info
-                            self.db.update_trade_outcome(
-                                trade_id=trade_id,
-                                outcome_price=trade.outcome_price,
-                                payout=sell_dollars_received,
-                                net_payout=net_profit,
-                                roi=roi,
-                                is_win=None,  # Leave is_win as NULL
-                                principal_after=new_principal,
-                                winning_side=trade.winning_side,
-                            )
-                        else:
-                            # Early sell - market not resolved yet
-                            session = self.db.SessionLocal()
-                            try:
-                                trade_obj = session.query(RealTradeThreshold).filter_by(id=trade_id).first()
-                                if trade_obj:
-                                    trade_obj.principal_after = new_principal
-                                    trade_obj.roi = roi
-                                    trade_obj.is_win = None  # Leave is_win as NULL
-                                    trade_obj.net_payout = net_profit
-                                    trade_obj.payout = sell_dollars_received
-                                    # winning_side not set here - leave as is
-                                    session.commit()
-                            except Exception as e:
-                                session.rollback()
-                                logger.error(f"Error updating principal for early sell: {e}")
-                            finally:
-                                session.close()
-                        
                         logger.info(
-                            f"Sell order {sell_order_id} filled: {filled_shares} shares, "
+                            f"Sell order {sell_order_id} filled: {filled_shares} shares / {trade.sell_order_size or 'N/A'}, "
                             f"received ${sell_dollars_received:.2f} (fee: ${sell_fee:.2f}), "
-                            f"net_proceeds=${net_proceeds:.2f}, new principal: ${new_principal:.2f}"
+                            f"status: {sell_status}. "
+                            f"(ROI and principal_after will be calculated at market resolution)"
                         )
                     
                     # Remove from open sell orders and clear retry count
@@ -2312,11 +2288,19 @@ class ThresholdTrader:
                     from agents.backtesting.backtesting_utils import calculate_polymarket_fee
                     sell_fee = calculate_polymarket_fee(sell_price, sell_dollars_received)
                     
+                    # Update sell order fill information with partial fill
+                    # NOTE: ROI and principal_after will be calculated at market resolution
                     self.db.update_sell_order_fill(
                         trade_id=trade_id,
                         sell_order_status="partial",
+                        sell_shares_filled=filled_shares,  # Track actual filled shares
                         sell_dollars_received=sell_dollars_received,
                         sell_fee=sell_fee,
+                    )
+                    
+                    logger.info(
+                        f"Partial fill detected for sell order {sell_order_id}: {filled_shares} shares filled "
+                        f"(order size: {trade.sell_order_size or 'N/A'})"
                     )
             
             except Exception as e:
@@ -2415,7 +2399,26 @@ class ThresholdTrader:
             sell_order_filled_amount = 0.0
             sell_order_total_amount = 0.0
             
-            if trade.sell_order_id:
+            # Reload trade to get latest sell_order_status (may have been cancelled)
+            trade = self.db.get_trade_by_id(trade.id)
+            if not trade:
+                logger.error(f"Trade {trade.id} not found when processing market resolution")
+                return
+            
+            # Check if sell order was cancelled or failed
+            is_sell_order_cancelled = (trade.sell_order_status == "cancelled")
+            is_sell_order_failed = (trade.sell_order_status == "failed")
+            
+            # If cancelled or failed, remove from open_sell_orders immediately
+            if (is_sell_order_cancelled or is_sell_order_failed) and trade.sell_order_id:
+                self.open_sell_orders.pop(trade.sell_order_id, None)
+                status_type = "cancelled" if is_sell_order_cancelled else "failed"
+                logger.info(
+                    f"✅ Sell order was {status_type} for trade {trade.id}. "
+                    f"Removed from open_sell_orders (now {len(self.open_sell_orders)} open sell orders)"
+                )
+            
+            if trade.sell_order_id and not is_sell_order_cancelled and not is_sell_order_failed:
                 max_retries = 10
                 retry_delay = 3.0  # seconds
                 
@@ -2461,6 +2464,11 @@ class ThresholdTrader:
                             is_filled_by_amount = sell_order_filled_amount > 0 and sell_order_total_amount > 0 and sell_order_filled_amount >= sell_order_total_amount
                             sell_order_filled_via_api = is_filled_by_status or is_filled_by_amount
                             
+                            # Check for partial fills - if filled_amount > 0 but < total_amount, it's partial
+                            is_partial_fill = (sell_order_filled_amount > 0 and 
+                                             sell_order_total_amount > 0 and 
+                                             sell_order_filled_amount < sell_order_total_amount)
+                            
                             logger.info(
                                 f"🔍 Sell order API check (attempt {attempt + 1}/{max_retries}): "
                                 f"Trade {trade.id}, sell_order_id={trade.sell_order_id}, "
@@ -2468,16 +2476,18 @@ class ThresholdTrader:
                                 f"filled_amount={sell_order_filled_amount}, "
                                 f"total_amount={sell_order_total_amount}, "
                                 f"is_filled={sell_order_filled_via_api}, "
+                                f"is_partial={is_partial_fill}, "
                                 f"db_status={trade.sell_order_status}"
                             )
                             
                             if sell_order_filled_via_api:
-                                # Order is filled - update database and break out of retry loop
+                                # Order is fully filled - update database and break out of retry loop
                                 logger.info(
-                                    f"✅ Sell order FILLED on attempt {attempt + 1}/{max_retries} - updating database"
+                                    f"✅ Sell order FULLY FILLED on attempt {attempt + 1}/{max_retries} - updating database"
                                 )
                                 
-                                # Update database with API result
+                                # Update database with API result - use sell_order_size as sell_shares_filled for full fills
+                                sell_shares_filled = sell_order_filled_amount if sell_order_filled_amount > 0 else trade.sell_order_size
                                 if trade.sell_order_status != "filled":
                                     logger.info(
                                         f"⚠️ Database says sell order is '{trade.sell_order_status}' but API says it's filled. "
@@ -2488,9 +2498,10 @@ class ThresholdTrader:
                                         trade_obj = session.query(RealTradeThreshold).filter_by(id=trade.id).first()
                                         if trade_obj:
                                             trade_obj.sell_order_status = "filled"
+                                            trade_obj.sell_shares_filled = sell_shares_filled  # Update filled shares
                                             # If we don't have sell_dollars_received, estimate it
                                             if not trade_obj.sell_dollars_received and trade_obj.sell_order_price:
-                                                trade_obj.sell_dollars_received = sell_order_filled_amount * trade_obj.sell_order_price
+                                                trade_obj.sell_dollars_received = sell_shares_filled * trade_obj.sell_order_price
                                             session.commit()
                                             # Reload trade object to get updated values
                                             trade = self.db.get_trade_by_id(trade.id)
@@ -2507,9 +2518,62 @@ class ThresholdTrader:
                                     f"(now {len(self.open_sell_orders)} open sell orders)"
                                 )
                                 
-                                break  # Exit retry loop - order is filled
+                                break  # Exit retry loop - order is fully filled
+                            elif is_partial_fill:
+                                # Partial fill detected - update database and retry a few times to see if it fully fills
+                                logger.info(
+                                    f"⏳ Partial fill detected on attempt {attempt + 1}/{max_retries}: "
+                                    f"{sell_order_filled_amount} / {sell_order_total_amount} shares filled. "
+                                    f"Updating database and will retry to check if order fully fills."
+                                )
+                                
+                                # Update database with partial fill information
+                                session = self.db.SessionLocal()
+                                try:
+                                    trade_obj = session.query(RealTradeThreshold).filter_by(id=trade.id).first()
+                                    if trade_obj:
+                                        # Update sell_shares_filled with current filled amount
+                                        trade_obj.sell_shares_filled = sell_order_filled_amount
+                                        trade_obj.sell_order_status = "partial"
+                                        # Update sell_dollars_received based on filled shares
+                                        if trade_obj.sell_order_price:
+                                            trade_obj.sell_dollars_received = sell_order_filled_amount * trade_obj.sell_order_price
+                                            # Recalculate sell_fee based on actual filled amount
+                                            from agents.backtesting.backtesting_utils import calculate_polymarket_fee
+                                            trade_obj.sell_fee = calculate_polymarket_fee(
+                                                trade_obj.sell_order_price, 
+                                                trade_obj.sell_dollars_received
+                                            )
+                                        session.commit()
+                                        # Reload trade object to get updated values
+                                        trade = self.db.get_trade_by_id(trade.id)
+                                        logger.info(
+                                            f"✅ Updated database: sell_shares_filled={sell_order_filled_amount}, "
+                                            f"status=partial"
+                                        )
+                                except Exception as e:
+                                    session.rollback()
+                                    logger.error(f"Error updating partial fill: {e}")
+                                finally:
+                                    session.close()
+                                
+                                # Retry a few more times (up to max_retries) to see if order fully fills
+                                # Only retry if we haven't exhausted all attempts
+                                if attempt < max_retries - 1:
+                                    logger.info(
+                                        f"⏳ Retrying in {retry_delay} seconds to check if partial fill becomes full fill... "
+                                        f"({attempt + 1}/{max_retries})"
+                                    )
+                                    await asyncio.sleep(retry_delay)
+                                else:
+                                    # Max retries reached - use partial fill for calculations
+                                    logger.info(
+                                        f"⚠️ Max retries reached. Using partial fill ({sell_order_filled_amount} shares) "
+                                        f"for ROI and principal calculations."
+                                    )
+                                    break  # Exit retry loop - use partial fill
                             else:
-                                # Order not filled yet - retry if we haven't exhausted attempts
+                                # Order not filled yet (no fill or partial) - retry if we haven't exhausted attempts
                                 if attempt < max_retries - 1:
                                     logger.info(
                                         f"⏳ Sell order not filled yet (status={sell_order_api_status}), "
@@ -2749,11 +2813,18 @@ class ThresholdTrader:
                 )
                 return
             
+            # Reload trade from database to get latest sell_shares_filled after retry loop
+            trade = self.db.get_trade_by_id(trade.id)
+            if not trade:
+                logger.error(f"Trade {trade.id} not found after market resolution check")
+                return
+            
             if trade.sell_order_id and sell_order_filled_via_api:
                 # Sell order filled (verified via API) - use actual proceeds
-                # Calculate based on what we actually received from selling
+                # Use sell_shares_filled from database (which may be partial or full)
+                # Default to sell_order_size if sell_shares_filled is not set (for backwards compatibility)
                 sell_price = trade.sell_order_price or 0.99
-                filled_shares_sold = sell_order_filled_amount if sell_order_filled_amount > 0 else (trade.sell_order_size or filled_shares)
+                filled_shares_sold = trade.sell_shares_filled if trade.sell_shares_filled is not None else (trade.sell_order_size or filled_shares)
                 sell_dollars_received = trade.sell_dollars_received or (filled_shares_sold * sell_price)
                 
                 # Calculate sell fee if not already set
@@ -2773,8 +2844,9 @@ class ThresholdTrader:
                     f"payout=${payout:.2f}, sell_fee=${sell_fee:.4f}, "
                     f"net_payout=${net_payout:.2f}, roi={roi*100:.2f}%"
                 )
-            elif not trade.sell_order_id or not sell_order_filled_via_api:
-                # Sell order didn't fill (or doesn't exist) - determine win/loss based on outcome_price
+            elif not trade.sell_order_id or not sell_order_filled_via_api or trade.sell_order_status == "cancelled" or trade.sell_order_status == "failed":
+                # Sell order didn't fill, doesn't exist, was cancelled, or failed
+                # Determine win/loss based on outcome_price
                 # If we bet YES: we won if outcome_price > 0.5, lost if outcome_price < 0.5
                 # If we bet NO: we won if outcome_price < 0.5, lost if outcome_price > 0.5
                 if trade.order_side == "YES":
@@ -2789,43 +2861,47 @@ class ThresholdTrader:
                     roi = net_payout / (dollars_spent + fee) if (dollars_spent + fee) > 0 else 0.0
                     logger.info(
                         f"Trade {trade.id} lost - market resolved against us (outcome_price={outcome_price:.4f}). "
-                        f"Sell order did not fill (api_status={sell_order_api_status or 'N/A'}). "
-                        f"Calculating ROI and updating principal."
+                        f"Sell order did not fill, was cancelled, or failed (sell_order_id={trade.sell_order_id}, "
+                        f"status={trade.sell_order_status}, api_status={sell_order_api_status or 'N/A'}). "
+                        f"All shares lost. Calculating ROI and updating principal."
                     )
                 else:
-                    # We won but sell order didn't fill (verified via API)
+                    # We won but sell order didn't fill or was cancelled
                     # Market resolved in our favor - shares are worth $1 each (outcome_price = 1.0)
                     # Calculate as if we claim at $1 per share, accounting for sell fees
                     payout = outcome_price * filled_shares  # Should be $1 * shares = total claimable
-                
-                # Calculate sell fee as if we sold at $1 per share
-                from agents.backtesting.backtesting_utils import calculate_polymarket_fee
-                estimated_sell_fee = calculate_polymarket_fee(1.0, payout)  # Fee for selling at $1
-                
-                # Update sell_fee in database if not already set (for tracking)
-                if not trade.sell_fee:
-                    session = self.db.SessionLocal()
-                    try:
-                        trade_obj = session.query(RealTradeThreshold).filter_by(id=trade.id).first()
-                        if trade_obj:
-                            trade_obj.sell_fee = estimated_sell_fee
-                            session.commit()
-                            logger.debug(f"Updated sell_fee to ${estimated_sell_fee:.2f} for trade {trade.id}")
-                    except Exception as e:
-                        session.rollback()
-                        logger.warning(f"Could not update sell_fee: {e}")
-                    finally:
-                        session.close()
-                
-                # Net payout accounts for both buy and sell fees
-                net_payout = payout - estimated_sell_fee - dollars_spent - fee
-                roi = net_payout / (dollars_spent + fee) if (dollars_spent + fee) > 0 else 0.0
-                
-                logger.info(
-                    f"Trade {trade.id} won but sell order did not fill (api_status={sell_order_api_status or 'N/A'}) - market resolved. "
-                    f"Assuming claim at $1 per share (outcome_price={outcome_price:.4f}). "
-                    f"Calculating ROI with estimated sell fee (${estimated_sell_fee:.2f}) and updating principal."
-                )
+                    
+                    # Calculate sell fee as if we sold at $1 per share
+                    from agents.backtesting.backtesting_utils import calculate_polymarket_fee
+                    estimated_sell_fee = calculate_polymarket_fee(1.0, payout)  # Fee for selling at $1
+                    
+                    # Update sell_fee in database if not already set (for tracking)
+                    if not trade.sell_fee:
+                        session = self.db.SessionLocal()
+                        try:
+                            trade_obj = session.query(RealTradeThreshold).filter_by(id=trade.id).first()
+                            if trade_obj:
+                                trade_obj.sell_fee = estimated_sell_fee
+                                session.commit()
+                                logger.debug(f"Updated sell_fee to ${estimated_sell_fee:.2f} for trade {trade.id}")
+                        except Exception as e:
+                            session.rollback()
+                            logger.warning(f"Could not update sell_fee: {e}")
+                        finally:
+                            session.close()
+                    
+                    # Net payout accounts for both buy and sell fees
+                    net_payout = payout - estimated_sell_fee - dollars_spent - fee
+                    roi = net_payout / (dollars_spent + fee) if (dollars_spent + fee) > 0 else 0.0
+                    
+                    logger.info(
+                        f"Trade {trade.id} won but sell order did not fill, was cancelled, or failed "
+                        f"(sell_order_id={trade.sell_order_id}, status={trade.sell_order_status}, "
+                        f"api_status={sell_order_api_status or 'N/A'}) - market resolved. "
+                        f"Assuming claim at $1 per share (outcome_price={outcome_price:.4f}, "
+                        f"filled_shares={filled_shares}). "
+                        f"Calculating ROI with estimated sell fee (${estimated_sell_fee:.2f}) and updating principal."
+                    )
             
             # Log outcome for debugging
             logger.info(
@@ -2843,12 +2919,13 @@ class ThresholdTrader:
             if trade.sell_order_id and sell_order_filled_via_api:
                 # Sell order filled (verified via API) - update principal based on actual net_payout
                 # This is the ONLY place where self.principal is updated (single source of truth)
+                old_principal = self.principal
                 new_principal = self.principal + net_payout
                 self.principal = new_principal
                 principal_updated = True
                 logger.info(
                     f"Sell order filled (verified via API) - updating principal at market resolution: "
-                    f"${self.principal:.2f} -> ${new_principal:.2f} "
+                    f"${old_principal:.2f} -> ${new_principal:.2f} "
                     f"(net_payout=${net_payout:.2f}, market resolution for trade {trade.id})"
                 )
             else:
@@ -2870,10 +2947,65 @@ class ThresholdTrader:
                         f"(net_payout=${net_payout:.2f}, estimated sell_fee included)"
                     )
             
-            # Update trade in database
-            # Set principal_after to match self.principal (which was just updated above)
-            # This ensures database principal_after matches the single source of truth
+            # Log principal state after update for debugging
+            logger.info(
+                f"📊 Principal after trade {trade.id}: ${self.principal:.2f} "
+                f"(was ${old_principal:.2f}, net_payout=${net_payout:.2f})"
+            )
+            
+            # IMPORTANT: principal_after_value should be the new principal after this trade
+            # This is what gets saved to the database for this specific trade
+            # It should reflect the actual principal after processing this trade's outcome
             principal_after_value = new_principal if principal_updated else None
+            
+            # Verify principal consistency: check the absolute latest principal_after in database
+            # (including negative values) to see what the database actually has
+            # This is just for logging/debugging - we don't overwrite principal_after_value
+            # because that should reflect THIS trade's outcome
+            session = self.db.SessionLocal()
+            try:
+                latest_trade_db = session.query(RealTradeThreshold).filter(
+                    RealTradeThreshold.deployment_id == self.deployment_id,
+                    RealTradeThreshold.principal_after.isnot(None),
+                    RealTradeThreshold.order_id.isnot(None),
+                    RealTradeThreshold.market_resolved_at.isnot(None),
+                    RealTradeThreshold.order_status != "failed",
+                ).order_by(RealTradeThreshold.market_resolved_at.desc()).first()
+                
+                if latest_trade_db and latest_trade_db.id != trade.id:
+                    # Check previous trade's principal_after (not the current one we're processing)
+                    db_previous_principal = latest_trade_db.principal_after
+                    db_positive_principal = self.db.get_latest_principal(deployment_id=self.deployment_id)
+                    
+                    # Check if in-memory principal matches what we expect based on previous trade
+                    expected_principal = db_previous_principal + net_payout
+                    if abs(expected_principal - self.principal) > 0.01:
+                        logger.warning(
+                            f"⚠️ Principal calculation mismatch detected! "
+                            f"In-memory principal: ${self.principal:.2f}, "
+                            f"Previous trade {latest_trade_db.id} principal_after: ${db_previous_principal:.2f}, "
+                            f"Expected after this trade: ${expected_principal:.2f}, "
+                            f"Database latest positive principal: ${db_positive_principal:.2f if db_positive_principal else 'N/A'}. "
+                            f"Using calculated value (${new_principal:.2f}) for this trade."
+                        )
+                    else:
+                        logger.debug(
+                            f"✓ Principal calculation consistent: "
+                            f"previous=${db_previous_principal:.2f}, "
+                            f"after this trade=${self.principal:.2f}"
+                        )
+            except Exception as e:
+                logger.error(f"Error checking principal consistency: {e}", exc_info=True)
+            finally:
+                session.close()
+            
+            # Ensure principal_after_value is set correctly for this trade
+            # This is what gets saved to the database - it should be the new principal after this trade
+            if principal_updated:
+                principal_after_value = self.principal
+                logger.info(
+                    f"💾 Saving principal_after=${principal_after_value:.2f} to database for trade {trade.id}"
+                )
             
             # If sell order already filled (verified via API), use the recalculated values from API
             if trade.sell_order_id and sell_order_filled_via_api:
