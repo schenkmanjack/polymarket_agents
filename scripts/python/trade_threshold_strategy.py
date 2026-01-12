@@ -2524,16 +2524,47 @@ class ThresholdTrader:
                                     # Max retries reached - order still not filled
                                     logger.warning(
                                         f"⚠️ Sell order {trade.sell_order_id} still not filled after {max_retries} attempts. "
-                                        f"Assuming it was a loss (market resolved, sell order did not execute)."
+                                        f"Market resolved - cancelling order to allow trading in next market."
                                     )
-                                    # Update database to reflect that order didn't fill
+                                    # Cancel the order via API if it's still open
+                                    # Verify order belongs to this market before canceling
+                                    if sell_order_api_status in ["live", "LIVE", "open", "OPEN"]:
+                                        # Verify order belongs to this market
+                                        order_belongs_to_market = False
+                                        try:
+                                            order_status_check = self.pm.get_order_status(trade.sell_order_id)
+                                            if order_status_check:
+                                                order_market = order_status_check.get("market")
+                                                order_asset_id = order_status_check.get("asset_id")
+                                                # Check if order's market or asset_id matches this trade's market
+                                                if order_market == trade.market_id or order_asset_id == trade.token_id:
+                                                    order_belongs_to_market = True
+                                                else:
+                                                    logger.warning(
+                                                        f"⚠️ Order {trade.sell_order_id} does not belong to market {trade.market_slug} "
+                                                        f"(order_market={order_market}, trade_market_id={trade.market_id}). Skipping cancellation."
+                                                    )
+                                        except Exception as e:
+                                            logger.warning(f"Could not verify order market before cancellation: {e}")
+                                            # If verification fails, assume it belongs (order_id came from this trade)
+                                            order_belongs_to_market = True
+                                        
+                                        if order_belongs_to_market:
+                                            logger.info(f"🔄 Cancelling sell order {trade.sell_order_id} for market {trade.market_slug} via API...")
+                                            cancel_result = self.pm.cancel_order(trade.sell_order_id)
+                                            if cancel_result:
+                                                logger.info(f"✅ Successfully cancelled sell order {trade.sell_order_id} for market {trade.market_slug}")
+                                            else:
+                                                logger.warning(f"⚠️ Failed to cancel sell order {trade.sell_order_id} via API")
+                                    # Update database to reflect that order is cancelled
                                     session = self.db.SessionLocal()
                                     try:
                                         trade_obj = session.query(RealTradeThreshold).filter_by(id=trade.id).first()
                                         if trade_obj:
-                                            trade_obj.sell_order_status = "cancelled" if sell_order_api_status not in ["live", "LIVE", "open", "OPEN"] else "open"
+                                            trade_obj.sell_order_status = "cancelled"
                                             session.commit()
                                             trade = self.db.get_trade_by_id(trade.id)
+                                            logger.info(f"✅ Updated database: sell order {trade.sell_order_id} marked as cancelled")
                                     except Exception as e:
                                         session.rollback()
                                         logger.error(f"Error updating sell order status: {e}")
@@ -2550,8 +2581,22 @@ class ThresholdTrader:
                             else:
                                 logger.warning(
                                     f"⚠️ Sell order {trade.sell_order_id} not found in API after {max_retries} attempts. "
-                                    f"Assuming it was a loss (market resolved, sell order did not execute)."
+                                    f"Market resolved - marking as cancelled to allow trading in next market."
                                 )
+                                # Update database to mark as cancelled
+                                session = self.db.SessionLocal()
+                                try:
+                                    trade_obj = session.query(RealTradeThreshold).filter_by(id=trade.id).first()
+                                    if trade_obj:
+                                        trade_obj.sell_order_status = "cancelled"
+                                        session.commit()
+                                        trade = self.db.get_trade_by_id(trade.id)
+                                        logger.info(f"✅ Updated database: sell order {trade.sell_order_id} marked as cancelled (not found in API)")
+                                except Exception as e:
+                                    session.rollback()
+                                    logger.error(f"Error updating sell order status: {e}")
+                                finally:
+                                    session.close()
                     except Exception as e:
                         logger.error(
                             f"Error checking sell order status via API (attempt {attempt + 1}/{max_retries}): {e}",
@@ -2560,6 +2605,55 @@ class ThresholdTrader:
                         # Retry on error unless this is the last attempt
                         if attempt < max_retries - 1:
                             await asyncio.sleep(retry_delay)
+                
+                # After retry loop completes, if order is still not filled and still open, cancel it
+                if not sell_order_filled_via_api and trade.sell_order_id:
+                    # Final check: is the order still open?
+                    try:
+                        final_order_status = self.pm.get_order_status(trade.sell_order_id)
+                        if final_order_status:
+                            final_status = final_order_status.get("status", "unknown")
+                            if final_status in ["live", "LIVE", "open", "OPEN"]:
+                                # Verify order belongs to this market before canceling
+                                order_belongs_to_market = False
+                                order_market = final_order_status.get("market")
+                                order_asset_id = final_order_status.get("asset_id")
+                                # Check if order's market or asset_id matches this trade's market
+                                if order_market == trade.market_id or order_asset_id == trade.token_id:
+                                    order_belongs_to_market = True
+                                else:
+                                    logger.warning(
+                                        f"⚠️ Order {trade.sell_order_id} does not belong to market {trade.market_slug} "
+                                        f"(order_market={order_market}, trade_market_id={trade.market_id}). Skipping cancellation."
+                                    )
+                                
+                                if order_belongs_to_market:
+                                    logger.info(
+                                        f"🔄 Market {trade.market_slug} resolved but sell order {trade.sell_order_id} is still open. "
+                                        f"Cancelling to allow trading in next market..."
+                                    )
+                                    cancel_result = self.pm.cancel_order(trade.sell_order_id)
+                                    if cancel_result:
+                                        logger.info(f"✅ Successfully cancelled sell order {trade.sell_order_id} for market {trade.market_slug}")
+                                    else:
+                                        logger.warning(f"⚠️ Failed to cancel sell order {trade.sell_order_id} via API")
+                                
+                                # Update database
+                                session = self.db.SessionLocal()
+                                try:
+                                    trade_obj = session.query(RealTradeThreshold).filter_by(id=trade.id).first()
+                                    if trade_obj:
+                                        trade_obj.sell_order_status = "cancelled"
+                                        session.commit()
+                                        trade = self.db.get_trade_by_id(trade.id)
+                                        logger.info(f"✅ Updated database: sell order {trade.sell_order_id} marked as cancelled")
+                                except Exception as e:
+                                    session.rollback()
+                                    logger.error(f"Error updating sell order status: {e}")
+                                finally:
+                                    session.close()
+                    except Exception as e:
+                        logger.warning(f"Could not check final order status for cancellation: {e}")
             
             # Check if order was actually filled
             filled_shares = trade.filled_shares or 0.0
