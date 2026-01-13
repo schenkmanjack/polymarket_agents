@@ -1,8 +1,8 @@
 {
-  "threshold": 0.68,
+  "threshold": 0.78,
   "upper_threshold": 0.97,
   "margin": 0.01,
-  "threshold_sell": 0.4,
+  "threshold_sell": 0.49,
   "margin_sell": 0.02,
   "kelly_fraction": 0.6,
   "kelly_scale_factor": 0.6,
