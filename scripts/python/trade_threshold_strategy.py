@@ -58,6 +58,7 @@ from agents.trading.utils import (
     calculate_kelly_amount,
     calculate_payout_for_filled_sell,
     calculate_payout_for_unfilled_sell,
+    calculate_payout_for_partial_fill,
     parse_order_status,
     is_order_filled,
     is_order_cancelled,
@@ -159,7 +160,7 @@ class ThresholdTrader:
         self.orders_checked_open: Dict[str, int] = {}  # order_id -> check_count (cancel after 5 checks)
         
         # Timing
-        self.orderbook_poll_interval = 1.0  # seconds - check prices every 1 second for placing orders and threshold sells
+        self.orderbook_poll_interval = self.config.orderbook_poll_interval  # seconds - configurable polling interval
         self.order_status_check_interval = 10.0  # seconds
         self.market_resolution_check_interval = 30.0  # seconds
         
@@ -489,6 +490,7 @@ class ThresholdTrader:
         for market_slug, market_info in list(self.monitored_markets.items()):
             # Skip if already bet on (check both memory and database)
             if market_slug in self.markets_with_bets:
+                self.markets_near_threshold.discard(market_slug)  # Clean up tracking
                 continue
             
             # Also check database to prevent duplicate orders across ALL deployments for THIS market
@@ -2303,6 +2305,83 @@ class ThresholdTrader:
                             f"Will continue checking on next loop iteration. "
                             f"Need more evidence (filled_amount, trade record, or notification) before marking as filled."
                         )
+                        
+                        # Check if this is a threshold sell order that hasn't filled quickly
+                        # Threshold sell orders are at prices < 0.99 (e.g., 0.38 for threshold_sell=0.4)
+                        # Only re-price threshold sell orders, not regular $0.99 sell orders
+                        # If threshold sell has been open for > 5 seconds and hasn't filled, cancel and re-price lower
+                        if trade.sell_order_price and trade.sell_order_price < 0.99 and trade.sell_order_placed_at:
+                            from datetime import datetime, timezone
+                            time_open = datetime.now(timezone.utc) - trade.sell_order_placed_at
+                            if trade.sell_order_placed_at.tzinfo is None:
+                                time_open = datetime.now(timezone.utc) - trade.sell_order_placed_at.replace(tzinfo=timezone.utc)
+                            
+                            seconds_open = time_open.total_seconds()
+                            
+                            # If threshold sell order has been open > 5 seconds without filling, re-price lower
+                            if seconds_open > 5.0:
+                                # Check re-price attempts to avoid infinite loops
+                                if not hasattr(self, '_threshold_sell_reprice_attempts'):
+                                    self._threshold_sell_reprice_attempts = {}
+                                
+                                reprice_count = self._threshold_sell_reprice_attempts.get(trade_id, 0)
+                                max_reprice_attempts = 3  # Maximum 3 re-price attempts
+                                
+                                if reprice_count < max_reprice_attempts:
+                                    # Calculate new lower price (reduce by margin_sell or 0.01, whichever is larger)
+                                    current_price = trade.sell_order_price
+                                    price_reduction = max(self.config.margin_sell, 0.01)
+                                    new_price = max(0.01, current_price - price_reduction)  # Minimum price is 0.01
+                                    
+                                    logger.info(
+                                        f"⏰ Threshold sell order {sell_order_id} (trade {trade_id}) has been open for {seconds_open:.1f} seconds "
+                                        f"(> 5 seconds) without filling. Cancelling and re-pricing at ${new_price:.4f} (was ${current_price:.4f}). "
+                                        f"Re-price attempt {reprice_count + 1}/{max_reprice_attempts}"
+                                    )
+                                    
+                                    # Cancel the current order
+                                    try:
+                                        cancel_result = self.pm.cancel_order(sell_order_id)
+                                        if cancel_result:
+                                            logger.info(f"✅ Successfully cancelled threshold sell order {sell_order_id} for re-pricing")
+                                            # Remove from tracking
+                                            self.open_sell_orders.pop(sell_order_id, None)
+                                            
+                                            # Update database to mark as cancelled
+                                            session = self.db.SessionLocal()
+                                            try:
+                                                trade_obj = session.query(RealTradeThreshold).filter_by(id=trade_id).first()
+                                                if trade_obj:
+                                                    trade_obj.sell_order_status = "cancelled"
+                                                    trade_obj.sell_order_id = None  # Clear to allow new order
+                                                    session.commit()
+                                                    logger.debug(f"Updated database: cancelled threshold sell order for re-pricing")
+                                            except Exception as e:
+                                                session.rollback()
+                                                logger.error(f"Error updating database after cancellation: {e}")
+                                            finally:
+                                                session.close()
+                                            
+                                            # Reload trade to get updated state
+                                            trade = self.db.get_trade_by_id(trade_id)
+                                            if trade:
+                                                # Place new order at lower price
+                                                await self._place_early_sell_order(trade, new_price)
+                                                
+                                                # Increment re-price counter
+                                                self._threshold_sell_reprice_attempts[trade_id] = reprice_count + 1
+                                            
+                                            # Skip further processing of this order in this iteration
+                                            continue
+                                        else:
+                                            logger.warning(f"⚠️ Failed to cancel threshold sell order {sell_order_id} for re-pricing")
+                                    except Exception as e:
+                                        logger.error(f"Error cancelling threshold sell order for re-pricing: {e}", exc_info=True)
+                                else:
+                                    logger.info(
+                                        f"⏰ Threshold sell order {sell_order_id} (trade {trade_id}) has been open for {seconds_open:.1f} seconds "
+                                        f"(> 5 seconds) but max re-price attempts ({max_reprice_attempts}) reached. Keeping current order."
+                                    )
                 
                 if is_filled or is_cancelled:
                     if is_filled:
@@ -2335,6 +2414,10 @@ class ThresholdTrader:
                             f"status: {sell_status}. "
                             f"(ROI and principal_after will be calculated at market resolution)"
                         )
+                        
+                        # Clear re-price counter if it exists (order filled successfully)
+                        if hasattr(self, '_threshold_sell_reprice_attempts'):
+                            self._threshold_sell_reprice_attempts.pop(trade_id, None)
                     
                     # Remove from open sell orders and clear retry count
                     self.open_sell_orders.pop(sell_order_id, None)
@@ -2866,20 +2949,45 @@ class ThresholdTrader:
                     from agents.backtesting.backtesting_utils import calculate_polymarket_fee
                     sell_fee = calculate_polymarket_fee(sell_price, sell_dollars_received)
                 
-                # Calculate payout, net_payout, and ROI using utility function
-                payout, net_payout, roi = calculate_payout_for_filled_sell(
-                    sell_dollars_received=sell_dollars_received,
-                    sell_fee=sell_fee,
-                    dollars_spent=dollars_spent,
-                    buy_fee=fee,
-                )
+                # Check if this is a partial fill (some shares sold, but not all)
+                is_partial_fill = filled_shares_sold < filled_shares - 0.01  # Use small epsilon for float comparison
                 
-                logger.info(
-                    f"Trade {trade.id} sell order FILLED (verified via API): "
-                    f"sell_price=${sell_price:.4f}, filled_shares={filled_shares_sold}, "
-                    f"payout=${payout:.2f}, sell_fee=${sell_fee:.4f}, "
-                    f"net_payout=${net_payout:.2f}, roi={roi*100:.2f}%"
-                )
+                if is_partial_fill:
+                    # Partial fill - need to account for remaining unfilled shares at market resolution
+                    payout, net_payout, roi = calculate_payout_for_partial_fill(
+                        sell_dollars_received=sell_dollars_received,
+                        sell_fee=sell_fee,
+                        filled_shares=filled_shares,
+                        sell_shares_filled=filled_shares_sold,
+                        outcome_price=outcome_price,
+                        order_side=trade.order_side,
+                        dollars_spent=dollars_spent,
+                        buy_fee=fee,
+                    )
+                    
+                    remaining_shares = filled_shares - filled_shares_sold
+                    logger.info(
+                        f"Trade {trade.id} sell order PARTIAL FILL (verified via API): "
+                        f"sell_price=${sell_price:.4f}, sold_shares={filled_shares_sold}/{filled_shares}, "
+                        f"remaining_shares={remaining_shares:.2f}, "
+                        f"payout=${payout:.2f} (${sell_dollars_received:.2f} from sale + ${payout - sell_dollars_received:.2f} from remaining), "
+                        f"sell_fee=${sell_fee:.4f}, net_payout=${net_payout:.2f}, roi={roi*100:.2f}%"
+                    )
+                else:
+                    # Full fill - all shares were sold
+                    payout, net_payout, roi = calculate_payout_for_filled_sell(
+                        sell_dollars_received=sell_dollars_received,
+                        sell_fee=sell_fee,
+                        dollars_spent=dollars_spent,
+                        buy_fee=fee,
+                    )
+                    
+                    logger.info(
+                        f"Trade {trade.id} sell order FULLY FILLED (verified via API): "
+                        f"sell_price=${sell_price:.4f}, filled_shares={filled_shares_sold}, "
+                        f"payout=${payout:.2f}, sell_fee=${sell_fee:.4f}, "
+                        f"net_payout=${net_payout:.2f}, roi={roi*100:.2f}%"
+                    )
             elif not trade.sell_order_id or not sell_order_filled_via_api or trade.sell_order_status == "cancelled" or trade.sell_order_status == "failed":
                 # Sell order didn't fill, doesn't exist, was cancelled, or failed
                 # Calculate payout, net_payout, and ROI using utility function

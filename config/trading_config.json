@@ -9,5 +9,6 @@
   "market_type": "15m",
   "initial_principal": 20.0,
   "dollar_bet_limit": 160.0,
-  "max_minutes_before_resolution": 6
+  "max_minutes_before_resolution": 6,
+  "orderbook_poll_interval": 0.1
 }

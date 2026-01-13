@@ -17,6 +17,7 @@ from agents.trading.utils.market_resolution_helpers import (
     calculate_roi,
     calculate_payout_for_filled_sell,
     calculate_payout_for_unfilled_sell,
+    calculate_payout_for_partial_fill,
     determine_bet_outcome,
 )
 from agents.trading.utils.order_status_helpers import (
@@ -42,6 +43,7 @@ __all__ = [
     "calculate_roi",
     "calculate_payout_for_filled_sell",
     "calculate_payout_for_unfilled_sell",
+    "calculate_payout_for_partial_fill",
     "determine_bet_outcome",
     # Order status
     "parse_order_status",

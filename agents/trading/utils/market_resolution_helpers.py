@@ -105,6 +105,71 @@ def calculate_payout_for_unfilled_sell(
     return bet_won, payout, net_payout, roi
 
 
+def calculate_payout_for_partial_fill(
+    sell_dollars_received: float,
+    sell_fee: float,
+    filled_shares: float,
+    sell_shares_filled: float,
+    outcome_price: float,
+    order_side: str,
+    dollars_spent: float,
+    buy_fee: float,
+) -> Tuple[float, float, float]:
+    """
+    Calculate payout, net_payout, and ROI for a trade with partial sell order fill.
+    
+    Combines:
+    - Proceeds from filled shares (already sold)
+    - Value of remaining unfilled shares at market resolution
+    
+    Args:
+        sell_dollars_received: Dollars received from filled portion of sell order
+        sell_fee: Fee paid on filled portion of sell order
+        filled_shares: Total shares bought (from buy order)
+        sell_shares_filled: Shares that were sold (partial fill)
+        outcome_price: Market outcome price (0.0 to 1.0)
+        order_side: 'YES' or 'NO'
+        dollars_spent: Dollars spent on buy order
+        buy_fee: Fee paid on buy order
+    
+    Returns:
+        Tuple of (payout, net_payout, roi)
+    """
+    # Calculate remaining unfilled shares
+    remaining_shares = filled_shares - sell_shares_filled
+    
+    # Determine win/loss for remaining shares
+    if order_side == "YES":
+        bet_won = outcome_price > 0.5
+    else:  # NO
+        bet_won = outcome_price < 0.5
+    
+    # Calculate value of remaining shares at market resolution
+    if not bet_won:
+        # We lost - remaining shares are worthless
+        remaining_shares_value = 0.0
+        remaining_sell_fee = 0.0
+    else:
+        # We won - remaining shares are worth outcome_price per share
+        remaining_shares_value = outcome_price * remaining_shares
+        # Calculate estimated sell fee if we were to sell remaining shares at outcome_price
+        remaining_sell_fee = calculate_polymarket_fee(outcome_price, remaining_shares_value)
+    
+    # Total payout = proceeds from sold shares + value of remaining shares
+    payout = sell_dollars_received + remaining_shares_value
+    
+    # Total fees = sell fee on filled portion + estimated sell fee on remaining + buy fee
+    total_sell_fee = sell_fee + remaining_sell_fee
+    
+    # Net payout = total payout - all fees - buy cost
+    net_payout = payout - total_sell_fee - dollars_spent - buy_fee
+    
+    # Calculate ROI
+    roi = calculate_roi(net_payout, dollars_spent, buy_fee)
+    
+    return payout, net_payout, roi
+
+
 def determine_bet_outcome(outcome_price: float, order_side: str) -> bool:
     """
     Determine if a bet won based on outcome price and order side.

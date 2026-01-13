@@ -109,6 +109,11 @@ class TradingConfig:
             if not isinstance(max_minutes, (int, float)) or max_minutes <= 0.0:
                 raise ValueError(f"max_minutes_before_resolution must be a positive float or null, got {max_minutes}")
         
+        # Validate orderbook_poll_interval (optional, defaults to 1.0)
+        orderbook_poll_interval = self.config.get('orderbook_poll_interval', 1.0)
+        if not isinstance(orderbook_poll_interval, (int, float)) or orderbook_poll_interval <= 0.0:
+            raise ValueError(f"orderbook_poll_interval must be a positive float, got {orderbook_poll_interval}")
+        
         logger.info("✓ Config validation passed")
     
     @property
@@ -156,6 +161,11 @@ class TradingConfig:
         """Maximum minutes before resolution to allow buying. None means no limit."""
         value = self.config.get('max_minutes_before_resolution')
         return float(value) if value is not None else None
+    
+    @property
+    def orderbook_poll_interval(self) -> float:
+        """Orderbook polling interval in seconds. How frequently to check prices for threshold triggers."""
+        return float(self.config.get('orderbook_poll_interval', 1.0))
     
     def get_amount_invested(self, principal: float) -> float:
         """
