@@ -1567,6 +1567,10 @@ class ThresholdTrader:
             f"  Order Value: ${order_value:.2f}\n"
             f"  Principal: ${self.principal:.2f}"
         )
+        logger.info(
+            f"📋 Next steps: System will monitor buy order status. "
+            f"When buy order fills, a limit sell order at $0.99 will be placed automatically."
+        )
         
         return True
     
@@ -1612,6 +1616,10 @@ class ThresholdTrader:
         if not all_trades_to_check:
             return
         
+        logger.debug(
+            f"🔍 Checking status of {len(all_trades_to_check)} open buy orders: {list(all_trades_to_check.keys())[:5]}..."
+        )
+        
         # First, check fills/trades to see if any orders have been filled
         # This is more reliable than get_order_status for filled orders
         # Note: get_order() has a known issue (py-clob-client #217) where it doesn't return filled orders
@@ -1628,9 +1636,34 @@ class ThresholdTrader:
             elif hasattr(self.pm, 'get_address_for_private_key'):
                 wallet_address = self.pm.get_address_for_private_key()
             
-            fills = self.pm.get_trades(maker_address=wallet_address)
+            # Check both maker and taker addresses because:
+            # - When we place a BUY order, we're the TAKER (taking liquidity)
+            # - When we place a SELL order, we're the MAKER (providing liquidity)
+            fills = []
+            maker_fills = self.pm.get_trades(maker_address=wallet_address) or []
+            taker_fills = self.pm.get_trades(taker_address=wallet_address) or []
+            
+            # Deduplicate fills (same fill might appear in both lists)
+            seen_fill_ids = set()
+            for fill in maker_fills:
+                fill_id = fill.get("id") or fill.get("trade_id") or str(fill)
+                if fill_id not in seen_fill_ids:
+                    fills.append(fill)
+                    seen_fill_ids.add(fill_id)
+            
+            for fill in taker_fills:
+                fill_id = fill.get("id") or fill.get("trade_id") or str(fill)
+                if fill_id not in seen_fill_ids:
+                    fills.append(fill)
+                    seen_fill_ids.add(fill_id)
+            
             if fills:
-                logger.debug(f"📊 get_trades() response for buy orders: {fills}")
+                logger.info(
+                    f"📊 Checking fills for {len(all_trades_to_check)} open buy orders. "
+                    f"Found {len(fills)} total fills (maker: {len(maker_fills)}, taker: {len(taker_fills)}, "
+                    f"after dedup: {len(fills)}). "
+                    f"Open order IDs: {list(all_trades_to_check.keys())[:3]}..."
+                )
                 for fill in fills:
                     # Try multiple field names for order ID (taker_order_id is the actual field name)
                     fill_order_id = (
@@ -1639,8 +1672,24 @@ class ThresholdTrader:
                         fill.get("order_id") or 
                         fill.get("id")
                     )
-                    if fill_order_id in all_trades_to_check:
+                    
+                    # Log available fields for debugging
+                    if fill_order_id:
+                        logger.debug(
+                            f"🔍 Fill has order_id={fill_order_id} (from fields: "
+                            f"taker_order_id={fill.get('taker_order_id')}, "
+                            f"orderID={fill.get('orderID')}, "
+                            f"order_id={fill.get('order_id')}, "
+                            f"id={fill.get('id')})"
+                        )
+                    
+                    if fill_order_id and fill_order_id in all_trades_to_check:
                         trade_id = all_trades_to_check[fill_order_id]
+                        logger.info(
+                            f"🎯 Found matching fill for order {fill_order_id} (trade {trade_id}). "
+                            f"Fill details: size={fill.get('size')}, price={fill.get('price')}, "
+                            f"maker={fill.get('maker')}, taker={fill.get('taker')}"
+                        )
                         trade = self.db.get_trade_by_id(trade_id)
                         if trade and not trade.filled_shares:
                             # Verify this fill belongs to this trade by checking order_id matches
@@ -1723,6 +1772,23 @@ class ThresholdTrader:
                             
                             # Remove from all_trades_to_check so we don't check it again below
                             all_trades_to_check.pop(fill_order_id, None)
+                    else:
+                        # Fill found but order_id doesn't match any open orders
+                        logger.debug(
+                            f"🔍 Fill order_id {fill_order_id} not in open orders list. "
+                            f"Open orders: {list(all_trades_to_check.keys())[:5]}..."
+                        )
+                else:
+                    # Fill found but no order_id field
+                    logger.debug(
+                        f"🔍 Fill has no order_id field. Fill keys: {list(fill.keys())}"
+                    )
+            
+            if fills and len(all_trades_to_check) > 0:
+                logger.info(
+                    f"📊 After checking fills, {len(all_trades_to_check)} orders still open: "
+                    f"{list(all_trades_to_check.keys())[:3]}..."
+                )
         except Exception as e:
             logger.error(f"Error checking fills/trades for buy orders: {e}", exc_info=True)
         
