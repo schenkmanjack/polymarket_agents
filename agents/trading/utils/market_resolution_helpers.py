@@ -3,7 +3,7 @@ Market resolution calculation utilities for threshold strategy.
 
 Pure functions for calculating ROI, payout, and principal updates.
 """
-from typing import Tuple
+from typing import Tuple, Optional
 from agents.backtesting.backtesting_utils import calculate_polymarket_fee
 
 
@@ -58,31 +58,38 @@ def calculate_payout_for_unfilled_sell(
     order_side: str,
     dollars_spent: float,
     buy_fee: float,
+    winning_side: Optional[str] = None,
 ) -> Tuple[bool, float, float, float]:
     """
     Calculate payout, net_payout, and ROI for a trade where sell order didn't fill.
     
-    Determines win/loss based on outcome_price and calculates payout accordingly:
+    NOTE: This function is ONLY used when the sell order didn't fill. When the sell order
+    fills, we use actual proceeds and don't need winning_side.
+    
+    Determines win/loss based on winning_side (preferred) or outcome_price (fallback):
     - If we lost: payout = $0, net_payout = -(dollars_spent + fee)
     - If we won: payout = $1 per share (claimable), net_payout = payout - estimated_sell_fee - dollars_spent - fee
     
     Args:
-        outcome_price: Market outcome price (0.0 to 1.0)
+        outcome_price: Price of the token we bet on (0.0 to 1.0) - used for payout calculation
         filled_shares: Number of shares filled
-        order_side: 'YES' or 'NO'
+        order_side: 'YES' or 'NO' - the side we bet on
         dollars_spent: Dollars spent on buy order
         buy_fee: Fee paid on buy order
+        winning_side: 'YES' or 'NO' - the side that won the market (preferred method)
     
     Returns:
         Tuple of (bet_won, payout, net_payout, roi)
     """
-    # Determine win/loss based on outcome_price
-    # If we bet YES: we won if outcome_price > 0.5, lost if outcome_price < 0.5
-    # If we bet NO: we won if outcome_price < 0.5, lost if outcome_price > 0.5
-    if order_side == "YES":
+    # Determine win/loss: compare our order_side to the winning_side
+    # This is the most reliable method as it uses the actual market resolution
+    if winning_side is not None:
+        bet_won = (order_side == winning_side)
+    else:
+        # Fallback: use outcome_price (less reliable, but works if winning_side not available)
+        # outcome_price is the price of the token we bet on
+        # If we won, the token price should be close to 1.0 (e.g., > 0.5)
         bet_won = outcome_price > 0.5
-    else:  # NO
-        bet_won = outcome_price < 0.5
     
     if not bet_won:
         # We lost - shares are worthless
@@ -114,23 +121,29 @@ def calculate_payout_for_partial_fill(
     order_side: str,
     dollars_spent: float,
     buy_fee: float,
+    winning_side: Optional[str] = None,
 ) -> Tuple[float, float, float]:
     """
     Calculate payout, net_payout, and ROI for a trade with partial sell order fill.
     
+    NOTE: This function is used when the sell order partially filled. We need winning_side
+    to determine the value of the remaining unsold shares. For full fills, we use actual
+    proceeds and don't need winning_side.
+    
     Combines:
-    - Proceeds from filled shares (already sold)
-    - Value of remaining unfilled shares at market resolution
+    - Proceeds from filled shares (already sold) - uses actual proceeds
+    - Value of remaining unfilled shares at market resolution - needs winning_side to determine
     
     Args:
         sell_dollars_received: Dollars received from filled portion of sell order
         sell_fee: Fee paid on filled portion of sell order
         filled_shares: Total shares bought (from buy order)
         sell_shares_filled: Shares that were sold (partial fill)
-        outcome_price: Market outcome price (0.0 to 1.0)
-        order_side: 'YES' or 'NO'
+        outcome_price: Price of the token we bet on (0.0 to 1.0) - used for payout calculation
+        order_side: 'YES' or 'NO' - the side we bet on
         dollars_spent: Dollars spent on buy order
         buy_fee: Fee paid on buy order
+        winning_side: 'YES' or 'NO' - the side that won the market (needed to value remaining shares)
     
     Returns:
         Tuple of (payout, net_payout, roi)
@@ -138,11 +151,15 @@ def calculate_payout_for_partial_fill(
     # Calculate remaining unfilled shares
     remaining_shares = filled_shares - sell_shares_filled
     
-    # Determine win/loss for remaining shares
-    if order_side == "YES":
+    # Determine win/loss for remaining shares: compare our order_side to the winning_side
+    # This is the most reliable method as it uses the actual market resolution
+    if winning_side is not None:
+        bet_won = (order_side == winning_side)
+    else:
+        # Fallback: use outcome_price (less reliable, but works if winning_side not available)
+        # outcome_price is the price of the token we bet on
+        # If we won, the token price should be close to 1.0 (e.g., > 0.5)
         bet_won = outcome_price > 0.5
-    else:  # NO
-        bet_won = outcome_price < 0.5
     
     # Calculate value of remaining shares at market resolution
     if not bet_won:
@@ -170,18 +187,30 @@ def calculate_payout_for_partial_fill(
     return payout, net_payout, roi
 
 
-def determine_bet_outcome(outcome_price: float, order_side: str) -> bool:
+def determine_bet_outcome(order_side: str, winning_side: Optional[str] = None, outcome_price: Optional[float] = None) -> bool:
     """
-    Determine if a bet won based on outcome price and order side.
+    Determine if a bet won based on winning side (preferred) or outcome price (fallback).
     
     Args:
-        outcome_price: Market outcome price (0.0 to 1.0)
-        order_side: 'YES' or 'NO'
+        order_side: 'YES' or 'NO' - the side we bet on
+        winning_side: 'YES' or 'NO' - the side that won the market (preferred method)
+        outcome_price: Price of the token we bet on (0.0 to 1.0) - used as fallback if winning_side not available
     
     Returns:
         True if bet won, False if bet lost
+    
+    Note: Using winning_side is the most reliable method as it uses the actual market resolution.
+          outcome_price is only used as a fallback if winning_side is not provided.
     """
-    if order_side == "YES":
+    # Preferred method: compare our order_side to the winning_side
+    if winning_side is not None:
+        return order_side == winning_side
+    
+    # Fallback: use outcome_price (less reliable)
+    if outcome_price is not None:
+        # outcome_price is the price of the token we bet on
+        # If we won, the token price should be close to 1.0 (e.g., > 0.5)
         return outcome_price > 0.5
-    else:  # NO
-        return outcome_price < 0.5
+    
+    # If neither is provided, we can't determine - return False to be safe
+    return False

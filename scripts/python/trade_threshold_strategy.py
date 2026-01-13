@@ -2888,6 +2888,12 @@ class ThresholdTrader:
                 )
                 return
             
+            # Log raw market resolution data for debugging
+            logger.info(
+                f"📊 Market resolution data for trade {trade.id} (market: {trade.market_slug}): "
+                f"outcome_prices_raw={outcome_prices_raw} (type: {type(outcome_prices_raw).__name__})"
+            )
+            
             # Parse outcome price for the side we bet on
             outcome_price = parse_outcome_price(
                 outcome_prices_raw,
@@ -2903,15 +2909,39 @@ class ThresholdTrader:
             # Determine winning side first
             winning_side = None
             if isinstance(outcome_prices_raw, list) and len(outcome_prices_raw) >= 2:
-                if float(outcome_prices_raw[0]) == 1.0:
-                    winning_side = "YES"
-                elif float(outcome_prices_raw[1]) == 1.0:
-                    winning_side = "NO"
+                # List format: [YES_price, NO_price]
+                # Example: ["0", "1"] means NO won, ["1", "0"] means YES won
+                try:
+                    yes_price = float(outcome_prices_raw[0])
+                    no_price = float(outcome_prices_raw[1])
+                    if yes_price == 1.0:
+                        winning_side = "YES"
+                    elif no_price == 1.0:
+                        winning_side = "NO"
+                    logger.info(
+                        f"📊 Parsed winning side from list format: YES_price={yes_price}, NO_price={no_price}, "
+                        f"winning_side={winning_side}"
+                    )
+                except (ValueError, TypeError, IndexError) as e:
+                    logger.warning(f"Could not parse winning side from list format: {e}")
             elif isinstance(outcome_prices_raw, dict):
-                if outcome_prices_raw.get("Yes") == 1:
+                # Dict format: {"Yes": 1, "No": 0} or similar
+                yes_value = outcome_prices_raw.get("Yes") or outcome_prices_raw.get("yes") or outcome_prices_raw.get("YES")
+                no_value = outcome_prices_raw.get("No") or outcome_prices_raw.get("no") or outcome_prices_raw.get("NO")
+                if yes_value == 1:
                     winning_side = "YES"
-                elif outcome_prices_raw.get("No") == 1:
+                elif no_value == 1:
                     winning_side = "NO"
+                logger.info(
+                    f"📊 Parsed winning side from dict format: Yes={yes_value}, No={no_value}, "
+                    f"winning_side={winning_side}"
+                )
+            
+            if winning_side is None:
+                logger.warning(
+                    f"⚠️ Could not determine winning_side from outcome_prices_raw={outcome_prices_raw} "
+                    f"(type: {type(outcome_prices_raw).__name__}). Will use outcome_price fallback."
+                )
             
             # Calculate payout and ROI based on actual proceeds from selling
             # ROI accounts for fees on both buy and sell orders
@@ -2963,6 +2993,7 @@ class ThresholdTrader:
                         order_side=trade.order_side,
                         dollars_spent=dollars_spent,
                         buy_fee=fee,
+                        winning_side=winning_side,
                     )
                     
                     remaining_shares = filled_shares - filled_shares_sold
@@ -2997,6 +3028,7 @@ class ThresholdTrader:
                     order_side=trade.order_side,
                     dollars_spent=dollars_spent,
                     buy_fee=fee,
+                    winning_side=winning_side,
                 )
                 
                 if not bet_won:
