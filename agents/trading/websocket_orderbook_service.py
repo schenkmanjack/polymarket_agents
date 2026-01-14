@@ -379,15 +379,17 @@ class WebSocketOrderbookService:
         # Verbose logging: log every orderbook update
         best_bid = bids_formatted[0][0] if bids_formatted else None
         best_ask = asks_formatted[0][0] if asks_formatted else None
-        spread = best_ask - best_bid if (best_bid and best_ask) else None
+        spread = best_ask - best_bid if (best_bid is not None and best_ask is not None) else None
         
-        token_short = token_id[:20] if len(token_id) > 20 else token_id
-        market_slug = self.token_to_market_slug.get(token_id, "unknown")
-        spread_str = f"{spread:.4f}" if spread else "N/A"
+        token_short = token_id[:20] if token_id and len(token_id) > 20 else (token_id or "unknown")
+        market_slug = self.token_to_market_slug.get(token_id) or "unknown"
+        bid_str = f"{best_bid:.4f}" if best_bid is not None else "N/A"
+        ask_str = f"{best_ask:.4f}" if best_ask is not None else "N/A"
+        spread_str = f"{spread:.4f}" if spread is not None else "N/A"
         
         logger.info(
             f"📥 WebSocket update | Market: {market_slug} | Token: {token_short}... | "
-            f"Bid: {best_bid:.4f} | Ask: {best_ask:.4f} | Spread: {spread_str}"
+            f"Bid: {bid_str} | Ask: {ask_str} | Spread: {spread_str}"
         )
         
         # Log full orderbook every 20th update
