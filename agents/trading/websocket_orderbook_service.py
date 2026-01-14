@@ -286,7 +286,22 @@ class WebSocketOrderbookService:
             with self._last_message_lock:
                 self.last_message_time = datetime.now(timezone.utc)
             
-            data = json.loads(message)
+            # Handle plain text control messages (not JSON)
+            message_stripped = message.strip()
+            if message_stripped in ["INVALID OPERATION", "PING", "PONG"]:
+                logger.debug(f"Received WebSocket control message: {message_stripped}")
+                # Respond to PING if needed
+                if message_stripped == "PING" and self.websocket:
+                    await self.websocket.send("PONG")
+                return
+            
+            # Try to parse as JSON
+            try:
+                data = json.loads(message)
+            except json.JSONDecodeError:
+                # If it's not JSON and not a known control message, log at debug level
+                logger.debug(f"Received non-JSON WebSocket message: {message[:100]}")
+                return
             
             # Handle array of orderbook snapshots (initial message)
             if isinstance(data, list):

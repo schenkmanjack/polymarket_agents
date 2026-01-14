@@ -716,6 +716,68 @@ class Polymarket:
         except Exception as e:
             return None
     
+    def approve_usdc_for_ctf(self, amount_usdc: Optional[float] = None) -> Optional[Dict]:
+        """
+        Approve USDC for CTF contract to enable split_position.
+        
+        Args:
+            amount_usdc: Amount to approve (None = approve max uint256)
+            
+        Returns:
+            Transaction receipt dict, or None if error
+        """
+        try:
+            wallet_address = self.get_address_for_private_key()
+            
+            if amount_usdc is None:
+                # Approve max amount (2^256 - 1)
+                from decimal import Decimal
+                MAX_UINT256 = Decimal(2**256 - 1)
+                amount_raw = int(MAX_UINT256)
+                logger.info(f"Approving unlimited USDC for CTF contract...")
+            else:
+                amount_raw = int(amount_usdc * 1e6)
+                logger.info(f"Approving ${amount_usdc:.2f} USDC for CTF contract...")
+            
+            # Build approval transaction
+            nonce = self.web3.eth.get_transaction_count(wallet_address)
+            
+            approve_txn = self.usdc.functions.approve(
+                self.ctf_address,
+                amount_raw
+            ).build_transaction({
+                "chainId": self.chain_id,
+                "from": wallet_address,
+                "nonce": nonce,
+                "gas": 100000,  # Standard gas limit for approve
+                "gasPrice": self.web3.eth.gas_price
+            })
+            
+            # Sign and send transaction
+            signed_txn = self.web3.eth.account.sign_transaction(
+                approve_txn, private_key=self.private_key
+            )
+            
+            tx_hash = self.web3.eth.send_raw_transaction(signed_txn.raw_transaction)
+            logger.info(f"⏳ Approval transaction sent: {tx_hash.hex()}")
+            
+            # Wait for transaction receipt
+            receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+            
+            if receipt.status == 1:
+                logger.info(f"✅ USDC approval successful! Transaction: {tx_hash.hex()}")
+                return {
+                    "transaction_hash": tx_hash.hex(),
+                    "receipt": receipt
+                }
+            else:
+                logger.error(f"❌ USDC approval transaction failed: {tx_hash.hex()}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error approving USDC for CTF contract: {e}", exc_info=True)
+            return None
+    
     def get_conditional_token_balance(self, token_id: str, wallet_address: Optional[str] = None) -> Optional[float]:
         """
         Get balance of conditional tokens (ERC1155) for a specific token_id.
@@ -965,8 +1027,22 @@ class Polymarket:
                 if allowance < amount_raw:
                     logger.warning(
                         f"USDC allowance insufficient: ${allowance_float:.2f} < ${amount_usdc:.2f}. "
-                        f"Transaction may fail. Consider approving USDC for CTF contract."
+                        f"Attempting to approve USDC for CTF contract..."
                     )
+                    # Try to approve automatically
+                    approve_result = self.approve_usdc_for_ctf(amount_usdc=None)  # Approve unlimited
+                    if approve_result:
+                        logger.info("✅ USDC approval successful, proceeding with split...")
+                        # Re-check allowance after approval
+                        allowance = self.usdc.functions.allowance(wallet_address, self.ctf_address).call()
+                        allowance_float = float(allowance) / 1e6
+                        logger.info(f"New USDC allowance: ${allowance_float:.2f}")
+                    else:
+                        logger.error(
+                            f"Failed to approve USDC. Transaction will likely fail. "
+                            f"Please approve USDC manually for CTF contract: {self.ctf_address}"
+                        )
+                        return None
             
             # Build splitPosition transaction
             # Parameters:

@@ -160,18 +160,29 @@ class MarketMaker:
         logger.info(f"Poll interval: {self.config.poll_interval:.1f} seconds")
         logger.info("=" * 80)
         
-        # Check wallet balance
+        # Check wallet balances
+        # Note: split_position uses direct wallet balance (on-chain), not proxy wallet balance
         try:
-            wallet_balance = self.pm.get_polymarket_balance()
-            if wallet_balance is not None:
-                logger.info(f"Wallet balance: ${wallet_balance:.2f}")
-                if wallet_balance < self.config.split_amount:
-                    logger.warning(
-                        f"⚠ INSUFFICIENT WALLET BALANCE: "
-                        f"${wallet_balance:.2f} < ${self.config.split_amount:.2f} (required for split)"
-                    )
-                else:
-                    logger.info(f"✓ Wallet balance sufficient for split (${self.config.split_amount:.2f})")
+            # Check direct Polygon wallet balance (used for splitting)
+            direct_balance = self.pm.get_usdc_balance()
+            logger.info(f"Direct Polygon wallet USDC balance: ${direct_balance:.2f}")
+            
+            if direct_balance < self.config.split_amount:
+                logger.warning(
+                    f"⚠ INSUFFICIENT DIRECT WALLET BALANCE: "
+                    f"${direct_balance:.2f} < ${self.config.split_amount:.2f} (required for split)"
+                )
+                logger.info(
+                    f"💡 Note: Split position requires USDC in your direct Polygon wallet, "
+                    f"not the Polymarket proxy wallet. Transfer USDC to your wallet address."
+                )
+            else:
+                logger.info(f"✓ Direct wallet balance sufficient for split (${self.config.split_amount:.2f})")
+            
+            # Also check proxy wallet balance (for reference)
+            proxy_balance = self.pm.get_polymarket_balance()
+            if proxy_balance is not None:
+                logger.info(f"Polymarket proxy wallet balance: ${proxy_balance:.2f} (for trading, not splitting)")
         except Exception as e:
             logger.warning(f"Could not check wallet balance: {e}")
         
