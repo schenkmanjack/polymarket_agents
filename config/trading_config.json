@@ -1,5 +1,5 @@
 {
-  "threshold": 0.74,
+  "threshold": 0.68,
   "upper_threshold": 0.97,
   "margin": 0.08,
   "threshold_sell": 0.64,
@@ -12,5 +12,5 @@
   "max_minutes_before_resolution": 6,
   "orderbook_poll_interval": 0.1,
   "threshold_confirmation_seconds": 14,
-  "threshold_sell_confirmation_seconds": 8
+  "threshold_sell_confirmation_seconds": 6
 }

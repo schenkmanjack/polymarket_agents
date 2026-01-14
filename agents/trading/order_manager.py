@@ -379,11 +379,36 @@ class OrderManager:
                 wallet_address = self.pm.get_address_for_private_key()
             
             # Check both maker and taker addresses
+            # Note: get_trades() only supports maker_address filter, not taker_address
+            # So we get maker fills and also get all trades to check for taker fills
             fills = []
-            maker_fills = self.pm.get_trades(maker_address=wallet_address) or []
-            taker_fills = self.pm.get_trades(taker_address=wallet_address) or []
+            try:
+                maker_fills = self.pm.get_trades(maker_address=wallet_address) or []
+                logger.debug(f"Found {len(maker_fills)} maker fills for wallet {wallet_address[:10] if wallet_address else 'N/A'}...")
+            except Exception as e:
+                logger.error(f"Error getting maker fills: {e}", exc_info=True)
+                maker_fills = []
             
-            # Deduplicate fills
+            # Get all trades (no filter) to find trades where we're the taker
+            try:
+                all_trades = self.pm.get_trades() or []
+                logger.debug(f"Retrieved {len(all_trades)} total trades to check for taker fills")
+            except Exception as e:
+                logger.error(f"Error getting all trades: {e}", exc_info=True)
+                all_trades = []
+            
+            # Filter all_trades to find ones where we're the taker
+            taker_fills = []
+            if wallet_address:
+                wallet_address_lower = wallet_address.lower()
+                for trade in all_trades:
+                    # Check if we're the taker in this trade
+                    taker = trade.get("taker") or trade.get("taker_address")
+                    if taker and str(taker).lower() == wallet_address_lower:
+                        taker_fills.append(trade)
+                logger.debug(f"Found {len(taker_fills)} taker fills for wallet {wallet_address[:10]}...")
+            
+            # Deduplicate fills (same fill might appear in both lists)
             seen_fill_ids = set()
             for fill in maker_fills:
                 fill_id = fill.get("id") or fill.get("trade_id") or str(fill)
@@ -486,6 +511,13 @@ class OrderManager:
                             
                             # Remove from all_trades_to_check
                             all_trades_to_check.pop(fill_order_id, None)
+            else:
+                # No fills found - log this for debugging
+                if all_trades_to_check:
+                    logger.debug(
+                        f"📊 No fills found for {len(all_trades_to_check)} open buy orders. "
+                        f"Will check via open orders list and individual order status."
+                    )
         except Exception as e:
             logger.error(f"Error checking fills/trades for buy orders: {e}", exc_info=True)
     
@@ -501,43 +533,87 @@ class OrderManager:
                         open_order_ids.add(oid)
             
             # Check orders that are NOT in open orders list
+            # Only mark as filled if we can verify via get_order_status() that it's actually filled
+            # Don't assume filled just because it's missing from open orders (could be cancelled, expired, or API issue)
             for order_id, trade_id in list(all_trades_to_check.items()):
                 if order_id not in open_order_ids:
-                    # Order is not in open orders - check if we already marked it as filled
+                    # Order is not in open orders - verify via get_order_status() before marking as filled
                     trade = self.db.get_trade_by_id(trade_id)
                     if trade and not trade.filled_shares and trade.order_status == "open":
-                        # Not filled yet in DB - mark as filled
-                        logger.info(f"Order {order_id} not in open orders - marking as filled")
-                        if trade.order_size:
-                            dollars_spent = trade.order_size * trade.order_price
-                            fee = calculate_polymarket_fee(trade.order_price, dollars_spent)
-                            self.db.update_trade_fill(
-                                trade_id=trade_id,
-                                filled_shares=trade.order_size,
-                                fill_price=trade.order_price,
-                                dollars_spent=dollars_spent,
-                                fee=fee,
-                                order_status="filled",
-                            )
-                            self.open_trades.pop(order_id, None)
-                            self.orders_not_found.pop(order_id, None)
-                            self.orders_checked_open.pop(order_id, None)
-                            logger.info(f"Order {order_id} marked as filled (not in open orders): {trade.order_size} shares")
-                            
-                            # Reload trade and place sell order
-                            trade = self.db.get_trade_by_id(trade_id)
-                            if trade:
-                                logger.info(f"🔄 Placing initial sell order for trade {trade.id} after buy fill (detected via open orders check)...")
-                                try:
-                                    await self.place_sell_order_callback(trade)
-                                except Exception as sell_error:
-                                    logger.error(
-                                        f"❌ Failed to place initial sell order for trade {trade.id} after buy fill: {sell_error}",
-                                        exc_info=True
+                        # Check order status via API to verify it's actually filled
+                        try:
+                            order_status = self.pm.get_order_status(order_id)
+                            if order_status:
+                                # Parse order status to check if it's filled
+                                status, filled_amount, total_amount = parse_order_status(order_status)
+                                is_filled = is_order_filled(status, filled_amount, total_amount)
+                                
+                                if is_filled:
+                                    # Verified via API that order is filled
+                                    logger.info(
+                                        f"✅✅✅ BUY ORDER FILLED (detected via open orders check + API verification) ✅✅✅\n"
+                                        f"  Order ID: {order_id}\n"
+                                        f"  Trade ID: {trade_id}\n"
+                                        f"  API Status: {status}\n"
+                                        f"  Filled Amount: {filled_amount}\n"
+                                        f"  Total Amount: {total_amount}"
                                     )
-                            
-                            # Remove from all_trades_to_check
-                            all_trades_to_check.pop(order_id, None)
+                                    filled_shares = float(filled_amount) if filled_amount else trade.order_size
+                                    fill_price = trade.order_price  # Use limit order price as fill price
+                                    dollars_spent = filled_shares * fill_price
+                                    fee = calculate_polymarket_fee(fill_price, dollars_spent)
+                                    
+                                    self.db.update_trade_fill(
+                                        trade_id=trade_id,
+                                        filled_shares=filled_shares,
+                                        fill_price=fill_price,
+                                        dollars_spent=dollars_spent,
+                                        fee=fee,
+                                        order_status="filled",
+                                    )
+                                    self.open_trades.pop(order_id, None)
+                                    self.orders_not_found.pop(order_id, None)
+                                    self.orders_checked_open.pop(order_id, None)
+                                    logger.info(
+                                        f"✅✅✅ BUY ORDER FILLED ✅✅✅\n"
+                                        f"  Order ID: {order_id}\n"
+                                        f"  Trade ID: {trade_id}\n"
+                                        f"  Filled Shares: {filled_shares}\n"
+                                        f"  Fill Price: ${fill_price:.4f}\n"
+                                        f"  Dollars Spent: ${dollars_spent:.2f}\n"
+                                        f"  Fee: ${fee:.4f}\n"
+                                        f"  Detection Method: Open orders check + API verification"
+                                    )
+                                    
+                                    # Reload trade and place sell order
+                                    trade = self.db.get_trade_by_id(trade_id)
+                                    if trade:
+                                        logger.info(f"🔄 Placing initial sell order for trade {trade.id} after buy fill (detected via open orders check)...")
+                                        try:
+                                            await self.place_sell_order_callback(trade)
+                                        except Exception as sell_error:
+                                            logger.error(
+                                                f"❌ Failed to place initial sell order for trade {trade.id} after buy fill: {sell_error}",
+                                                exc_info=True
+                                            )
+                                    
+                                    # Remove from all_trades_to_check
+                                    all_trades_to_check.pop(order_id, None)
+                                else:
+                                    # Order not filled according to API - might be cancelled or expired
+                                    logger.debug(
+                                        f"Order {order_id} not in open orders but API status={status} doesn't indicate filled. "
+                                        f"Will check again on next iteration."
+                                    )
+                            else:
+                                # Order status not found - might be API issue, don't assume filled
+                                logger.debug(
+                                    f"Order {order_id} not in open orders and get_order_status() returned None. "
+                                    f"Will check again on next iteration."
+                                )
+                        except Exception as e:
+                            logger.debug(f"Error checking order status for {order_id}: {e}")
+                            # Don't assume filled on error
         except Exception as e:
             logger.debug(f"Could not check open orders: {e}")
     

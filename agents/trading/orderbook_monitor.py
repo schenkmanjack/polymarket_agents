@@ -125,13 +125,13 @@ class OrderbookMonitor:
                     no_orderbook = fetch_orderbook(no_token_id)
                     
                     if yes_orderbook and no_orderbook:
-                        yes_lowest_ask = get_lowest_ask(yes_orderbook)
+                        yes_highest_bid = get_highest_bid(yes_orderbook)
                         no_highest_bid = get_highest_bid(no_orderbook)
                         
                         # Store prices if we got valid values
-                        if yes_lowest_ask is not None and no_highest_bid is not None:
+                        if yes_highest_bid is not None and no_highest_bid is not None:
                             self.last_orderbook_prices[market_slug] = {
-                                "yes_lowest_ask": yes_lowest_ask,
+                                "yes_highest_bid": yes_highest_bid,
                                 "no_highest_bid": no_highest_bid,
                                 "timestamp": datetime.now(timezone.utc),
                             }
@@ -149,7 +149,7 @@ class OrderbookMonitor:
             market_slug: Market slug to get prices for
             
         Returns:
-            Dict with "yes_lowest_ask", "no_highest_bid", "timestamp" keys, or None if not tracked
+            Dict with "yes_highest_bid", "no_highest_bid", "timestamp" keys, or None if not tracked
         """
         return self.last_orderbook_prices.get(market_slug)
     

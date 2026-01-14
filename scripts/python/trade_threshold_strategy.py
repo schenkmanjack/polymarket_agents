@@ -1446,33 +1446,33 @@ class ThresholdTrader:
             winning_side = None
             
             # Primary method: Use orderbook prices at resolution
-            # YES won: YES lowest ask ≤ 0.02
-            # NO won: NO highest bid ≥ 0.98
+            # YES won: YES highest bid ≥ 0.98 (buyers willing to pay close to $1 for YES token)
+            # NO won: NO highest bid ≥ 0.98 (buyers willing to pay close to $1 for NO token)
             last_prices = self.orderbook_monitor.get_last_orderbook_prices(trade.market_slug)
             if last_prices:
-                yes_lowest_ask = last_prices.get("yes_lowest_ask")
+                yes_highest_bid = last_prices.get("yes_highest_bid")
                 no_highest_bid = last_prices.get("no_highest_bid")
                 
-                if yes_lowest_ask is not None and no_highest_bid is not None:
+                if yes_highest_bid is not None and no_highest_bid is not None:
                     logger.info(
                         f"📊 Using orderbook prices for resolution determination: "
-                        f"YES lowest_ask={yes_lowest_ask:.4f}, NO highest_bid={no_highest_bid:.4f}"
+                        f"YES highest_bid={yes_highest_bid:.4f}, NO highest_bid={no_highest_bid:.4f}"
                     )
                     
-                    if yes_lowest_ask <= 0.02:
+                    if yes_highest_bid >= 0.98:
                         winning_side = "YES"
-                        logger.info(f"✅ YES won (YES lowest_ask={yes_lowest_ask:.4f} ≤ 0.02)")
+                        logger.info(f"✅ YES won (YES highest_bid={yes_highest_bid:.4f} ≥ 0.98)")
                     elif no_highest_bid >= 0.98:
                         winning_side = "NO"
                         logger.info(f"✅ NO won (NO highest_bid={no_highest_bid:.4f} ≥ 0.98)")
                     else:
                         logger.info(
-                            f"⚠️ Orderbook prices inconclusive: YES lowest_ask={yes_lowest_ask:.4f} > 0.02 "
+                            f"⚠️ Orderbook prices inconclusive: YES highest_bid={yes_highest_bid:.4f} < 0.98 "
                             f"and NO highest_bid={no_highest_bid:.4f} < 0.98. Falling back to outcomePrices."
                         )
                 else:
                     logger.info(
-                        f"⚠️ Incomplete orderbook price data: yes_lowest_ask={yes_lowest_ask}, "
+                        f"⚠️ Incomplete orderbook price data: yes_highest_bid={yes_highest_bid}, "
                         f"no_highest_bid={no_highest_bid}. Falling back to outcomePrices."
                     )
             else:
