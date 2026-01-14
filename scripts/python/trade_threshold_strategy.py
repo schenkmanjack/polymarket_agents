@@ -132,6 +132,7 @@ class ThresholdTrader:
         if self.config.always_use_initial_principal:
             self.principal = self.config.initial_principal
             logger.info(f"✓ Using initial principal from config (always_use_initial_principal=true): ${self.principal:.2f}")
+            logger.info(f"  Note: Principal will remain at ${self.principal:.2f} regardless of trade outcomes")
         else:
             # Only use principal from resolved trades from THIS deployment
             # If no trades from current deployment, use initial_principal from config
@@ -1759,10 +1760,22 @@ class ThresholdTrader:
             # Update self.principal ONCE - only after market resolves and sell order status is verified via API
             # This is the SINGLE SOURCE OF TRUTH for principal updates
             # The database principal_after will be set to match this value
+            # BUT: if always_use_initial_principal is True, never update self.principal
             new_principal = self.principal  # Default: keep current principal
             principal_updated = False
             
-            if trade.sell_order_id and sell_order_filled_via_api:
+            if self.config.always_use_initial_principal:
+                # Never update principal when always_use_initial_principal is True
+                # Always use initial_principal for future trades
+                logger.info(
+                    f"always_use_initial_principal=true: Keeping principal at ${self.config.initial_principal:.2f} "
+                    f"(net_payout=${net_payout:.2f} not applied to principal)"
+                )
+                new_principal = self.config.initial_principal
+                # Reset self.principal to initial_principal to ensure it's never negative
+                self.principal = self.config.initial_principal
+                principal_updated = False  # Don't mark as updated since we're keeping it constant
+            elif trade.sell_order_id and sell_order_filled_via_api:
                 # Sell order filled (verified via API) - update principal based on actual net_payout
                 # This is the ONLY place where self.principal is updated (single source of truth)
                 old_principal = self.principal
