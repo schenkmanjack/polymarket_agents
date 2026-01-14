@@ -18,6 +18,7 @@ from agents.trading.orderbook_helper import (
     calculate_midpoint,
     get_highest_bid,
     get_lowest_ask,
+    set_websocket_service,
 )
 from agents.trading.utils.order_status_helpers import (
     parse_order_status,
@@ -76,7 +77,7 @@ class MarketMakerPosition:
 class MarketMaker:
     """Market maker for BTC 1-hour markets using split position strategy."""
     
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, proxy_url: Optional[str] = None):
         """Initialize market maker with config."""
         self.config = MarketMakerConfig(config_path)
         self.db = TradeDatabase()
@@ -95,6 +96,55 @@ class MarketMaker:
         # Track orderbook prices near resolution for determining winner
         # Format: {market_slug: {"yes_highest_bid": float, "no_highest_bid": float, "timestamp": datetime}}
         self.last_orderbook_prices: Dict[str, Dict] = {}
+        
+        # Initialize WebSocket orderbook service if enabled
+        self.websocket_service = None
+        if self.config.use_websocket_orderbook:
+            try:
+                from agents.trading.websocket_orderbook_service import WebSocketOrderbookService
+                self.websocket_service = WebSocketOrderbookService(
+                    proxy_url=proxy_url,
+                    health_check_timeout=self.config.websocket_health_check_timeout,
+                    reconnect_delay=self.config.websocket_reconnect_delay,
+                )
+                logger.info("✓ WebSocket orderbook service initialized")
+            except ImportError as e:
+                logger.warning(f"⚠️ WebSocket orderbook service not available: {e}. Falling back to HTTP polling.")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to initialize WebSocket orderbook service: {e}. Falling back to HTTP polling.")
+        
+        # Set WebSocket service in orderbook_helper for fallback logic
+        if self.websocket_service:
+            set_websocket_service(self.websocket_service)
+        
+        # Initialize WebSocket order status service if enabled
+        self.websocket_order_status_service = None
+        if self.config.use_websocket_order_status:
+            try:
+                from agents.trading.websocket_order_status_service import WebSocketOrderStatusService
+                
+                # Get API credentials from Polymarket client
+                if not hasattr(self.pm, 'credentials') or not self.pm.credentials:
+                    logger.warning("⚠️ No API credentials available for WebSocket order status. Falling back to HTTP polling.")
+                else:
+                    self.websocket_order_status_service = WebSocketOrderStatusService(
+                        api_key=self.pm.credentials.api_key,
+                        api_secret=self.pm.credentials.api_secret,
+                        api_passphrase=self.pm.credentials.api_passphrase,
+                        proxy_url=proxy_url,
+                        health_check_timeout=self.config.websocket_order_status_health_check_timeout,
+                        reconnect_delay=self.config.websocket_order_status_reconnect_delay,
+                        on_order_update=self._handle_websocket_order_update,
+                        on_trade_update=self._handle_websocket_trade_update,
+                    )
+                    logger.info("✓ WebSocket order status service initialized")
+            except ImportError as e:
+                logger.warning(f"⚠️ WebSocket order status service not available: {e}. Falling back to HTTP polling.")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to initialize WebSocket order status service: {e}. Falling back to HTTP polling.")
+        
+        # Track WebSocket fallback state
+        self._websocket_fallback_logged = False
         
         self.running = False
     
@@ -127,8 +177,33 @@ class MarketMaker:
         
         logger.info("=" * 80)
         
+        # Start WebSocket services if enabled
+        # Start orderbook WebSocket service (before resuming positions so we can subscribe)
+        if self.websocket_service:
+            try:
+                await self.websocket_service.start()
+                logger.info("✓ WebSocket orderbook service started")
+            except Exception as e:
+                logger.error(f"Failed to start WebSocket orderbook service: {e}", exc_info=True)
+                logger.warning("Continuing with HTTP polling fallback")
+        
+        # Start order status WebSocket service
+        if self.websocket_order_status_service:
+            try:
+                await self.websocket_order_status_service.start()
+                logger.info("✓ WebSocket order status service started")
+            except Exception as e:
+                logger.error(f"Failed to start WebSocket order status service: {e}", exc_info=True)
+                logger.warning("Continuing with HTTP polling fallback")
+        
         # Resume monitoring existing positions
         await self._resume_positions()
+        
+        # Subscribe resumed positions to WebSocket if service is available
+        if self.websocket_service:
+            for market_slug, position in self.active_positions.items():
+                token_ids = [position.yes_token_id, position.no_token_id]
+                self.websocket_service.subscribe_tokens(token_ids, market_slug=market_slug)
         
         self.running = True
         
@@ -184,6 +259,174 @@ class MarketMaker:
                         await task
                     except asyncio.CancelledError:
                         pass
+            
+            # Stop WebSocket services
+            if self.websocket_service:
+                try:
+                    await self.websocket_service.stop()
+                    logger.info("✓ WebSocket orderbook service stopped")
+                except Exception as e:
+                    logger.error(f"Error stopping WebSocket orderbook service: {e}")
+            
+            if self.websocket_order_status_service:
+                try:
+                    await self.websocket_order_status_service.stop()
+                    logger.info("✓ WebSocket order status service stopped")
+                except Exception as e:
+                    logger.error(f"Error stopping WebSocket order status service: {e}")
+    
+    async def _handle_websocket_order_update(self, order_data: Dict):
+        """
+        Handle order status update from WebSocket.
+        
+        Called when WebSocket receives an order update (placement, cancellation, fill).
+        
+        Args:
+            order_data: Order update data from WebSocket
+        """
+        try:
+            order_id = order_data.get("id") or order_data.get("order_id") or order_data.get("orderID")
+            order_status = order_data.get("status", "unknown")
+            
+            if not order_id:
+                logger.debug(f"⚠️ WebSocket order update missing order_id: {order_data}")
+                return
+            
+            # Find position with this order_id
+            position = None
+            side = None
+            for market_slug, pos in self.active_positions.items():
+                if pos.yes_order_id == order_id:
+                    position = pos
+                    side = "YES"
+                    break
+                elif pos.no_order_id == order_id:
+                    position = pos
+                    side = "NO"
+                    break
+            
+            if not position:
+                # Not one of our orders
+                return
+            
+            logger.info(
+                f"📋 WebSocket order update | Market: {position.market_slug} | Side: {side} | "
+                f"Order: {order_id[:20]}... | Status: {order_status}"
+            )
+            
+            # Handle filled orders
+            if order_status in ["filled", "FILLED", "complete", "COMPLETE"]:
+                filled_shares = order_data.get("size") or order_data.get("filled_amount")
+                if filled_shares:
+                    filled_shares = float(filled_shares)
+                else:
+                    filled_shares = position.yes_shares if side == "YES" else position.no_shares
+                
+                fill_price = order_data.get("price") or order_data.get("fillPrice")
+                if fill_price:
+                    fill_price = float(fill_price)
+                else:
+                    fill_price = position.yes_order_price if side == "YES" else position.no_order_price
+                
+                fill_time = datetime.now(timezone.utc)
+                
+                logger.info(
+                    f"✅ WebSocket: {side} order FILLED for {position.market_slug}: "
+                    f"{filled_shares:.2f} shares @ ${fill_price:.4f}"
+                )
+                
+                # Update position state
+                if side == "YES":
+                    position.yes_filled = True
+                    position.yes_fill_time = fill_time
+                else:
+                    position.no_filled = True
+                    position.no_fill_time = fill_time
+                
+                # Initialize last_adjustment_time if this is the first side to fill
+                if position.last_adjustment_time is None:
+                    position.last_adjustment_time = fill_time
+                
+                # Update database
+                self._update_fill_details_in_db(position, side, filled_shares, fill_price)
+                
+                # Track fill timing
+                if side == "YES":
+                    if not position.no_filled:
+                        # YES filled first, NO hasn't filled yet
+                        logger.info(f"📊 Fill timing: YES filled first (NO still pending)")
+                        self._update_fill_timing_in_db(position, "YES", None, None)
+                    else:
+                        # NO already filled - calculate time difference
+                        time_diff = (position.yes_fill_time - position.no_fill_time).total_seconds()
+                        logger.info(
+                            f"📊 Fill timing: NO filled first, YES filled {time_diff:.2f}s later"
+                        )
+                        self._update_fill_timing_in_db(position, "NO", "YES", time_diff)
+                else:  # NO
+                    if not position.yes_filled:
+                        # NO filled first, YES hasn't filled yet
+                        logger.info(f"📊 Fill timing: NO filled first (YES still pending)")
+                        self._update_fill_timing_in_db(position, "NO", None, None)
+                    else:
+                        # YES already filled - calculate time difference
+                        time_diff = (position.no_fill_time - position.yes_fill_time).total_seconds()
+                        logger.info(
+                            f"📊 Fill timing: YES filled first, NO filled {time_diff:.2f}s later"
+                        )
+                        self._update_fill_timing_in_db(position, "YES", "NO", time_diff)
+            
+            # Handle cancelled orders
+            elif order_status in ["cancelled", "CANCELLED", "canceled"]:
+                logger.info(f"❌ WebSocket: {side} order CANCELLED for {position.market_slug}")
+                # Order cancellation is handled in _adjust_unfilled_side, so we just log it
+        
+        except Exception as e:
+            logger.error(f"Error handling WebSocket order update: {e}", exc_info=True)
+    
+    async def _handle_websocket_trade_update(self, trade_data: Dict):
+        """
+        Handle trade/fill update from WebSocket.
+        
+        Called when WebSocket receives a trade event (order was matched/filled).
+        This is similar to order update but provides additional trade details.
+        
+        Args:
+            trade_data: Trade update data from WebSocket
+        """
+        try:
+            order_id = trade_data.get("order_id") or trade_data.get("orderID")
+            
+            if not order_id:
+                logger.debug(f"⚠️ WebSocket trade update missing order_id: {trade_data}")
+                return
+            
+            # Find position with this order_id
+            position = None
+            side = None
+            for market_slug, pos in self.active_positions.items():
+                if pos.yes_order_id == order_id:
+                    position = pos
+                    side = "YES"
+                    break
+                elif pos.no_order_id == order_id:
+                    position = pos
+                    side = "NO"
+                    break
+            
+            if not position:
+                # Not one of our orders
+                return
+            
+            # Trade updates are handled similarly to order updates
+            # The order update callback will handle the fill, so we just log it
+            logger.debug(
+                f"📊 WebSocket trade update | Market: {position.market_slug} | Side: {side} | "
+                f"Order: {order_id[:20]}... | Price: {trade_data.get('price', 'N/A')}"
+            )
+        
+        except Exception as e:
+            logger.error(f"Error handling WebSocket trade update: {e}", exc_info=True)
     
     async def _resume_positions(self):
         """Resume monitoring existing positions from database."""
@@ -309,6 +552,11 @@ class MarketMaker:
             logger.info(f"Found new BTC 1h market: {market_slug}")
             logger.info(f"  Question: {market.get('question', 'N/A')}")
             logger.info(f"  Condition ID: {condition_id}")
+            
+            # Subscribe to tokens for WebSocket orderbook updates
+            if self.websocket_service:
+                token_ids = [yes_token_id, no_token_id]
+                self.websocket_service.subscribe_tokens(token_ids, market_slug=market_slug)
             
             # Start market making for this market
             success = await self._start_market_making(market, market_slug, condition_id, yes_token_id, no_token_id)
@@ -450,8 +698,12 @@ class MarketMaker:
                 logger.error(f"Could not fetch orderbook for YES token {position.yes_token_id}")
                 return
             
-            # Calculate midpoint
-            midpoint = calculate_midpoint(yes_orderbook)
+            # Calculate midpoint (weighted or simple)
+            midpoint = calculate_midpoint(
+                yes_orderbook,
+                weighted=self.config.use_weighted_midpoint,
+                depth_levels=self.config.midpoint_depth_levels
+            )
             
             if midpoint is None:
                 logger.error("Could not calculate midpoint from orderbook")
@@ -463,9 +715,10 @@ class MarketMaker:
             # Cap at 0.99 (max sell price)
             sell_price = min(sell_price, 0.99)
             
+            midpoint_type = "weighted" if self.config.use_weighted_midpoint else "simple"
             logger.info(
                 f"Placing sell orders for {position.market_slug}: "
-                f"midpoint={midpoint:.4f}, sell_price={sell_price:.4f}"
+                f"{midpoint_type} midpoint={midpoint:.4f}, sell_price={sell_price:.4f}"
             )
             
             # Place YES sell order
@@ -695,10 +948,29 @@ class MarketMaker:
                 await self._close_position(position, reason="market_closed")
                 return
             
-            # Always check order status for both sides (poll continuously)
+            # Check order status for both sides
+            # WebSocket provides real-time updates via callbacks, but we still do periodic HTTP checks as backup
             yes_status = None
             no_status = None
             
+            # Check if WebSocket is working
+            using_websocket = (
+                self.websocket_order_status_service and 
+                self.websocket_order_status_service.is_connected()
+            )
+            
+            if using_websocket:
+                if self._websocket_fallback_logged:
+                    logger.info("✓ WebSocket order status service is working again - using real-time updates")
+                    self._websocket_fallback_logged = False
+            else:
+                # Fallback to HTTP polling
+                if not self._websocket_fallback_logged:
+                    logger.warning("⚠️ Falling back to HTTP polling for order status (WebSocket unavailable)")
+                    self._websocket_fallback_logged = True
+            
+            # Always do HTTP check as backup (even if WebSocket is working)
+            # WebSocket callbacks handle real-time updates, but HTTP ensures we don't miss anything
             if position.yes_order_id and not position.yes_filled:
                 yes_status = self.pm.get_order_status(position.yes_order_id)
             
@@ -987,11 +1259,63 @@ class MarketMaker:
         try:
             logger.info(f"Both sides filled for {position.market_slug}, closing position")
             
+            # Save market info before closing (we'll need it to potentially start a new position)
+            market = position.market
+            market_slug = position.market_slug
+            condition_id = position.condition_id
+            yes_token_id = position.yes_token_id
+            no_token_id = position.no_token_id
+            
             # Close position (mark as both_filled)
             await self._close_position(position, reason="both_filled")
             
-            # Optionally start a new position for the same market
-            # (For now, we'll let market detection handle finding new markets)
+            # Immediately check if we can start a new position for the same market
+            # (Don't wait for the detection loop - if market is still good, split again now)
+            if is_market_active(market):
+                minutes_remaining = get_minutes_until_resolution(market)
+                
+                if minutes_remaining is not None:
+                    # Check if market still meets criteria for new positions
+                    can_start = True
+                    
+                    # Check max_minutes_before_resolution (upper limit)
+                    if self.config.max_minutes_before_resolution is not None:
+                        if minutes_remaining > self.config.max_minutes_before_resolution:
+                            can_start = False
+                            logger.info(
+                                f"Market {market_slug} has {minutes_remaining:.1f} minutes remaining "
+                                f"(exceeds max_minutes_before_resolution={self.config.max_minutes_before_resolution:.1f}), "
+                                f"skipping immediate re-split"
+                            )
+                    
+                    # Check min_minutes_before_resolution (lower limit)
+                    if can_start and self.config.min_minutes_before_resolution is not None:
+                        if minutes_remaining < self.config.min_minutes_before_resolution:
+                            can_start = False
+                            logger.info(
+                                f"Market {market_slug} has {minutes_remaining:.1f} minutes remaining "
+                                f"(less than min_minutes_before_resolution={self.config.min_minutes_before_resolution:.1f}), "
+                                f"skipping immediate re-split"
+                            )
+                    
+                    if can_start:
+                        logger.info(
+                            f"Market {market_slug} still active with {minutes_remaining:.1f} minutes remaining - "
+                            f"starting new position immediately"
+                        )
+                        success = await self._start_market_making(
+                            market, market_slug, condition_id, yes_token_id, no_token_id
+                        )
+                        if success:
+                            logger.info(f"✅ Immediately started new position for {market_slug} after both orders filled")
+                        else:
+                            logger.warning(f"Failed to immediately start new position for {market_slug}, will retry via detection loop")
+                    else:
+                        logger.info(f"Market {market_slug} no longer meets criteria for new positions")
+                else:
+                    logger.warning(f"Could not determine time remaining for {market_slug}, skipping immediate re-split")
+            else:
+                logger.info(f"Market {market_slug} is no longer active, skipping immediate re-split")
             
         except Exception as e:
             logger.error(f"Error handling both filled: {e}", exc_info=True)

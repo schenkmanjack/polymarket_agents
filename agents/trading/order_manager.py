@@ -586,6 +586,9 @@ class OrderManager:
     
     async def check_order_statuses(self):
         """Check status of all open orders."""
+        # First, proactively clean up orders for expired/resolved markets
+        await self._cleanup_expired_market_orders()
+        
         # Get all open trades from database for current deployment
         open_trades_from_db = self.db.get_open_trades(deployment_id=self.deployment_id)
         
@@ -871,10 +874,79 @@ class OrderManager:
         except Exception as e:
             logger.debug(f"Could not check open orders: {e}")
     
+    async def _cleanup_expired_market_orders(self):
+        """Proactively remove orders for expired/resolved markets."""
+        from agents.polymarket.btc_market_detector import is_market_active, get_market_by_slug
+        
+        orders_to_remove = []
+        for order_id, trade_id in list(self.open_trades.items()):
+            try:
+                trade = self.db.get_trade_by_id(trade_id)
+                if not trade:
+                    orders_to_remove.append(order_id)
+                    continue
+                
+                # Check if market has expired/resolved
+                market = get_market_by_slug(trade.market_slug)
+                if not market or not is_market_active(market):
+                    logger.info(
+                        f"🧹 Cleaning up order {order_id[:20]}... for expired/resolved market {trade.market_slug}"
+                    )
+                    # Update trade status to cancelled
+                    self.db.update_order_status(
+                        trade_id=trade_id,
+                        order_status="cancelled",
+                        order_id=order_id,
+                    )
+                    orders_to_remove.append(order_id)
+            except Exception as e:
+                logger.debug(f"Error checking market status for order {order_id[:20]}...: {e}")
+        
+        # Remove expired market orders from tracking
+        for order_id in orders_to_remove:
+            self.open_trades.pop(order_id, None)
+            self.orders_not_found.pop(order_id, None)
+            self.orders_checked_open.pop(order_id, None)
+        
+        if orders_to_remove:
+            logger.info(f"✅ Removed {len(orders_to_remove)} order(s) for expired/resolved markets")
+    
     async def _check_individual_buy_order_statuses(self, all_trades_to_check: Dict[str, int]):
         """Check individual order statuses for orders that are still open."""
+        if not all_trades_to_check:
+            return
+        
+        logger.info(f"🔍 Checking status for {len(all_trades_to_check)} open buy orders: {list(all_trades_to_check.keys())[:3]}...")
+        
         for order_id, trade_id in list(all_trades_to_check.items()):
             try:
+                trade = self.db.get_trade_by_id(trade_id)
+                if not trade:
+                    logger.warning(f"Trade {trade_id} not found in database for order {order_id[:20]}... - removing from tracking")
+                    self.open_trades.pop(order_id, None)
+                    continue
+                
+                # Check if market has expired/resolved - if so, order can't fill
+                from agents.polymarket.btc_market_detector import is_market_active, get_market_by_slug
+                market = get_market_by_slug(trade.market_slug)
+                if market and not is_market_active(market):
+                    logger.warning(
+                        f"Market {trade.market_slug} has expired/resolved for order {order_id[:20]}... - "
+                        f"order cannot fill. Removing from tracking and marking as cancelled."
+                    )
+                    # Update trade status to cancelled
+                    self.db.update_order_status(
+                        trade_id=trade_id,
+                        order_status="cancelled",
+                        order_id=order_id,
+                    )
+                    # Remove from tracking
+                    self.open_trades.pop(order_id, None)
+                    self.orders_not_found.pop(order_id, None)
+                    self.orders_checked_open.pop(order_id, None)
+                    continue
+                
+                logger.debug(f"Checking order status for {order_id[:20]}... (trade_id={trade_id}, market={trade.market_slug})")
                 order_status = self.pm.get_order_status(order_id)
                 if not order_status:
                     # If order not found, check retry count
@@ -907,6 +979,11 @@ class OrderManager:
                 # Check if order is filled or cancelled
                 is_filled = is_order_filled(status, filled_amount, total_amount)
                 is_cancelled = is_order_cancelled(status)
+                
+                logger.debug(
+                    f"Order {order_id[:20]}... status: {status}, filled: {filled_amount}/{total_amount}, "
+                    f"is_filled={is_filled}, is_cancelled={is_cancelled}"
+                )
                 
                 if is_filled or is_cancelled:
                     if is_filled and not trade.filled_shares:

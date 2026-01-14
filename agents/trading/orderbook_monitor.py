@@ -184,8 +184,47 @@ class OrderbookMonitor:
         await self.check_early_sell_conditions(list(self.monitored_markets.keys()))
         
         # Don't place new bets if we have open buy orders
+        # BUT: First check if any orders are for expired markets and clean them up
         if self.open_trades:
-            return
+            # Clean up orders for expired markets before checking
+            expired_orders = []
+            from agents.polymarket.btc_market_detector import get_market_by_slug, is_market_active
+            
+            for order_id, trade_id in list(self.open_trades.items()):
+                try:
+                    trade = self.db.get_trade_by_id(trade_id)
+                    if trade:
+                        # Try to get market from monitored_markets first, then fallback to API
+                        market = None
+                        if trade.market_slug in self.monitored_markets:
+                            market = self.monitored_markets[trade.market_slug].get("market")
+                        
+                        if not market:
+                            market = get_market_by_slug(trade.market_slug)
+                        
+                        if not market or not is_market_active(market):
+                            logger.info(
+                                f"🧹 Removing order {order_id[:20]}... for expired/resolved market {trade.market_slug}"
+                            )
+                            expired_orders.append(order_id)
+                            # Update trade status
+                            self.db.update_order_status(
+                                trade_id=trade_id,
+                                order_status="cancelled",
+                                order_id=order_id,
+                            )
+                except Exception as e:
+                    logger.debug(f"Error checking market status for order {order_id[:20]}...: {e}")
+            
+            # Remove expired orders from tracking
+            for order_id in expired_orders:
+                self.open_trades.pop(order_id, None)
+            
+            # If all orders were expired, we can continue; otherwise return
+            if expired_orders and len(expired_orders) == len(self.open_trades):
+                logger.info(f"✅ All {len(expired_orders)} open orders were for expired markets - can place new orders")
+            elif self.open_trades:
+                return
         
         # Don't place new bets if we have open sell orders (wait for proceeds to be claimed)
         if self.open_sell_orders:

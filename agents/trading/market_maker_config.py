@@ -93,6 +93,41 @@ class MarketMakerConfig:
             if not isinstance(max_minutes_before_resolution, (int, float)) or max_minutes_before_resolution <= 0.0:
                 raise ValueError(f"max_minutes_before_resolution must be a positive float, got {max_minutes_before_resolution}")
         
+        # Validate WebSocket config (optional, defaults to True)
+        use_websocket_orderbook = self.config.get('use_websocket_orderbook', True)
+        if not isinstance(use_websocket_orderbook, bool):
+            raise ValueError(f"use_websocket_orderbook must be a boolean, got {use_websocket_orderbook}")
+        
+        websocket_reconnect_delay = self.config.get('websocket_reconnect_delay', 5.0)
+        if not isinstance(websocket_reconnect_delay, (int, float)) or websocket_reconnect_delay < 0.0:
+            raise ValueError(f"websocket_reconnect_delay must be a non-negative float, got {websocket_reconnect_delay}")
+        
+        websocket_health_check_timeout = self.config.get('websocket_health_check_timeout', 14.0)
+        if not isinstance(websocket_health_check_timeout, (int, float)) or websocket_health_check_timeout <= 0.0:
+            raise ValueError(f"websocket_health_check_timeout must be a positive float, got {websocket_health_check_timeout}")
+        
+        # Validate WebSocket order status config (optional, defaults to True)
+        use_websocket_order_status = self.config.get('use_websocket_order_status', True)
+        if not isinstance(use_websocket_order_status, bool):
+            raise ValueError(f"use_websocket_order_status must be a boolean, got {use_websocket_order_status}")
+        
+        websocket_order_status_reconnect_delay = self.config.get('websocket_order_status_reconnect_delay', 5.0)
+        if not isinstance(websocket_order_status_reconnect_delay, (int, float)) or websocket_order_status_reconnect_delay < 0.0:
+            raise ValueError(f"websocket_order_status_reconnect_delay must be a non-negative float, got {websocket_order_status_reconnect_delay}")
+        
+        websocket_order_status_health_check_timeout = self.config.get('websocket_order_status_health_check_timeout', 14.0)
+        if not isinstance(websocket_order_status_health_check_timeout, (int, float)) or websocket_order_status_health_check_timeout <= 0.0:
+            raise ValueError(f"websocket_order_status_health_check_timeout must be a positive float, got {websocket_order_status_health_check_timeout}")
+        
+        # Validate weighted midpoint config (optional, defaults to False)
+        use_weighted_midpoint = self.config.get('use_weighted_midpoint', False)
+        if not isinstance(use_weighted_midpoint, bool):
+            raise ValueError(f"use_weighted_midpoint must be a boolean, got {use_weighted_midpoint}")
+        
+        midpoint_depth_levels = self.config.get('midpoint_depth_levels', 5)
+        if not isinstance(midpoint_depth_levels, int) or midpoint_depth_levels < 1:
+            raise ValueError(f"midpoint_depth_levels must be a positive integer, got {midpoint_depth_levels}")
+        
         logger.info("✓ Market maker config validation passed")
     
     @property
@@ -136,3 +171,43 @@ class MarketMakerConfig:
         """Minimum minutes before resolution to create new positions. None means no limit."""
         value = self.config.get('min_minutes_before_resolution')
         return float(value) if value is not None else None
+    
+    @property
+    def use_websocket_orderbook(self) -> bool:
+        """Whether to use WebSocket for orderbook updates."""
+        return bool(self.config.get('use_websocket_orderbook', True))
+    
+    @property
+    def websocket_health_check_timeout(self) -> float:
+        """WebSocket health check timeout in seconds."""
+        return float(self.config.get('websocket_health_check_timeout', 14.0))
+    
+    @property
+    def websocket_reconnect_delay(self) -> float:
+        """WebSocket reconnect delay in seconds."""
+        return float(self.config.get('websocket_reconnect_delay', 5.0))
+    
+    @property
+    def use_websocket_order_status(self) -> bool:
+        """Whether to use WebSocket for order status updates."""
+        return bool(self.config.get('use_websocket_order_status', True))
+    
+    @property
+    def websocket_order_status_health_check_timeout(self) -> float:
+        """WebSocket order status health check timeout in seconds."""
+        return float(self.config.get('websocket_order_status_health_check_timeout', 14.0))
+    
+    @property
+    def websocket_order_status_reconnect_delay(self) -> float:
+        """WebSocket order status reconnect delay in seconds."""
+        return float(self.config.get('websocket_order_status_reconnect_delay', 5.0))
+    
+    @property
+    def use_weighted_midpoint(self) -> bool:
+        """Whether to use volume-weighted midpoint instead of simple midpoint."""
+        return bool(self.config.get('use_weighted_midpoint', False))
+    
+    @property
+    def midpoint_depth_levels(self) -> int:
+        """Number of orderbook levels to consider for weighted midpoint calculation."""
+        return int(self.config.get('midpoint_depth_levels', 5))
