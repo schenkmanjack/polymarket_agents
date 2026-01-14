@@ -8,10 +8,6 @@ import asyncio
 import json
 import logging
 import os
-import hmac
-import hashlib
-import base64
-import time
 from typing import Dict, List, Optional, Set, Any, Callable, Awaitable
 from datetime import datetime, timezone
 import threading
@@ -170,26 +166,21 @@ class WebSocketOrderStatusService:
                 logger.info(f"✓ Connected to User WebSocket: {self.USER_WS_URL}")
                 
                 # Authenticate with API credentials
-                # CLOB User WebSocket authentication: send subscription message with auth embedded
-                # Format based on Polymarket docs: subscription message includes auth object
-                timestamp = str(int(time.time()))
-                signature = self._generate_auth_signature(timestamp)
-                
-                # User WebSocket subscription format: type="user" with auth embedded
+                # CLOB User WebSocket authentication format per Polymarket docs
+                # Format: type="USER" (uppercase), auth with lowercase field names
                 subscribe_message = {
-                    "type": "user",
+                    "type": "USER",  # Must be uppercase
                     "markets": [],  # Empty list = subscribe to all user orders/trades
                     "auth": {
-                        "apiKey": self.api_key,
+                        "apikey": self.api_key,  # Lowercase field name
                         "secret": self.api_secret,
                         "passphrase": self.api_passphrase,
-                        "timestamp": timestamp,
-                        "signature": signature,
-                    }
+                    },
+                    "custom_feature_enabled": False
                 }
                 
-                logger.info(f"📡 Sending User WebSocket subscription with authentication (timestamp: {timestamp})")
-                logger.debug(f"  Auth message (without secrets): type=user, apiKey={self.api_key[:10]}..., timestamp={timestamp}")
+                logger.info(f"📡 Sending User WebSocket subscription with authentication")
+                logger.debug(f"  Auth message (without secrets): type=USER, apikey={self.api_key[:10]}..., markets=[]")
                 await self.websocket.send(json.dumps(subscribe_message))
                 
                 # Wait for authentication/subscription response (should come quickly)
@@ -236,6 +227,24 @@ class WebSocketOrderStatusService:
             # Update last message time for health checking
             with self._last_message_lock:
                 self.last_message_time = datetime.now(timezone.utc)
+            
+            # Handle non-JSON messages (like "INVALID OPERATION")
+            if not message.strip().startswith('{') and not message.strip().startswith('['):
+                # Plain text message (e.g., "INVALID OPERATION", "PING", etc.)
+                message_upper = message.strip().upper()
+                if message_upper == "INVALID OPERATION":
+                    logger.error("❌ User WebSocket returned 'INVALID OPERATION' - authentication format may be incorrect")
+                    logger.error("  This usually means the subscription message format is wrong")
+                    self.connected = False  # Mark as disconnected so it will try to reconnect
+                    return
+                elif message_upper in ["PING", "PONG"]:
+                    logger.debug(f"Received {message_upper} from User WebSocket")
+                    if message_upper == "PING" and self.websocket:
+                        await self.websocket.send(json.dumps({"type": "pong"}))
+                    return
+                else:
+                    logger.info(f"📨 User WebSocket plain text message: {message}")
+                    return
             
             data = json.loads(message)
             
