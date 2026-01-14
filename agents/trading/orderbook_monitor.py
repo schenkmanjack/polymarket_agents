@@ -98,10 +98,30 @@ class OrderbookMonitor:
                 
                 # Check for threshold triggers and handle confirmations
                 await self.check_orderbooks_for_triggers()
+            except asyncio.CancelledError:
+                # Task was cancelled during shutdown - this is expected
+                logger.info("Orderbook monitoring loop cancelled")
+                raise  # Re-raise to properly propagate cancellation
+            except SystemExit:
+                # SystemExit can occur during shutdown - log and exit gracefully
+                logger.info("Orderbook monitoring loop received SystemExit")
+                break
+            except KeyboardInterrupt:
+                # KeyboardInterrupt can occur during shutdown - log and exit gracefully
+                logger.info("Orderbook monitoring loop received KeyboardInterrupt")
+                break
             except Exception as e:
                 logger.error(f"Error in orderbook monitoring: {e}", exc_info=True)
             
-            await asyncio.sleep(self.orderbook_poll_interval)
+            # Check if we should continue before sleeping
+            if not self.is_running():
+                break
+                
+            try:
+                await asyncio.sleep(self.orderbook_poll_interval)
+            except asyncio.CancelledError:
+                logger.info("Orderbook monitoring loop cancelled during sleep")
+                raise
     
     async def _track_orderbook_prices_near_resolution(self):
         """Track orderbook prices for markets within max_minutes_before_resolution."""

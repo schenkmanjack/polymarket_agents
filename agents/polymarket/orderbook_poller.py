@@ -380,6 +380,12 @@ class OrderbookPoller:
                 
             except asyncio.CancelledError:
                 logger.info("Polling cancelled")
+                raise  # Re-raise to properly propagate cancellation
+            except SystemExit:
+                logger.info("Polling received SystemExit")
+                break
+            except KeyboardInterrupt:
+                logger.info("Polling received KeyboardInterrupt")
                 break
             except Exception as e:
                 logger.error(f"❌ Error in polling loop: {e}", exc_info=True)

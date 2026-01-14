@@ -124,6 +124,11 @@ class TradingConfig:
         if not isinstance(threshold_sell_confirmation_seconds, (int, float)) or threshold_sell_confirmation_seconds < 0.0:
             raise ValueError(f"threshold_sell_confirmation_seconds must be a non-negative float, got {threshold_sell_confirmation_seconds}")
         
+        # Validate always_use_initial_principal (optional, defaults to False)
+        always_use_initial_principal = self.config.get('always_use_initial_principal', False)
+        if not isinstance(always_use_initial_principal, bool):
+            raise ValueError(f"always_use_initial_principal must be a boolean, got {always_use_initial_principal}")
+        
         logger.info("✓ Config validation passed")
     
     @property
@@ -187,16 +192,24 @@ class TradingConfig:
         """Seconds to wait after threshold sell triggers before placing sell order. 0.0 means no confirmation."""
         return float(self.config.get('threshold_sell_confirmation_seconds', 0.0))
     
+    @property
+    def always_use_initial_principal(self) -> bool:
+        """If True, always use initial_principal for bet sizing calculations, regardless of current principal."""
+        return bool(self.config.get('always_use_initial_principal', False))
+    
     def get_amount_invested(self, principal: float) -> float:
         """
         Calculate amount to invest based on Kelly sizing, capped by dollar_bet_limit.
         
         Args:
-            principal: Current principal amount
+            principal: Current principal amount (ignored if always_use_initial_principal is True)
             
         Returns:
             Amount to invest (capped at dollar_bet_limit)
         """
-        kelly_amount = principal * self.kelly_fraction * self.kelly_scale_factor
+        # Use initial_principal if configured, otherwise use the passed principal
+        principal_to_use = self.initial_principal if self.always_use_initial_principal else principal
+        
+        kelly_amount = principal_to_use * self.kelly_fraction * self.kelly_scale_factor
         # Cap at dollar_bet_limit even if Kelly suggests more
         return min(kelly_amount, self.dollar_bet_limit)

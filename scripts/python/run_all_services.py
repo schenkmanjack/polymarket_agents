@@ -124,12 +124,10 @@ def main():
     args = parser.parse_args()
     
     # Handle graceful shutdown
-    def signal_handler(sig, frame):
-        logger.info("Received interrupt signal, shutting down...")
-        sys.exit(0)
-    
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    # Note: We don't set up signal handlers here because asyncio.run() handles SIGINT/SIGTERM
+    # by raising KeyboardInterrupt, which allows tasks to be cancelled gracefully.
+    # Setting up signal handlers that call sys.exit(0) directly interrupts ongoing operations
+    # and causes "Task exception was never retrieved" errors.
     
     try:
         asyncio.run(run_all(args.config, enable_monitoring=args.enable_monitoring))
