@@ -163,6 +163,11 @@ class MarketMaker:
         # Check wallet balances
         # Note: split_position uses direct wallet balance (on-chain), not proxy wallet balance
         try:
+            # Get wallet address for verification
+            wallet_address = self.pm.get_address_for_private_key()
+            logger.info(f"Wallet address: {wallet_address}")
+            logger.info(f"  (Make sure USDC is sent to this address on Polygon network)")
+            
             # Check direct Polygon wallet balance (used for splitting)
             direct_balance = self.pm.get_usdc_balance()
             logger.info(f"Direct Polygon wallet USDC balance: ${direct_balance:.2f}")

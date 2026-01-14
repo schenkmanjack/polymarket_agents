@@ -633,10 +633,12 @@ class Polymarket:
 
     def get_usdc_balance(self) -> float:
         """Get USDC balance from your Polygon wallet (direct wallet)."""
-        balance_res = self.usdc.functions.balanceOf(
-            self.get_address_for_private_key()
-        ).call()
-        return float(balance_res / 10e5)
+        wallet_address = self.get_address_for_private_key()
+        balance_res = self.usdc.functions.balanceOf(wallet_address).call()
+        # USDC has 6 decimals, so divide by 1e6 (1,000,000)
+        balance_float = float(balance_res) / 1e6
+        logger.debug(f"USDC balance check: raw={balance_res}, wallet={wallet_address[:10]}...{wallet_address[-8:]}, balance=${balance_float:.2f}")
+        return balance_float
     
     def get_polymarket_balance(self, proxy_wallet_address: Optional[str] = None) -> Optional[float]:
         """

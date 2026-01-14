@@ -233,8 +233,10 @@ class WebSocketOrderStatusService:
                 # Plain text message (e.g., "INVALID OPERATION", "PING", etc.)
                 message_upper = message.strip().upper()
                 if message_upper == "INVALID OPERATION":
-                    logger.error("❌ User WebSocket returned 'INVALID OPERATION' - authentication format may be incorrect")
-                    logger.error("  This usually means the subscription message format is wrong")
+                    # This can happen if authentication format is incorrect, but sometimes it's a transient error
+                    # Log at warning level and mark as disconnected to trigger reconnection
+                    logger.warning("⚠️ User WebSocket returned 'INVALID OPERATION' - will attempt to reconnect")
+                    logger.debug("  This may indicate authentication format issue, but could also be transient")
                     self.connected = False  # Mark as disconnected so it will try to reconnect
                     return
                 elif message_upper in ["PING", "PONG"]:
