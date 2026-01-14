@@ -721,37 +721,58 @@ class MarketMaker:
                 f"{midpoint_type} midpoint={midpoint:.4f}, sell_price={sell_price:.4f}"
             )
             
-            # Place YES sell order
-            yes_order_response = self.pm.execute_order(
-                price=sell_price,
-                size=position.yes_shares,
-                side="SELL",
-                token_id=position.yes_token_id,
+            # Place YES and NO sell orders in parallel to reduce latency
+            loop = asyncio.get_event_loop()
+            
+            # Create tasks for both orders to execute concurrently
+            yes_task = loop.run_in_executor(
+                None,
+                self.pm.execute_order,
+                sell_price,
+                position.yes_shares,
+                "SELL",
+                position.yes_token_id,
             )
             
-            if yes_order_response:
+            no_task = loop.run_in_executor(
+                None,
+                self.pm.execute_order,
+                sell_price,
+                position.no_shares,
+                "SELL",
+                position.no_token_id,
+            )
+            
+            # Execute both orders concurrently
+            yes_order_response, no_order_response = await asyncio.gather(
+                yes_task,
+                no_task,
+                return_exceptions=True
+            )
+            
+            # Process YES order result
+            if isinstance(yes_order_response, Exception):
+                logger.error(f"Exception placing YES order: {yes_order_response}", exc_info=True)
+            elif yes_order_response:
                 yes_order_id = self.pm.extract_order_id(yes_order_response)
                 if yes_order_id:
                     position.yes_order_id = yes_order_id
                     position.yes_order_price = sell_price
                     logger.info(f"✅ Placed YES sell order: {yes_order_id}")
-                    self._update_position_in_db(position)
             
-            # Place NO sell order
-            no_order_response = self.pm.execute_order(
-                price=sell_price,
-                size=position.no_shares,
-                side="SELL",
-                token_id=position.no_token_id,
-            )
-            
-            if no_order_response:
+            # Process NO order result
+            if isinstance(no_order_response, Exception):
+                logger.error(f"Exception placing NO order: {no_order_response}", exc_info=True)
+            elif no_order_response:
                 no_order_id = self.pm.extract_order_id(no_order_response)
                 if no_order_id:
                     position.no_order_id = no_order_id
                     position.no_order_price = sell_price
                     logger.info(f"✅ Placed NO sell order: {no_order_id}")
-                    self._update_position_in_db(position)
+            
+            # Update database once after both orders are placed
+            if position.yes_order_id or position.no_order_id:
+                self._update_position_in_db(position)
                     
         except Exception as e:
             logger.error(f"Error placing sell orders: {e}", exc_info=True)
