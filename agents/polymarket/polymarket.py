@@ -79,6 +79,13 @@ class Polymarket:
             {"inputs": [{"internalType": "address", "name": "account", "type": "address"}, {"internalType": "address", "name": "operator", "type": "address"}], "name": "isApprovedForAll", "outputs": [{"internalType": "bool", "name": "", "type": "bool"}], "stateMutability": "view", "type": "function"},
             {"inputs": [{"internalType": "address", "name": "operator", "type": "address"}, {"internalType": "bool", "name": "approved", "type": "bool"}], "name": "setApprovalForAll", "outputs": [], "stateMutability": "nonpayable", "type": "function"}
         ]"""
+        
+        # CTF contract ABI with splitPosition function
+        self.ctf_abi = """[
+            {"inputs": [{"internalType": "address", "name": "account", "type": "address"}, {"internalType": "uint256", "name": "id", "type": "uint256"}], "name": "balanceOf", "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
+            {"inputs": [{"internalType": "address", "name": "operator", "type": "address"}, {"internalType": "bool", "name": "approved", "type": "bool"}], "name": "setApprovalForAll", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+            {"inputs": [{"internalType": "address", "name": "collateralToken", "type": "address"}, {"internalType": "bytes32", "name": "parentCollectionId", "type": "bytes32"}, {"internalType": "bytes32", "name": "conditionId", "type": "bytes32"}, {"internalType": "uint256[]", "name": "partition", "type": "uint256[]"}, {"internalType": "uint256", "name": "amount", "type": "uint256"}], "name": "splitPosition", "outputs": [], "stateMutability": "nonpayable", "type": "function"}
+        ]"""
 
         self.usdc_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
         self.ctf_address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
@@ -90,7 +97,7 @@ class Polymarket:
             address=self.usdc_address, abi=self.erc20_approve
         )
         self.ctf = self.web3.eth.contract(
-            address=self.ctf_address, abi=self.erc1155_abi
+            address=self.ctf_address, abi=self.ctf_abi
         )
 
         self._init_api_keys()
@@ -877,6 +884,154 @@ class Polymarket:
         except Exception as e:
             logger.error(f"❌ Error ensuring conditional token allowances: {e}", exc_info=True)
             return False
+    
+    def split_position(
+        self,
+        condition_id: str,
+        amount_usdc: float,
+        check_approval: bool = True
+    ) -> Optional[Dict]:
+        """
+        Split USDC into YES + NO shares using CTF contract's splitPosition function.
+        
+        This atomically converts $X USDC into X YES + X NO shares in one transaction.
+        
+        Args:
+            condition_id: Condition ID (bytes32) from market data (market.conditionId)
+            amount_usdc: Amount of USDC to split (will be converted to 6 decimals)
+            check_approval: If True, check and log USDC approval status (default: True)
+            
+        Returns:
+            Transaction receipt dict, or None if error
+        """
+        try:
+            wallet_address = self.get_address_for_private_key()
+            
+            # Convert condition_id to bytes32
+            # Condition ID from API can be:
+            # - Hex string (with or without 0x prefix)
+            # - Integer string
+            # - Integer
+            if isinstance(condition_id, str):
+                condition_id_str = condition_id.strip()
+                if condition_id_str.startswith('0x'):
+                    # Hex string with 0x prefix
+                    hex_str = condition_id_str[2:]
+                    # Pad to 64 hex chars (32 bytes) if needed
+                    hex_str = hex_str.zfill(64)
+                    condition_id_bytes32 = bytes.fromhex(hex_str)
+                elif all(c in '0123456789abcdefABCDEF' for c in condition_id_str):
+                    # Hex string without 0x prefix
+                    hex_str = condition_id_str.zfill(64)
+                    condition_id_bytes32 = bytes.fromhex(hex_str)
+                else:
+                    # Integer string - convert to bytes32
+                    condition_id_int = int(condition_id_str)
+                    condition_id_bytes32 = condition_id_int.to_bytes(32, byteorder='big')
+            else:
+                # Assume it's already an integer
+                condition_id_int = int(condition_id)
+                condition_id_bytes32 = condition_id_int.to_bytes(32, byteorder='big')
+            
+            # Ensure it's exactly 32 bytes
+            if len(condition_id_bytes32) < 32:
+                condition_id_bytes32 = condition_id_bytes32.rjust(32, b'\x00')
+            elif len(condition_id_bytes32) > 32:
+                condition_id_bytes32 = condition_id_bytes32[-32:]
+            
+            # Convert amount to 6 decimals (USDC uses 6 decimals)
+            amount_raw = int(amount_usdc * 1e6)
+            
+            # Check USDC balance
+            usdc_balance = self.usdc.functions.balanceOf(wallet_address).call()
+            usdc_balance_float = float(usdc_balance) / 1e6
+            logger.info(f"USDC balance: ${usdc_balance_float:.2f} (need ${amount_usdc:.2f})")
+            
+            if usdc_balance < amount_raw:
+                logger.error(
+                    f"Insufficient USDC balance: have ${usdc_balance_float:.2f}, "
+                    f"need ${amount_usdc:.2f}"
+                )
+                return None
+            
+            # Check USDC approval for CTF contract if requested
+            if check_approval:
+                allowance = self.usdc.functions.allowance(wallet_address, self.ctf_address).call()
+                allowance_float = float(allowance) / 1e6
+                logger.info(
+                    f"USDC allowance for CTF contract: ${allowance_float:.2f} "
+                    f"(need ${amount_usdc:.2f})"
+                )
+                if allowance < amount_raw:
+                    logger.warning(
+                        f"USDC allowance insufficient: ${allowance_float:.2f} < ${amount_usdc:.2f}. "
+                        f"Transaction may fail. Consider approving USDC for CTF contract."
+                    )
+            
+            # Build splitPosition transaction
+            # Parameters:
+            # - collateralToken: USDC address
+            # - parentCollectionId: bytes32(0) for Polymarket
+            # - conditionId: bytes32 condition ID
+            # - partition: [1, 2] for binary YES/NO markets
+            # - amount: amount in USDC (6 decimals)
+            
+            parent_collection_id = b'\x00' * 32  # bytes32(0) for Polymarket
+            partition = [1, 2]  # Binary market: YES (1) and NO (2)
+            
+            logger.info(
+                f"Splitting ${amount_usdc:.2f} USDC into YES + NO shares "
+                f"(condition_id: {condition_id[:20]}...)"
+            )
+            
+            # Build transaction
+            nonce = self.web3.eth.get_transaction_count(wallet_address)
+            
+            split_txn = self.ctf.functions.splitPosition(
+                self.usdc_address,
+                parent_collection_id,
+                condition_id_bytes32,
+                partition,
+                amount_raw
+            ).build_transaction({
+                "chainId": self.chain_id,
+                "from": wallet_address,
+                "nonce": nonce,
+                "gas": 500000,  # Reasonable gas limit for splitPosition
+                "gasPrice": self.web3.eth.gas_price
+            })
+            
+            # Sign transaction
+            signed_txn = self.web3.eth.account.sign_transaction(
+                split_txn, private_key=self.private_key
+            )
+            
+            # Send transaction
+            logger.info("Sending splitPosition transaction...")
+            tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
+            logger.info(f"Transaction sent: {tx_hash.hex()}")
+            
+            # Wait for receipt
+            logger.info("Waiting for transaction receipt...")
+            receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+            
+            if receipt.status == 1:
+                logger.info(f"✅ Split position successful! Transaction: {tx_hash.hex()}")
+                logger.info(f"   Split ${amount_usdc:.2f} USDC → {amount_usdc:.2f} YES + {amount_usdc:.2f} NO shares")
+                return {
+                    "transaction_hash": tx_hash.hex(),
+                    "receipt": receipt,
+                    "status": "success",
+                    "amount_usdc": amount_usdc,
+                    "shares_per_side": amount_usdc
+                }
+            else:
+                logger.error(f"❌ Split position failed! Transaction: {tx_hash.hex()}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Error splitting position: {e}", exc_info=True)
+            return None
     
     def get_notifications(self) -> Optional[List[Dict]]:
         """

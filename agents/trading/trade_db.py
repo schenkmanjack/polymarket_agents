@@ -94,6 +94,86 @@ class RealTradeThreshold(Base):
     )
 
 
+class RealMarketMakerPosition(Base):
+    """Database model for storing market maker positions."""
+    __tablename__ = "real_market_maker_positions"
+    
+    # Primary key
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    
+    # Deployment tracking
+    deployment_id = Column(String, nullable=False, index=True)  # UUID generated at script startup
+    
+    # Config parameters
+    split_amount = Column(Float, nullable=False)
+    offset_above_midpoint = Column(Float, nullable=False)
+    price_step = Column(Float, nullable=False)
+    wait_after_fill = Column(Float, nullable=False)
+    poll_interval = Column(Float, nullable=False)
+    market_type = Column(String, nullable=False)  # '1h' for BTC 1-hour markets
+    
+    # Market information
+    market_id = Column(String, nullable=False, index=True)
+    market_slug = Column(String, nullable=False, index=True)
+    condition_id = Column(String, nullable=False)  # CTF condition ID
+    yes_token_id = Column(String, nullable=False)
+    no_token_id = Column(String, nullable=False)
+    
+    # Split information
+    split_transaction_hash = Column(String, nullable=True)
+    yes_shares = Column(Float, nullable=False)  # Shares from split
+    no_shares = Column(Float, nullable=False)  # Shares from split
+    
+    # YES order information
+    yes_order_id = Column(String, nullable=True, index=True)
+    yes_order_price = Column(Float, nullable=True)
+    yes_order_size = Column(Float, nullable=True)
+    yes_order_status = Column(String, nullable=True)  # 'open', 'filled', 'cancelled', 'partial'
+    yes_filled_shares = Column(Float, nullable=True)
+    yes_fill_price = Column(Float, nullable=True)
+    yes_filled_at = Column(DateTime, nullable=True)
+    
+    # NO order information
+    no_order_id = Column(String, nullable=True, index=True)
+    no_order_price = Column(Float, nullable=True)
+    no_order_size = Column(Float, nullable=True)
+    no_order_status = Column(String, nullable=True)  # 'open', 'filled', 'cancelled', 'partial'
+    no_filled_shares = Column(Float, nullable=True)
+    no_fill_price = Column(Float, nullable=True)
+    no_filled_at = Column(DateTime, nullable=True)
+    
+    # Adjustment tracking
+    adjustment_count = Column(Integer, nullable=False, default=0)
+    max_adjustments = Column(Integer, nullable=False, default=10)
+    
+    # Status tracking
+    position_status = Column(String, nullable=False, default='active')  # 'active', 'both_filled', 'closed', 'error'
+    
+    # Outcome information (after market resolution)
+    winning_side = Column(String, nullable=True)  # 'YES' or 'NO' after resolution
+    outcome_price_yes = Column(Float, nullable=True)
+    outcome_price_no = Column(Float, nullable=True)
+    total_payout = Column(Float, nullable=True)  # Total payout from both sides
+    net_payout = Column(Float, nullable=True)  # payout - split_amount - fees
+    roi = Column(Float, nullable=True)  # Return on investment
+    
+    # Timestamps
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    market_resolved_at = Column(DateTime, nullable=True)
+    
+    # Error tracking
+    error_message = Column(String, nullable=True)  # If split or order placement failed
+    
+    __table_args__ = (
+        Index('idx_mm_market_slug', 'market_slug'),
+        Index('idx_mm_deployment_id', 'deployment_id'),
+        Index('idx_mm_position_status', 'position_status'),
+        Index('idx_mm_yes_order_id', 'yes_order_id'),
+        Index('idx_mm_no_order_id', 'no_order_id'),
+    )
+
+
 class TradeDatabase:
     """Database manager for live trading data."""
     

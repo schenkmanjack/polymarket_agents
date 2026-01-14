@@ -359,31 +359,58 @@ def main():
         print(f"✓ Found {len(sports_future)} SPORTS markets ending in the future")
         
         if sports_future:
+            # Filter for markets ending within next 24 hours
+            soonest_markets = [m for m in sports_future if m.get("_hours_until_end", float('inf')) <= 24]
+            
             print("\n" + "="*80)
-            print("LIVE SPORTS MARKET TITLES (sorted by time until end):")
+            print(f"LIVE SPORTS MARKETS - ENDING SOONEST (next 24 hours):")
+            print(f"Found {len(soonest_markets)} markets ending within 24 hours")
             print("="*80)
             
-            for market in sports_future[:50]:  # Show first 50
-                hours = market.get("_hours_until_end", 0)
-                days = int(hours // 24)
-                hrs = int(hours % 24)
-                if days > 0:
-                    time_str = f"{days}d {hrs}h"
-                elif hrs > 0:
-                    time_str = f"{hrs}h"
-                else:
-                    mins = int(market.get("_minutes_until_end", 0))
-                    time_str = f"{mins}m"
-                
-                question = market.get("question", "N/A")
-                market_id = market.get("id")
-                liquidity = market.get("liquidity", 0)
-                try:
-                    liquidity = float(liquidity) if liquidity else 0.0
-                except (ValueError, TypeError):
-                    liquidity = 0.0
-                
-                print(f"[{time_str:>8}] [{market_id}] ${liquidity:>10,.0f} - {question}")
+            if soonest_markets:
+                for market in soonest_markets[:30]:  # Show first 30
+                    hours = market.get("_hours_until_end", 0)
+                    days = int(hours // 24)
+                    hrs = int(hours % 24)
+                    mins = int((hours % 1) * 60)
+                    
+                    if days > 0:
+                        time_str = f"{days}d {hrs}h {mins}m"
+                    elif hrs > 0:
+                        time_str = f"{hrs}h {mins}m"
+                    else:
+                        time_str = f"{mins}m"
+                    
+                    question = market.get("question", "N/A")
+                    market_id = market.get("id")
+                    liquidity = market.get("liquidity", 0)
+                    try:
+                        liquidity = float(liquidity) if liquidity else 0.0
+                    except (ValueError, TypeError):
+                        liquidity = 0.0
+                    
+                    print(f"[{time_str:>12}] [{market_id:>8}] ${liquidity:>10,.0f} - {question}")
+            else:
+                print("\n⚠️ No markets ending within 24 hours")
+                print("\nShowing markets ending soonest (beyond 24 hours):")
+                for market in sports_future[:20]:  # Show first 20
+                    hours = market.get("_hours_until_end", 0)
+                    days = int(hours // 24)
+                    hrs = int(hours % 24)
+                    if days > 0:
+                        time_str = f"{days}d {hrs}h"
+                    else:
+                        time_str = f"{hrs}h"
+                    
+                    question = market.get("question", "N/A")
+                    market_id = market.get("id")
+                    liquidity = market.get("liquidity", 0)
+                    try:
+                        liquidity = float(liquidity) if liquidity else 0.0
+                    except (ValueError, TypeError):
+                        liquidity = 0.0
+                    
+                    print(f"[{time_str:>8}] [{market_id:>8}] ${liquidity:>10,.0f} - {question}")
         else:
             print("\n⚠️ No sports markets found ending in the future")
     

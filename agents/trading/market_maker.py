@@ -1,0 +1,1138 @@
+"""
+Market maker module for BTC 1-hour markets.
+
+Uses split position strategy: split USDC into YES + NO shares, then place sell orders
+slightly above midpoint. Adjusts prices when one side fills.
+"""
+import asyncio
+import logging
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Dict, Optional, Set, Callable
+
+from agents.trading.market_maker_config import MarketMakerConfig
+from agents.trading.trade_db import TradeDatabase, RealMarketMakerPosition
+from agents.trading.orderbook_helper import (
+    fetch_orderbook,
+    calculate_midpoint,
+    get_highest_bid,
+    get_lowest_ask,
+)
+from agents.trading.utils.order_status_helpers import (
+    parse_order_status,
+    is_order_filled,
+    is_order_cancelled,
+    is_order_partial_fill,
+)
+from agents.polymarket.polymarket import Polymarket
+from agents.polymarket.btc_market_detector import (
+    get_latest_btc_1h_market_proactive,
+    is_market_active,
+    get_market_by_slug,
+)
+from agents.polymarket.market_finder import get_token_ids_from_market
+from agents.trading.utils.market_time_helpers import get_minutes_until_resolution
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class MarketMakerPosition:
+    """Tracks a single market maker position in memory."""
+    market_slug: str
+    market: Dict
+    condition_id: str
+    yes_token_id: str
+    no_token_id: str
+    
+    # Split information
+    split_amount: float
+    yes_shares: float
+    no_shares: float
+    split_transaction_hash: Optional[str] = None
+    
+    # Orders
+    yes_order_id: Optional[str] = None
+    no_order_id: Optional[str] = None
+    yes_order_price: Optional[float] = None
+    no_order_price: Optional[float] = None
+    
+    # Status tracking
+    yes_filled: bool = False
+    no_filled: bool = False
+    yes_fill_time: Optional[datetime] = None
+    no_fill_time: Optional[datetime] = None
+    
+    # Adjustment tracking
+    adjustment_count: int = 0
+    max_adjustments: int = 10
+    last_adjustment_time: Optional[datetime] = None  # When we last adjusted price
+    
+    # Database record ID
+    db_position_id: Optional[int] = None
+
+
+class MarketMaker:
+    """Market maker for BTC 1-hour markets using split position strategy."""
+    
+    def __init__(self, config_path: str):
+        """Initialize market maker with config."""
+        self.config = MarketMakerConfig(config_path)
+        self.db = TradeDatabase()
+        self.pm = Polymarket()
+        
+        # Generate deployment ID
+        self.deployment_id = str(uuid.uuid4())
+        logger.info(f"Deployment ID: {self.deployment_id}")
+        
+        # Track active positions
+        self.active_positions: Dict[str, MarketMakerPosition] = {}  # market_slug -> position
+        
+        # Track markets we're monitoring
+        self.monitored_markets: Set[str] = set()  # market_slugs
+        
+        # Track orderbook prices near resolution for determining winner
+        # Format: {market_slug: {"yes_highest_bid": float, "no_highest_bid": float, "timestamp": datetime}}
+        self.last_orderbook_prices: Dict[str, Dict] = {}
+        
+        self.running = False
+    
+    async def start(self):
+        """Start the market maker loop."""
+        logger.info("=" * 80)
+        logger.info("STARTING MARKET MAKER")
+        logger.info("=" * 80)
+        logger.info(f"Split amount: ${self.config.split_amount:.2f}")
+        logger.info(f"Offset above midpoint: {self.config.offset_above_midpoint:.4f}")
+        logger.info(f"Price step: {self.config.price_step:.4f}")
+        logger.info(f"Wait after fill: {self.config.wait_after_fill:.1f} seconds")
+        logger.info(f"Poll interval: {self.config.poll_interval:.1f} seconds")
+        logger.info("=" * 80)
+        
+        # Check wallet balance
+        try:
+            wallet_balance = self.pm.get_polymarket_balance()
+            if wallet_balance is not None:
+                logger.info(f"Wallet balance: ${wallet_balance:.2f}")
+                if wallet_balance < self.config.split_amount:
+                    logger.warning(
+                        f"⚠ INSUFFICIENT WALLET BALANCE: "
+                        f"${wallet_balance:.2f} < ${self.config.split_amount:.2f} (required for split)"
+                    )
+                else:
+                    logger.info(f"✓ Wallet balance sufficient for split (${self.config.split_amount:.2f})")
+        except Exception as e:
+            logger.warning(f"Could not check wallet balance: {e}")
+        
+        logger.info("=" * 80)
+        
+        # Resume monitoring existing positions
+        await self._resume_positions()
+        
+        self.running = True
+        
+        # Start background tasks
+        task_coros = {
+            "market_detection": self._market_detection_loop,
+            "market_maker": self._market_maker_loop,
+        }
+        
+        tasks = {}
+        for name, coro in task_coros.items():
+            task = asyncio.create_task(coro())
+            task.set_name(name)
+            tasks[name] = task
+            logger.info(f"Started background task: {name}")
+        
+        try:
+            # Monitor tasks and restart if they crash
+            while self.running:
+                await asyncio.sleep(5.0)
+                
+                for name, task in list(tasks.items()):
+                    if task.done():
+                        try:
+                            exception = task.exception()
+                            if exception:
+                                logger.error(f"⚠️ Background task '{name}' crashed - restarting...", exc_info=exception)
+                            else:
+                                logger.warning(f"⚠️ Background task '{name}' completed - restarting...")
+                        except Exception as e:
+                            logger.error(f"Error checking task '{name}' status: {e}", exc_info=True)
+                        
+                        if self.running and name in task_coros:
+                            logger.info(f"🔄 Restarting background task: {name}")
+                            new_task = asyncio.create_task(task_coros[name]())
+                            new_task.set_name(name)
+                            tasks[name] = new_task
+                            
+        except KeyboardInterrupt:
+            logger.info("Received shutdown signal")
+        except Exception as e:
+            logger.error("CRITICAL ERROR in market maker loop", exc_info=True)
+            raise
+        finally:
+            self.running = False
+            logger.info("Market maker stopped - cancelling all background tasks...")
+            
+            for name, task in tasks.items():
+                if not task.done():
+                    logger.info(f"Cancelling task: {name}")
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+    
+    async def _resume_positions(self):
+        """Resume monitoring existing positions from database."""
+        # Query for active positions from this deployment
+        session = self.db.SessionLocal()
+        try:
+            positions = session.query(RealMarketMakerPosition).filter(
+                RealMarketMakerPosition.deployment_id == self.deployment_id,
+                RealMarketMakerPosition.position_status == 'active'
+            ).all()
+            
+            logger.info(f"Found {len(positions)} active positions to resume")
+            
+            for db_pos in positions:
+                market_slug = db_pos.market_slug
+                market = get_market_by_slug(market_slug)
+                
+                if not market:
+                    logger.warning(f"Could not find market for slug: {market_slug}")
+                    continue
+                
+                # Recreate position object
+                position = MarketMakerPosition(
+                    market_slug=market_slug,
+                    market=market,
+                    condition_id=db_pos.condition_id,
+                    yes_token_id=db_pos.yes_token_id,
+                    no_token_id=db_pos.no_token_id,
+                    split_amount=db_pos.split_amount,
+                    yes_shares=db_pos.yes_shares,
+                    no_shares=db_pos.no_shares,
+                    split_transaction_hash=db_pos.split_transaction_hash,
+                    yes_order_id=db_pos.yes_order_id,
+                    no_order_id=db_pos.no_order_id,
+                    yes_order_price=db_pos.yes_order_price,
+                    no_order_price=db_pos.no_order_price,
+                    yes_filled=db_pos.yes_order_status == 'filled',
+                    no_filled=db_pos.no_order_status == 'filled',
+                    adjustment_count=db_pos.adjustment_count,
+                    db_position_id=db_pos.id,
+                )
+                
+                self.active_positions[market_slug] = position
+                self.monitored_markets.add(market_slug)
+                logger.info(f"Resumed position for market: {market_slug}")
+                
+        finally:
+            session.close()
+    
+    async def _market_detection_loop(self):
+        """Continuously detect new BTC 1-hour markets."""
+        check_interval = 60.0  # Check every 60 seconds
+        
+        while self.running:
+            try:
+                await self._check_for_new_markets()
+            except Exception as e:
+                logger.error(f"Error in market detection: {e}", exc_info=True)
+            
+            await asyncio.sleep(check_interval)
+    
+    async def _check_for_new_markets(self):
+        """Check for new BTC 1-hour markets."""
+        try:
+            market = get_latest_btc_1h_market_proactive()
+            
+            if not market:
+                return
+            
+            market_slug = market.get("slug") or market.get("_event_slug")
+            if not market_slug:
+                logger.warning("Market found but no slug available")
+                return
+            
+            # Skip if already monitoring
+            if market_slug in self.monitored_markets:
+                return
+            
+            # Skip if market is not active
+            if not is_market_active(market):
+                return
+            
+            # Check if we're too close to resolution (don't create new positions)
+            minutes_remaining = get_minutes_until_resolution(market)
+            if minutes_remaining is None:
+                logger.warning(f"Could not determine time remaining for market {market_slug}")
+                return
+            
+            # Check max_minutes_before_resolution (upper limit - don't start too early)
+            if self.config.max_minutes_before_resolution is not None:
+                if minutes_remaining > self.config.max_minutes_before_resolution:
+                    logger.info(
+                        f"Market {market_slug} found but {minutes_remaining:.1f} minutes remaining "
+                        f"exceeds max_minutes_before_resolution ({self.config.max_minutes_before_resolution:.1f})"
+                    )
+                    return
+            
+            # Check min_minutes_before_resolution (lower limit - don't start too late)
+            if self.config.min_minutes_before_resolution is not None:
+                if minutes_remaining < self.config.min_minutes_before_resolution:
+                    logger.info(
+                        f"Market {market_slug} found but {minutes_remaining:.1f} minutes remaining "
+                        f"is less than min_minutes_before_resolution ({self.config.min_minutes_before_resolution:.1f}). "
+                        f"Skipping new position."
+                    )
+                    return
+            
+            # Get token IDs
+            token_ids = get_token_ids_from_market(market)
+            if not token_ids or len(token_ids) < 2:
+                logger.warning(f"Could not get token IDs for market {market_slug}")
+                return
+            
+            yes_token_id = token_ids[0]
+            no_token_id = token_ids[1]
+            
+            # Get condition ID
+            condition_id = market.get("conditionId")
+            if not condition_id:
+                logger.warning(f"Could not get conditionId for market {market_slug}")
+                return
+            
+            logger.info(f"Found new BTC 1h market: {market_slug}")
+            logger.info(f"  Question: {market.get('question', 'N/A')}")
+            logger.info(f"  Condition ID: {condition_id}")
+            
+            # Start market making for this market
+            success = await self._start_market_making(market, market_slug, condition_id, yes_token_id, no_token_id)
+            
+            if not success:
+                logger.warning(f"Failed to start market making for {market_slug}, will retry on next check")
+            
+        except Exception as e:
+            logger.error(f"Error checking for new markets: {e}", exc_info=True)
+    
+    async def _start_market_making(
+        self,
+        market: Dict,
+        market_slug: str,
+        condition_id: str,
+        yes_token_id: str,
+        no_token_id: str
+    ) -> bool:
+        """Start market making for a new market. Returns True if successful, False otherwise."""
+        try:
+            # Split position
+            split_result = await self._split_position(condition_id)
+            
+            if not split_result:
+                logger.error(f"Failed to split position for market {market_slug}")
+                # Mark position as error in database if we created one
+                return False
+            
+            # Create position object
+            position = MarketMakerPosition(
+                market_slug=market_slug,
+                market=market,
+                condition_id=condition_id,
+                yes_token_id=yes_token_id,
+                no_token_id=no_token_id,
+                split_amount=self.config.split_amount,
+                yes_shares=self.config.split_amount,
+                no_shares=self.config.split_amount,
+                split_transaction_hash=split_result.get("transaction_hash"),
+            )
+            
+            # Save to database
+            db_position = self._save_position_to_db(position)
+            if db_position:
+                position.db_position_id = db_position.id
+            
+            # Place sell orders
+            await self._place_sell_orders(position)
+            
+            # Track position
+            self.active_positions[market_slug] = position
+            self.monitored_markets.add(market_slug)
+            
+            logger.info(f"✅ Started market making for {market_slug}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error starting market making for {market_slug}: {e}", exc_info=True)
+            return False
+    
+    async def _split_position(self, condition_id: str) -> Optional[Dict]:
+        """Split USDC into YES + NO shares."""
+        logger.info(f"Splitting ${self.config.split_amount:.2f} USDC into YES + NO shares...")
+        
+        try:
+            # Call split_position synchronously (it's a blocking web3 call)
+            # Run in executor to avoid blocking the event loop
+            loop = asyncio.get_event_loop()
+            split_result = await loop.run_in_executor(
+                None,
+                self.pm.split_position,
+                condition_id,
+                self.config.split_amount
+            )
+            
+            if not split_result:
+                logger.error(
+                    f"❌ Split position failed for condition_id {condition_id}. "
+                    f"Possible reasons: insufficient USDC balance, insufficient USDC approval, "
+                    f"or transaction failed. Check logs above for details."
+                )
+                return None
+            
+            return split_result
+            
+        except Exception as e:
+            logger.error(f"❌ Exception during split position: {e}", exc_info=True)
+            logger.error(
+                f"Split failed for condition_id {condition_id}. "
+                f"Check: 1) USDC balance >= ${self.config.split_amount:.2f}, "
+                f"2) USDC approved for CTF contract, 3) Network connectivity"
+            )
+            return None
+    
+    def _save_position_to_db(self, position: MarketMakerPosition) -> Optional[RealMarketMakerPosition]:
+        """Save position to database."""
+        try:
+            session = self.db.SessionLocal()
+            try:
+                db_position = RealMarketMakerPosition(
+                    deployment_id=self.deployment_id,
+                    split_amount=position.split_amount,
+                    offset_above_midpoint=self.config.offset_above_midpoint,
+                    price_step=self.config.price_step,
+                    wait_after_fill=self.config.wait_after_fill,
+                    poll_interval=self.config.poll_interval,
+                    market_type=self.config.market_type,
+                    market_id=str(position.market.get("id", "")),
+                    market_slug=position.market_slug,
+                    condition_id=position.condition_id,
+                    yes_token_id=position.yes_token_id,
+                    no_token_id=position.no_token_id,
+                    split_transaction_hash=position.split_transaction_hash,
+                    yes_shares=position.yes_shares,
+                    no_shares=position.no_shares,
+                    position_status='active',
+                )
+                
+                session.add(db_position)
+                session.commit()
+                session.refresh(db_position)
+                
+                logger.info(f"Saved position to database: ID={db_position.id}")
+                return db_position
+                
+            finally:
+                session.close()
+        except Exception as e:
+            logger.error(f"Error saving position to database: {e}", exc_info=True)
+            return None
+    
+    async def _place_sell_orders(self, position: MarketMakerPosition):
+        """Place sell orders for YES and NO shares."""
+        try:
+            # Get orderbook for YES side (NO should be symmetric)
+            yes_orderbook = fetch_orderbook(position.yes_token_id)
+            
+            if not yes_orderbook:
+                logger.error(f"Could not fetch orderbook for YES token {position.yes_token_id}")
+                return
+            
+            # Calculate midpoint
+            midpoint = calculate_midpoint(yes_orderbook)
+            
+            if midpoint is None:
+                logger.error("Could not calculate midpoint from orderbook")
+                return
+            
+            # Calculate sell prices
+            sell_price = midpoint + self.config.offset_above_midpoint
+            
+            # Cap at 0.99 (max sell price)
+            sell_price = min(sell_price, 0.99)
+            
+            logger.info(
+                f"Placing sell orders for {position.market_slug}: "
+                f"midpoint={midpoint:.4f}, sell_price={sell_price:.4f}"
+            )
+            
+            # Place YES sell order
+            yes_order_response = self.pm.execute_order(
+                price=sell_price,
+                size=position.yes_shares,
+                side="SELL",
+                token_id=position.yes_token_id,
+            )
+            
+            if yes_order_response:
+                yes_order_id = self.pm.extract_order_id(yes_order_response)
+                if yes_order_id:
+                    position.yes_order_id = yes_order_id
+                    position.yes_order_price = sell_price
+                    logger.info(f"✅ Placed YES sell order: {yes_order_id}")
+                    self._update_position_in_db(position)
+            
+            # Place NO sell order
+            no_order_response = self.pm.execute_order(
+                price=sell_price,
+                size=position.no_shares,
+                side="SELL",
+                token_id=position.no_token_id,
+            )
+            
+            if no_order_response:
+                no_order_id = self.pm.extract_order_id(no_order_response)
+                if no_order_id:
+                    position.no_order_id = no_order_id
+                    position.no_order_price = sell_price
+                    logger.info(f"✅ Placed NO sell order: {no_order_id}")
+                    self._update_position_in_db(position)
+                    
+        except Exception as e:
+            logger.error(f"Error placing sell orders: {e}", exc_info=True)
+    
+    def _update_position_in_db(self, position: MarketMakerPosition):
+        """Update position in database."""
+        if not position.db_position_id:
+            return
+        
+        try:
+            session = self.db.SessionLocal()
+            try:
+                db_position = session.query(RealMarketMakerPosition).filter(
+                    RealMarketMakerPosition.id == position.db_position_id
+                ).first()
+                
+                if db_position:
+                    db_position.yes_order_id = position.yes_order_id
+                    db_position.no_order_id = position.no_order_id
+                    db_position.yes_order_price = position.yes_order_price
+                    db_position.no_order_price = position.no_order_price
+                    db_position.yes_order_size = position.yes_shares
+                    db_position.no_order_size = position.no_shares
+                    db_position.adjustment_count = position.adjustment_count
+                    db_position.updated_at = datetime.now(timezone.utc)
+                    
+                    session.commit()
+                    
+            finally:
+                session.close()
+        except Exception as e:
+            logger.error(f"Error updating position in database: {e}", exc_info=True)
+    
+    def _update_order_status_in_db(
+        self,
+        position: MarketMakerPosition,
+        side: str,
+        status: str,
+        filled_amount: float,
+        total_amount: float,
+        order_status_dict: Optional[Dict] = None
+    ):
+        """Update order status in database."""
+        if not position.db_position_id:
+            return
+        
+        try:
+            session = self.db.SessionLocal()
+            try:
+                db_position = session.query(RealMarketMakerPosition).filter(
+                    RealMarketMakerPosition.id == position.db_position_id
+                ).first()
+                
+                if db_position:
+                    if side == "YES":
+                        db_position.yes_order_status = status
+                        db_position.yes_filled_shares = filled_amount if filled_amount > 0 else None
+                    else:
+                        db_position.no_order_status = status
+                        db_position.no_filled_shares = filled_amount if filled_amount > 0 else None
+                    
+                    db_position.updated_at = datetime.now(timezone.utc)
+                    session.commit()
+                    
+            finally:
+                session.close()
+        except Exception as e:
+            logger.error(f"Error updating order status in database: {e}", exc_info=True)
+    
+    def _update_fill_details_in_db(
+        self,
+        position: MarketMakerPosition,
+        side: str,
+        filled_shares: float,
+        fill_price: float
+    ):
+        """Update fill details in database."""
+        if not position.db_position_id:
+            return
+        
+        try:
+            session = self.db.SessionLocal()
+            try:
+                db_position = session.query(RealMarketMakerPosition).filter(
+                    RealMarketMakerPosition.id == position.db_position_id
+                ).first()
+                
+                if db_position:
+                    if side == "YES":
+                        db_position.yes_order_status = "filled"
+                        db_position.yes_filled_shares = filled_shares
+                        db_position.yes_fill_price = fill_price
+                        db_position.yes_filled_at = position.yes_fill_time
+                    else:
+                        db_position.no_order_status = "filled"
+                        db_position.no_filled_shares = filled_shares
+                        db_position.no_fill_price = fill_price
+                        db_position.no_filled_at = position.no_fill_time
+                    
+                    db_position.updated_at = datetime.now(timezone.utc)
+                    session.commit()
+                    
+            finally:
+                session.close()
+        except Exception as e:
+            logger.error(f"Error updating fill details in database: {e}", exc_info=True)
+    
+    def _extract_fill_price(self, order_status: Dict, fallback_price: Optional[float]) -> float:
+        """Extract fill price from order status, or use fallback."""
+        # Try to get fill price from order status
+        fill_price = (
+            order_status.get("price") or
+            order_status.get("fillPrice") or
+            order_status.get("fill_price") or
+            order_status.get("averageFillPrice") or
+            order_status.get("average_fill_price") or
+            None
+        )
+        
+        if fill_price:
+            try:
+                return float(fill_price)
+            except (ValueError, TypeError):
+                pass
+        
+        # Use fallback price (original order price)
+        if fallback_price:
+            return fallback_price
+        
+        # Default fallback
+        return 0.50
+    
+    async def _market_maker_loop(self):
+        """Main market maker loop - monitors and adjusts orders."""
+        while self.running:
+            try:
+                # Track orderbook prices for markets near resolution
+                await self._track_orderbook_prices_near_resolution()
+                
+                # Process each position
+                for market_slug, position in list(self.active_positions.items()):
+                    await self._process_position(market_slug, position)
+                    
+                    # Check for market resolution
+                    await self._check_market_resolution(market_slug, position)
+            except Exception as e:
+                logger.error(f"Error in market maker loop: {e}", exc_info=True)
+            
+            await asyncio.sleep(self.config.poll_interval)
+    
+    async def _process_position(self, market_slug: str, position: MarketMakerPosition):
+        """Process a single position - check order status and handle fills."""
+        try:
+            # Check if market is still active
+            if not is_market_active(position.market):
+                logger.info(f"Market {market_slug} is no longer active, closing position")
+                await self._close_position(position, reason="market_closed")
+                return
+            
+            # Always check order status for both sides (poll continuously)
+            yes_status = None
+            no_status = None
+            
+            if position.yes_order_id and not position.yes_filled:
+                yes_status = self.pm.get_order_status(position.yes_order_id)
+            
+            if position.no_order_id and not position.no_filled:
+                no_status = self.pm.get_order_status(position.no_order_id)
+            
+            # Parse order statuses and detect fills
+            if yes_status:
+                yes_status_str, yes_filled_amount, yes_total_amount = parse_order_status(yes_status)
+                
+                # Update order status in database
+                self._update_order_status_in_db(position, "YES", yes_status_str, yes_filled_amount, yes_total_amount, yes_status)
+                
+                if is_order_filled(yes_status_str, yes_filled_amount, yes_total_amount):
+                    if not position.yes_filled:
+                        position.yes_filled = True
+                        position.yes_fill_time = datetime.now(timezone.utc)
+                        
+                        # Extract fill price if available
+                        yes_fill_price = self._extract_fill_price(yes_status, position.yes_order_price)
+                        
+                        logger.info(
+                            f"✅ YES order filled for {market_slug}: "
+                            f"{yes_filled_amount:.2f}/{yes_total_amount:.2f} shares @ ${yes_fill_price:.4f}"
+                        )
+                        
+                        # Initialize last_adjustment_time if this is the first side to fill
+                        if position.last_adjustment_time is None:
+                            position.last_adjustment_time = position.yes_fill_time
+                        
+                        # Update database with fill details
+                        self._update_fill_details_in_db(position, "YES", yes_filled_amount, yes_fill_price)
+            
+            if no_status:
+                no_status_str, no_filled_amount, no_total_amount = parse_order_status(no_status)
+                
+                # Update order status in database
+                self._update_order_status_in_db(position, "NO", no_status_str, no_filled_amount, no_total_amount, no_status)
+                
+                if is_order_filled(no_status_str, no_filled_amount, no_total_amount):
+                    if not position.no_filled:
+                        position.no_filled = True
+                        position.no_fill_time = datetime.now(timezone.utc)
+                        
+                        # Extract fill price if available
+                        no_fill_price = self._extract_fill_price(no_status, position.no_order_price)
+                        
+                        logger.info(
+                            f"✅ NO order filled for {market_slug}: "
+                            f"{no_filled_amount:.2f}/{no_total_amount:.2f} shares @ ${no_fill_price:.4f}"
+                        )
+                        
+                        # Initialize last_adjustment_time if this is the first side to fill
+                        if position.last_adjustment_time is None:
+                            position.last_adjustment_time = position.no_fill_time
+                        
+                        # Update database with fill details
+                        self._update_fill_details_in_db(position, "NO", no_filled_amount, no_fill_price)
+            
+            # Check if both sides filled
+            if position.yes_filled and position.no_filled:
+                logger.info(f"Both sides filled for {market_slug}, ready to split again")
+                await self._handle_both_filled(position)
+                return
+            
+            # Handle imbalanced fill: one side filled, other hasn't
+            # Check if wait_after_fill time has passed since last adjustment (or first fill)
+            if (position.yes_filled and not position.no_filled) or (position.no_filled and not position.yes_filled):
+                await self._check_and_adjust_if_needed(position)
+                
+        except Exception as e:
+            logger.error(f"Error processing position {market_slug}: {e}", exc_info=True)
+    
+    async def _check_and_adjust_if_needed(self, position: MarketMakerPosition):
+        """Check if wait_after_fill time has passed and adjust if needed."""
+        try:
+            # Determine which side filled and which didn't
+            if position.yes_filled and not position.no_filled:
+                filled_side = "YES"
+                unfilled_side = "NO"
+                fill_time = position.yes_fill_time
+            elif position.no_filled and not position.yes_filled:
+                filled_side = "NO"
+                unfilled_side = "YES"
+                fill_time = position.no_fill_time
+            else:
+                # Both filled or neither filled - nothing to do
+                return
+            
+            # Use last_adjustment_time if we've already adjusted, otherwise use fill_time
+            reference_time = position.last_adjustment_time if position.last_adjustment_time else fill_time
+            
+            if reference_time is None:
+                return
+            
+            # Calculate time since last adjustment (or first fill)
+            time_since_reference = (datetime.now(timezone.utc) - reference_time).total_seconds()
+            
+            # Check if wait_after_fill time has passed
+            if time_since_reference >= self.config.wait_after_fill:
+                # Check if other side filled (double-check before adjusting)
+                other_order_id = position.no_order_id if unfilled_side == "NO" else position.yes_order_id
+                
+                if other_order_id:
+                    other_status = self.pm.get_order_status(other_order_id)
+                    if other_status:
+                        other_status_str, other_filled_amount, other_total_amount = parse_order_status(other_status)
+                        if is_order_filled(other_status_str, other_filled_amount, other_total_amount):
+                            # Other side filled! Update status
+                            if unfilled_side == "YES":
+                                position.yes_filled = True
+                                position.yes_fill_time = datetime.now(timezone.utc)
+                            else:
+                                position.no_filled = True
+                                position.no_fill_time = datetime.now(timezone.utc)
+                            
+                            logger.info(f"✅ Other side ({unfilled_side}) filled!")
+                            await self._handle_both_filled(position)
+                            return
+                
+                # Other side still didn't fill - adjust price
+                logger.info(
+                    f"{unfilled_side} side did not fill after {time_since_reference:.1f}s "
+                    f"(wait_after_fill={self.config.wait_after_fill:.1f}s), "
+                    f"adjusting price by -{self.config.price_step:.4f}"
+                )
+                
+                await self._adjust_unfilled_side(position, unfilled_side)
+            
+        except Exception as e:
+            logger.error(f"Error checking and adjusting: {e}", exc_info=True)
+    
+    async def _adjust_unfilled_side(self, position: MarketMakerPosition, side: str):
+        """Cancel unfilled order and place new order at lower price."""
+        try:
+            if position.adjustment_count >= position.max_adjustments:
+                logger.warning(
+                    f"Max adjustments ({position.max_adjustments}) reached for {position.market_slug}, "
+                    f"stopping adjustments"
+                )
+                return
+            
+            # Get order ID and current price
+            if side == "YES":
+                order_id = position.yes_order_id
+                current_price = position.yes_order_price
+                token_id = position.yes_token_id
+                shares = position.yes_shares
+            else:
+                order_id = position.no_order_id
+                current_price = position.no_order_price
+                token_id = position.no_token_id
+                shares = position.no_shares
+            
+            if not order_id or current_price is None:
+                logger.error(f"Cannot adjust {side} side - missing order info")
+                return
+            
+            # Check order status before cancelling
+            current_status = self.pm.get_order_status(order_id)
+            if current_status:
+                status_str, filled_amount, total_amount = parse_order_status(current_status)
+                
+                # If already filled, update position and return
+                if is_order_filled(status_str, filled_amount, total_amount):
+                    logger.info(f"{side} order {order_id} already filled, no need to cancel")
+                    if side == "YES":
+                        position.yes_filled = True
+                        position.yes_fill_time = datetime.now(timezone.utc)
+                        fill_price = self._extract_fill_price(current_status, position.yes_order_price)
+                        self._update_fill_details_in_db(position, "YES", filled_amount, fill_price)
+                    else:
+                        position.no_filled = True
+                        position.no_fill_time = datetime.now(timezone.utc)
+                        fill_price = self._extract_fill_price(current_status, position.no_order_price)
+                        self._update_fill_details_in_db(position, "NO", filled_amount, fill_price)
+                    return
+                
+                # If already cancelled, just update status and continue
+                if is_order_cancelled(status_str):
+                    logger.info(f"{side} order {order_id} already cancelled")
+                    self._update_order_status_in_db(position, side, "cancelled", filled_amount, total_amount, current_status)
+                    # Continue to place new order
+            
+            # Cancel existing order
+            logger.info(f"Cancelling {side} order {order_id}")
+            try:
+                cancel_result = self.pm.cancel_order(order_id)
+                
+                if cancel_result:
+                    logger.info(f"✅ Cancelled {side} order")
+                    # Update status - use order size as total_amount
+                    total_shares = position.yes_shares if side == "YES" else position.no_shares
+                    self._update_order_status_in_db(position, side, "cancelled", 0, total_shares, None)
+                else:
+                    logger.warning(
+                        f"⚠️ Cancel order returned None/False for {side} order {order_id}. "
+                        f"Order may already be filled/cancelled. Will attempt to place new order anyway."
+                    )
+                    # Continue anyway - order might already be cancelled/filled
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ Exception cancelling {side} order {order_id}: {e}. "
+                    f"Will attempt to place new order anyway (order may already be cancelled/filled)."
+                )
+                # Continue anyway - might be a transient error
+            
+            # Calculate new price
+            new_price = current_price - self.config.price_step
+            
+            # Ensure price is valid (between 0.01 and 0.99)
+            new_price = max(0.01, min(new_price, 0.99))
+            
+            logger.info(f"Placing new {side} sell order at {new_price:.4f} (was {current_price:.4f})")
+            
+            # Place new order
+            order_response = self.pm.execute_order(
+                price=new_price,
+                size=shares,
+                side="SELL",
+                token_id=token_id,
+            )
+            
+            if order_response:
+                new_order_id = self.pm.extract_order_id(order_response)
+                if new_order_id:
+                    if side == "YES":
+                        position.yes_order_id = new_order_id
+                        position.yes_order_price = new_price
+                    else:
+                        position.no_order_id = new_order_id
+                        position.no_order_price = new_price
+                    
+                    position.adjustment_count += 1
+                    position.last_adjustment_time = datetime.now(timezone.utc)  # Update adjustment time
+                    logger.info(f"✅ Placed new {side} order: {new_order_id} (adjustment #{position.adjustment_count})")
+                    self._update_position_in_db(position)
+            
+        except Exception as e:
+            logger.error(f"Error adjusting unfilled side: {e}", exc_info=True)
+    
+    async def _handle_both_filled(self, position: MarketMakerPosition):
+        """Handle when both sides are filled - ready to split again."""
+        try:
+            logger.info(f"Both sides filled for {position.market_slug}, closing position")
+            
+            # Close position (mark as both_filled)
+            await self._close_position(position, reason="both_filled")
+            
+            # Optionally start a new position for the same market
+            # (For now, we'll let market detection handle finding new markets)
+            
+        except Exception as e:
+            logger.error(f"Error handling both filled: {e}", exc_info=True)
+    
+    async def _track_orderbook_prices_near_resolution(self):
+        """Track orderbook prices for markets approaching resolution."""
+        # Only track if min_minutes_before_resolution is configured
+        if self.config.min_minutes_before_resolution is None:
+            return
+        
+        for market_slug, position in list(self.active_positions.items()):
+            minutes_remaining = get_minutes_until_resolution(position.market)
+            
+            # Track prices if market is within min_minutes_before_resolution
+            if minutes_remaining is not None and minutes_remaining <= self.config.min_minutes_before_resolution:
+                try:
+                    yes_orderbook = fetch_orderbook(position.yes_token_id)
+                    no_orderbook = fetch_orderbook(position.no_token_id)
+                    
+                    if yes_orderbook and no_orderbook:
+                        yes_highest_bid = get_highest_bid(yes_orderbook)
+                        no_highest_bid = get_highest_bid(no_orderbook)
+                        
+                        # Store prices if we got valid values
+                        if yes_highest_bid is not None and no_highest_bid is not None:
+                            self.last_orderbook_prices[market_slug] = {
+                                "yes_highest_bid": yes_highest_bid,
+                                "no_highest_bid": no_highest_bid,
+                                "timestamp": datetime.now(timezone.utc),
+                            }
+                            logger.debug(
+                                f"Tracked orderbook prices for {market_slug}: "
+                                f"YES bid={yes_highest_bid:.4f}, NO bid={no_highest_bid:.4f}"
+                            )
+                except Exception as e:
+                    logger.debug(f"Error tracking orderbook prices for {market_slug}: {e}")
+            else:
+                # Remove from tracking if market is no longer near resolution
+                self.last_orderbook_prices.pop(market_slug, None)
+    
+    async def _check_market_resolution(self, market_slug: str, position: MarketMakerPosition):
+        """Check if market has resolved and handle resolution."""
+        try:
+            # Check if market is still active
+            if is_market_active(position.market):
+                return  # Market still active, no resolution yet
+            
+            # Market has resolved - process resolution
+            logger.info(f"Market {market_slug} has resolved, processing resolution...")
+            
+            # Get last orderbook prices before resolution
+            last_prices = self.last_orderbook_prices.get(market_slug)
+            
+            if last_prices:
+                yes_highest_bid = last_prices.get("yes_highest_bid")
+                no_highest_bid = last_prices.get("no_highest_bid")
+                
+                logger.info(
+                    f"Using last orderbook prices before resolution: "
+                    f"YES highest_bid={yes_highest_bid:.4f}, NO highest_bid={no_highest_bid:.4f}"
+                )
+            else:
+                # Fallback: fetch current orderbook (may be closed, but worth trying)
+                logger.warning(f"No tracked orderbook prices for {market_slug}, fetching current orderbook...")
+                yes_orderbook = fetch_orderbook(position.yes_token_id)
+                no_orderbook = fetch_orderbook(position.no_token_id)
+                
+                if yes_orderbook and no_orderbook:
+                    yes_highest_bid = get_highest_bid(yes_orderbook)
+                    no_highest_bid = get_highest_bid(no_orderbook)
+                else:
+                    yes_highest_bid = None
+                    no_highest_bid = None
+            
+            # Determine winning side from highest bids
+            # Rule: highest_bid >= 0.98 means that side won
+            winning_side = None
+            if yes_highest_bid is not None and no_highest_bid is not None:
+                if yes_highest_bid >= 0.98:
+                    winning_side = "YES"
+                    logger.info(f"✅ YES won (YES highest_bid={yes_highest_bid:.4f} ≥ 0.98)")
+                elif no_highest_bid >= 0.98:
+                    winning_side = "NO"
+                    logger.info(f"✅ NO won (NO highest_bid={no_highest_bid:.4f} ≥ 0.98)")
+                else:
+                    # Inconclusive - use higher bid as tiebreaker
+                    if yes_highest_bid > no_highest_bid:
+                        winning_side = "YES"
+                        logger.info(f"✅ YES won (YES bid {yes_highest_bid:.4f} > NO bid {no_highest_bid:.4f})")
+                    else:
+                        winning_side = "NO"
+                        logger.info(f"✅ NO won (NO bid {no_highest_bid:.4f} > YES bid {yes_highest_bid:.4f})")
+            else:
+                logger.warning(f"Could not determine winning side from orderbook prices")
+                # Default to YES if we can't determine (conservative)
+                winning_side = "YES"
+            
+            # Calculate payout for remaining shares
+            await self._calculate_resolution_payout(position, winning_side, yes_highest_bid, no_highest_bid)
+            
+            # Close position
+            await self._close_position(position, reason="resolved")
+            
+        except Exception as e:
+            logger.error(f"Error checking market resolution for {market_slug}: {e}", exc_info=True)
+    
+    async def _calculate_resolution_payout(
+        self,
+        position: MarketMakerPosition,
+        winning_side: str,
+        yes_highest_bid: Optional[float],
+        no_highest_bid: Optional[float]
+    ):
+        """Calculate payout for remaining shares after market resolution."""
+        try:
+            # Calculate remaining shares (shares that weren't sold)
+            yes_remaining = position.yes_shares if not position.yes_filled else 0.0
+            no_remaining = position.no_shares if not position.no_filled else 0.0
+            
+            # Value remaining shares:
+            # - Winning side: $1 per share
+            # - Losing side: $0 per share
+            if winning_side == "YES":
+                yes_payout = yes_remaining * 1.0  # $1 per share
+                no_payout = no_remaining * 0.0    # $0 per share
+            else:  # NO won
+                yes_payout = yes_remaining * 0.0  # $0 per share
+                no_payout = no_remaining * 1.0     # $1 per share
+            
+            total_payout = yes_payout + no_payout
+            
+            # Calculate net payout (payout - split_amount - fees)
+            # Note: We don't track fees separately, so net_payout = total_payout - split_amount
+            net_payout = total_payout - position.split_amount
+            
+            # Calculate ROI
+            roi = (net_payout / position.split_amount) if position.split_amount > 0 else 0.0
+            
+            logger.info(
+                f"Resolution payout for {position.market_slug}: "
+                f"winning_side={winning_side}, "
+                f"yes_remaining={yes_remaining:.2f}, no_remaining={no_remaining:.2f}, "
+                f"yes_payout=${yes_payout:.2f}, no_payout=${no_payout:.2f}, "
+                f"total_payout=${total_payout:.2f}, net_payout=${net_payout:.2f}, "
+                f"ROI={roi*100:.2f}%"
+            )
+            
+            # Update database with resolution info
+            if position.db_position_id:
+                session = self.db.SessionLocal()
+                try:
+                    db_position = session.query(RealMarketMakerPosition).filter(
+                        RealMarketMakerPosition.id == position.db_position_id
+                    ).first()
+                    
+                    if db_position:
+                        db_position.winning_side = winning_side
+                        db_position.outcome_price_yes = 1.0 if winning_side == "YES" else 0.0
+                        db_position.outcome_price_no = 1.0 if winning_side == "NO" else 0.0
+                        db_position.total_payout = total_payout
+                        db_position.net_payout = net_payout
+                        db_position.roi = roi
+                        db_position.market_resolved_at = datetime.now(timezone.utc)
+                        db_position.position_status = "resolved"
+                        db_position.updated_at = datetime.now(timezone.utc)
+                        
+                        session.commit()
+                        logger.info(f"Updated database with resolution info for position {position.db_position_id}")
+                        
+                finally:
+                    session.close()
+                    
+        except Exception as e:
+            logger.error(f"Error calculating resolution payout: {e}", exc_info=True)
+    
+    async def _close_position(self, position: MarketMakerPosition, reason: str):
+        """Close a position."""
+        try:
+            # Cancel any remaining open orders
+            if not position.yes_filled and position.yes_order_id:
+                try:
+                    logger.info(f"Cancelling remaining YES order {position.yes_order_id}")
+                    self.pm.cancel_order(position.yes_order_id)
+                except Exception as e:
+                    logger.warning(f"Error cancelling YES order: {e}")
+            
+            if not position.no_filled and position.no_order_id:
+                try:
+                    logger.info(f"Cancelling remaining NO order {position.no_order_id}")
+                    self.pm.cancel_order(position.no_order_id)
+                except Exception as e:
+                    logger.warning(f"Error cancelling NO order: {e}")
+            
+            # Update database
+            if position.db_position_id:
+                session = self.db.SessionLocal()
+                try:
+                    db_position = session.query(RealMarketMakerPosition).filter(
+                        RealMarketMakerPosition.id == position.db_position_id
+                    ).first()
+                    
+                    if db_position:
+                        db_position.position_status = reason
+                        db_position.updated_at = datetime.now(timezone.utc)
+                        session.commit()
+                        
+                finally:
+                    session.close()
+            
+            # Remove from active positions
+            if position.market_slug in self.active_positions:
+                del self.active_positions[position.market_slug]
+            
+            if position.market_slug in self.monitored_markets:
+                self.monitored_markets.remove(position.market_slug)
+            
+            # Remove from orderbook price tracking
+            self.last_orderbook_prices.pop(position.market_slug, None)
+            
+            logger.info(f"Closed position for {position.market_slug}: {reason}")
+            
+        except Exception as e:
+            logger.error(f"Error closing position: {e}", exc_info=True)

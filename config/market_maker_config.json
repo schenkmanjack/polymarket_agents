@@ -1,0 +1,10 @@
+{
+  "split_amount": 6.0,
+  "offset_above_midpoint": 0.02,
+  "price_step": 0.01,
+  "wait_after_fill": 5.0,
+  "poll_interval": 0.1,
+  "market_type": "1h",
+  "max_minutes_before_resolution": 60,
+  "min_minutes_before_resolution": 2
+}

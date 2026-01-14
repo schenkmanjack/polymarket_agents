@@ -93,6 +93,26 @@ def get_highest_bid(orderbook: Dict) -> Optional[float]:
     return highest_bid
 
 
+def calculate_midpoint(orderbook: Dict) -> Optional[float]:
+    """
+    Calculate midpoint price from orderbook.
+    Midpoint = (highest_bid + lowest_ask) / 2
+    
+    Args:
+        orderbook: Dict with 'bids' and 'asks' keys (lists of [price, size] tuples)
+        
+    Returns:
+        Midpoint price or None if orderbook incomplete
+    """
+    highest_bid = get_highest_bid(orderbook)
+    lowest_ask = get_lowest_ask(orderbook)
+    
+    if highest_bid is None or lowest_ask is None:
+        return None
+    
+    return (highest_bid + lowest_ask) / 2.0
+
+
 def check_threshold_triggered(
     yes_orderbook: Optional[Dict],
     no_orderbook: Optional[Dict],
