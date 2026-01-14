@@ -12,7 +12,7 @@ from agents.trading.orderbook_helper import (
     get_highest_bid,
     get_lowest_ask,
 )
-from agents.polymarket.btc_market_detector import is_market_active
+from agents.polymarket.btc_market_detector import is_market_active, get_market_by_slug
 from agents.trading.trade_db import RealTradeThreshold
 
 logger = logging.getLogger(__name__)
@@ -188,7 +188,6 @@ class OrderbookMonitor:
         if self.open_trades:
             # Clean up orders for expired markets before checking
             expired_orders = []
-            from agents.polymarket.btc_market_detector import get_market_by_slug, is_market_active
             
             for order_id, trade_id in list(self.open_trades.items()):
                 try:
