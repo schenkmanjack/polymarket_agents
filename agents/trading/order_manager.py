@@ -153,7 +153,7 @@ class OrderManager:
                         # Remove from open_trades
                         self.open_trades.pop(order_id, None)
                         self.orders_not_found.pop(order_id, None)
-                        self.orders_checked_open.discard(order_id)
+                        self.orders_checked_open.pop(order_id, None)
                         
                         # Trigger sell order placement
                         if self.place_sell_order_callback:
@@ -274,7 +274,7 @@ class OrderManager:
                     # Remove from open_trades
                     self.open_trades.pop(order_id, None)
                     self.orders_not_found.pop(order_id, None)
-                    self.orders_checked_open.discard(order_id)
+                    self.orders_checked_open.pop(order_id, None)
                     
                     # Trigger sell order placement immediately
                     if self.place_sell_order_callback:
@@ -740,7 +740,7 @@ class OrderManager:
                             )
                             self.open_trades.pop(fill_order_id, None)
                             self.orders_not_found.pop(fill_order_id, None)
-                            self.orders_checked_open.discard(fill_order_id)
+                            self.orders_checked_open.pop(fill_order_id, None)
                             logger.info(
                                 f"✅✅✅ BUY ORDER FILLED ✅✅✅\n"
                                 f"  Order ID: {fill_order_id}\n"
@@ -891,7 +891,7 @@ class OrderManager:
                         # Max retries reached - remove from tracking
                         self.open_trades.pop(order_id, None)
                         self.orders_not_found.pop(order_id, None)
-                        self.orders_checked_open.discard(order_id)
+                        self.orders_checked_open.pop(order_id, None)
                     continue
                 
                 # Order found - clear retry count
@@ -934,7 +934,7 @@ class OrderManager:
                     # Remove from open trades
                     self.open_trades.pop(order_id, None)
                     self.orders_not_found.pop(order_id, None)
-                    self.orders_checked_open.discard(order_id)
+                    self.orders_checked_open.pop(order_id, None)
                 
                 elif status == "open" and filled_amount and float(filled_amount) > 0:
                     # Partial fill - update trade
