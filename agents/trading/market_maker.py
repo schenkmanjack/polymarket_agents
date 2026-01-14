@@ -631,6 +631,43 @@ class MarketMaker:
         # Default fallback
         return 0.50
     
+    def _update_fill_timing_in_db(
+        self,
+        position: MarketMakerPosition,
+        first_fill_side: str,
+        second_fill_side: Optional[str],
+        time_between_fills: Optional[float]
+    ):
+        """Update fill timing information in database."""
+        if not position.db_position_id:
+            return
+        
+        try:
+            session = self.db.SessionLocal()
+            try:
+                db_position = session.query(RealMarketMakerPosition).filter(
+                    RealMarketMakerPosition.id == position.db_position_id
+                ).first()
+                
+                if db_position:
+                    db_position.first_fill_side = first_fill_side
+                    db_position.second_fill_side = second_fill_side
+                    db_position.time_between_fills_seconds = time_between_fills
+                    db_position.updated_at = datetime.now(timezone.utc)
+                    
+                    session.commit()
+                    
+                    if time_between_fills is not None:
+                        logger.info(
+                            f"📊 Stored fill timing: {first_fill_side} → {second_fill_side} "
+                            f"({time_between_fills:.2f}s)"
+                        )
+                    
+            finally:
+                session.close()
+        except Exception as e:
+            logger.error(f"Error updating fill timing in database: {e}", exc_info=True)
+    
     async def _market_maker_loop(self):
         """Main market maker loop - monitors and adjusts orders."""
         while self.running:
@@ -688,6 +725,19 @@ class MarketMaker:
                             f"{yes_filled_amount:.2f}/{yes_total_amount:.2f} shares @ ${yes_fill_price:.4f}"
                         )
                         
+                        # Track which side filled first (if this is the first fill)
+                        if not position.no_filled:
+                            # YES filled first, NO hasn't filled yet
+                            logger.info(f"📊 Fill timing: YES filled first (NO still pending)")
+                            self._update_fill_timing_in_db(position, "YES", None, None)
+                        else:
+                            # NO already filled - calculate time difference
+                            time_diff = (position.yes_fill_time - position.no_fill_time).total_seconds()
+                            logger.info(
+                                f"📊 Fill timing: NO filled first, YES filled {time_diff:.2f}s later"
+                            )
+                            self._update_fill_timing_in_db(position, "NO", "YES", time_diff)
+                        
                         # Initialize last_adjustment_time if this is the first side to fill
                         if position.last_adjustment_time is None:
                             position.last_adjustment_time = position.yes_fill_time
@@ -713,6 +763,19 @@ class MarketMaker:
                             f"✅ NO order filled for {market_slug}: "
                             f"{no_filled_amount:.2f}/{no_total_amount:.2f} shares @ ${no_fill_price:.4f}"
                         )
+                        
+                        # Track which side filled first (if this is the first fill)
+                        if not position.yes_filled:
+                            # NO filled first, YES hasn't filled yet
+                            logger.info(f"📊 Fill timing: NO filled first (YES still pending)")
+                            self._update_fill_timing_in_db(position, "NO", None, None)
+                        else:
+                            # YES already filled - calculate time difference
+                            time_diff = (position.no_fill_time - position.yes_fill_time).total_seconds()
+                            logger.info(
+                                f"📊 Fill timing: YES filled first, NO filled {time_diff:.2f}s later"
+                            )
+                            self._update_fill_timing_in_db(position, "YES", "NO", time_diff)
                         
                         # Initialize last_adjustment_time if this is the first side to fill
                         if position.last_adjustment_time is None:
@@ -774,9 +837,25 @@ class MarketMaker:
                             if unfilled_side == "YES":
                                 position.yes_filled = True
                                 position.yes_fill_time = datetime.now(timezone.utc)
+                                
+                                # Calculate time between fills
+                                if position.no_fill_time:
+                                    time_diff = (position.yes_fill_time - position.no_fill_time).total_seconds()
+                                    logger.info(
+                                        f"📊 Fill timing: NO filled first, YES filled {time_diff:.2f}s later"
+                                    )
+                                    self._update_fill_timing_in_db(position, "NO", "YES", time_diff)
                             else:
                                 position.no_filled = True
                                 position.no_fill_time = datetime.now(timezone.utc)
+                                
+                                # Calculate time between fills
+                                if position.yes_fill_time:
+                                    time_diff = (position.no_fill_time - position.yes_fill_time).total_seconds()
+                                    logger.info(
+                                        f"📊 Fill timing: YES filled first, NO filled {time_diff:.2f}s later"
+                                    )
+                                    self._update_fill_timing_in_db(position, "YES", "NO", time_diff)
                             
                             logger.info(f"✅ Other side ({unfilled_side}) filled!")
                             await self._handle_both_filled(position)

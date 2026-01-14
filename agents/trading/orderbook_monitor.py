@@ -254,8 +254,8 @@ class OrderbookMonitor:
             if not yes_orderbook or not no_orderbook:
                 continue
             
-            # Check if market is in confirmation period
-            if market_slug in self.markets_in_confirmation:
+            # Check if market is in confirmation period (skip if confirmation is disabled)
+            if self.config.threshold_confirmation_seconds > 0.0 and market_slug in self.markets_in_confirmation:
                 confirmation_info = self.markets_in_confirmation[market_slug]
                 confirmation_started_at = confirmation_info["started_at"]
                 confirmation_side = confirmation_info["side"]
@@ -371,7 +371,7 @@ class OrderbookMonitor:
                 
                 # Handle threshold confirmation
                 if self.config.threshold_confirmation_seconds > 0.0:
-                    # Start confirmation period
+                    # Start confirmation period - will check again in next loop iteration
                     from datetime import datetime, timezone
                     self.markets_in_confirmation[market_slug] = {
                         "started_at": datetime.now(timezone.utc),
@@ -383,7 +383,8 @@ class OrderbookMonitor:
                     )
                     continue  # Wait for confirmation period to complete
                 
-                # No confirmation required - place order immediately
+                # No confirmation required (threshold_confirmation_seconds == 0) - place order immediately
+                # This happens in the SAME loop iteration where threshold is detected - no extra loop needed
                 # Mark market as bet on IMMEDIATELY to prevent buying both YES and NO
                 # This prevents race condition where both sides trigger in same loop iteration
                 # NOTE: We'll remove it if order placement fails (e.g., due to time restriction)
@@ -458,8 +459,8 @@ class OrderbookMonitor:
                         f"condition: {highest_bid:.4f} < {self.config.threshold_sell:.4f} = {highest_bid < self.config.threshold_sell}"
                     )
                     
-                    # Check if trade is in threshold sell confirmation
-                    if trade.id in self.threshold_sell_confirmations:
+                    # Check if trade is in threshold sell confirmation (skip if confirmation is disabled)
+                    if self.config.threshold_sell_confirmation_seconds > 0.0 and trade.id in self.threshold_sell_confirmations:
                         confirmation_info = self.threshold_sell_confirmations[trade.id]
                         confirmation_started_at = confirmation_info["started_at"]
                         
@@ -512,7 +513,7 @@ class OrderbookMonitor:
                     if highest_bid < self.config.threshold_sell:
                         # Handle threshold sell confirmation
                         if self.config.threshold_sell_confirmation_seconds > 0.0:
-                            # Start confirmation period
+                            # Start confirmation period - will check again in next loop iteration
                             from datetime import datetime, timezone
                             self.threshold_sell_confirmations[trade.id] = {
                                 "started_at": datetime.now(timezone.utc),
@@ -524,7 +525,8 @@ class OrderbookMonitor:
                             )
                             continue  # Wait for confirmation period to complete
                         
-                        # No confirmation required - place sell order immediately
+                        # No confirmation required (threshold_sell_confirmation_seconds == 0) - place sell order immediately
+                        # This happens in the SAME loop iteration where threshold is detected - no extra loop needed
                         sell_price = self.config.threshold_sell - self.config.margin_sell
                         if sell_price < 0.01:
                             sell_price = 0.01  # Minimum price
@@ -627,8 +629,8 @@ class OrderbookMonitor:
                         f"condition: {highest_bid:.4f} < {self.config.threshold_sell:.4f} = {highest_bid < self.config.threshold_sell}"
                     )
                     
-                    # Check if trade is in threshold sell confirmation
-                    if trade.id in self.threshold_sell_confirmations:
+                    # Check if trade is in threshold sell confirmation (skip if confirmation is disabled)
+                    if self.config.threshold_sell_confirmation_seconds > 0.0 and trade.id in self.threshold_sell_confirmations:
                         confirmation_info = self.threshold_sell_confirmations[trade.id]
                         confirmation_started_at = confirmation_info["started_at"]
                         
@@ -681,7 +683,7 @@ class OrderbookMonitor:
                     if highest_bid < self.config.threshold_sell:
                         # Handle threshold sell confirmation
                         if self.config.threshold_sell_confirmation_seconds > 0.0:
-                            # Start confirmation period
+                            # Start confirmation period - will check again in next loop iteration
                             from datetime import datetime, timezone
                             self.threshold_sell_confirmations[trade.id] = {
                                 "started_at": datetime.now(timezone.utc),
@@ -693,7 +695,8 @@ class OrderbookMonitor:
                             )
                             continue  # Wait for confirmation period to complete
                         
-                        # No confirmation required - place sell order immediately
+                        # No confirmation required (threshold_sell_confirmation_seconds == 0) - place sell order immediately
+                        # This happens in the SAME loop iteration where threshold is detected - no extra loop needed
                         sell_price = self.config.threshold_sell - self.config.margin_sell
                         if sell_price < 0.01:
                             sell_price = 0.01  # Minimum price

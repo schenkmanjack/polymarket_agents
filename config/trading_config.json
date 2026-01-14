@@ -1,8 +1,8 @@
 {
-  "threshold": 0.68,
+  "threshold": 0.78,
   "upper_threshold": 0.99,
-  "margin": 0.28,
-  "threshold_sell": 0.88,
+  "margin": 0.20,
+  "threshold_sell": 0.75,
   "margin_sell": 0.1,
   "kelly_fraction": 1.0,
   "kelly_scale_factor": 1.0,
@@ -12,6 +12,6 @@
   "always_use_initial_principal": true,
   "max_minutes_before_resolution": 1,
   "orderbook_poll_interval": 0.1,
-  "threshold_confirmation_seconds": 1,
+  "threshold_confirmation_seconds": 0,
   "threshold_sell_confirmation_seconds": 0
 }
