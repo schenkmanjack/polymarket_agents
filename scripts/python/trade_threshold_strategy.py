@@ -124,24 +124,30 @@ class ThresholdTrader:
         logger.info(f"Deployment ID: {self.deployment_id}")
         
         # Load or initialize principal
-        # Only use principal from resolved trades from THIS deployment
-        # If no trades from current deployment, use initial_principal from config
-        latest_principal = self.db.get_latest_principal(deployment_id=self.deployment_id)
-        if latest_principal is not None and latest_principal > 0:
-            self.principal = latest_principal
-            logger.info(f"✓ Loaded principal from database (deployment {self.deployment_id[:8]}...): ${self.principal:.2f}")
-        else:
-            # Check if there are any resolved trades from previous deployments (for logging only)
-            any_principal = self.db.get_latest_principal(deployment_id=None)
-            if any_principal is not None and any_principal > 0:
-                logger.info(
-                    f"Found principal ${any_principal:.2f} from previous deployment, "
-                    f"but using initial_principal from config for new deployment"
-                )
-            
+        # If always_use_initial_principal is True, always use initial_principal regardless of database
+        # Otherwise, use principal from resolved trades from THIS deployment
+        if self.config.always_use_initial_principal:
             self.principal = self.config.initial_principal
-            logger.info(f"✓ Using initial principal from config: ${self.principal:.2f}")
-            logger.info("(No resolved trades found for current deployment, using initial principal)")
+            logger.info(f"✓ Using initial principal from config (always_use_initial_principal=true): ${self.principal:.2f}")
+        else:
+            # Only use principal from resolved trades from THIS deployment
+            # If no trades from current deployment, use initial_principal from config
+            latest_principal = self.db.get_latest_principal(deployment_id=self.deployment_id)
+            if latest_principal is not None and latest_principal > 0:
+                self.principal = latest_principal
+                logger.info(f"✓ Loaded principal from database (deployment {self.deployment_id[:8]}...): ${self.principal:.2f}")
+            else:
+                # Check if there are any resolved trades from previous deployments (for logging only)
+                any_principal = self.db.get_latest_principal(deployment_id=None)
+                if any_principal is not None and any_principal > 0:
+                    logger.info(
+                        f"Found principal ${any_principal:.2f} from previous deployment, "
+                        f"but using initial_principal from config for new deployment"
+                    )
+                
+                self.principal = self.config.initial_principal
+                logger.info(f"✓ Using initial principal from config: ${self.principal:.2f}")
+                logger.info("(No resolved trades found for current deployment, using initial principal)")
         
         # Log final principal value for debugging
         logger.info(f"📊 Starting principal: ${self.principal:.2f}")
