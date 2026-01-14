@@ -114,6 +114,16 @@ class TradingConfig:
         if not isinstance(orderbook_poll_interval, (int, float)) or orderbook_poll_interval <= 0.0:
             raise ValueError(f"orderbook_poll_interval must be a positive float, got {orderbook_poll_interval}")
         
+        # Validate threshold_confirmation_seconds (optional, defaults to 0.0 - no confirmation)
+        threshold_confirmation_seconds = self.config.get('threshold_confirmation_seconds', 0.0)
+        if not isinstance(threshold_confirmation_seconds, (int, float)) or threshold_confirmation_seconds < 0.0:
+            raise ValueError(f"threshold_confirmation_seconds must be a non-negative float, got {threshold_confirmation_seconds}")
+        
+        # Validate threshold_sell_confirmation_seconds (optional, defaults to 0.0 - no confirmation)
+        threshold_sell_confirmation_seconds = self.config.get('threshold_sell_confirmation_seconds', 0.0)
+        if not isinstance(threshold_sell_confirmation_seconds, (int, float)) or threshold_sell_confirmation_seconds < 0.0:
+            raise ValueError(f"threshold_sell_confirmation_seconds must be a non-negative float, got {threshold_sell_confirmation_seconds}")
+        
         logger.info("✓ Config validation passed")
     
     @property
@@ -166,6 +176,16 @@ class TradingConfig:
     def orderbook_poll_interval(self) -> float:
         """Orderbook polling interval in seconds. How frequently to check prices for threshold triggers."""
         return float(self.config.get('orderbook_poll_interval', 1.0))
+    
+    @property
+    def threshold_confirmation_seconds(self) -> float:
+        """Seconds to wait after threshold triggers before placing buy order. 0.0 means no confirmation."""
+        return float(self.config.get('threshold_confirmation_seconds', 0.0))
+    
+    @property
+    def threshold_sell_confirmation_seconds(self) -> float:
+        """Seconds to wait after threshold sell triggers before placing sell order. 0.0 means no confirmation."""
+        return float(self.config.get('threshold_sell_confirmation_seconds', 0.0))
     
     def get_amount_invested(self, principal: float) -> float:
         """

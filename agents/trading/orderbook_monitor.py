@@ -10,6 +10,7 @@ from agents.trading.orderbook_helper import (
     fetch_orderbook,
     check_threshold_triggered,
     get_highest_bid,
+    get_lowest_ask,
 )
 from agents.polymarket.btc_market_detector import is_market_active
 from agents.trading.trade_db import RealTradeThreshold
@@ -37,6 +38,7 @@ class OrderbookMonitor:
         is_running: Callable[[], bool],
         order_placed_callback: Callable[[str, Dict, str, float], Awaitable[bool]],
         place_early_sell_callback: Callable[[RealTradeThreshold, float], Awaitable[None]],
+        get_minutes_until_resolution: Callable[[Dict], Optional[float]],
     ):
         """
         Initialize orderbook monitor.
@@ -54,6 +56,7 @@ class OrderbookMonitor:
             is_running: Callable that returns current running status (allows real-time updates)
             order_placed_callback: Async function(market_slug, market_info, side, lowest_ask) -> bool
             place_early_sell_callback: Async function(trade, sell_price) -> None
+            get_minutes_until_resolution: Callable that takes market dict and returns minutes until resolution
         """
         self.config = config
         self.monitored_markets = monitored_markets
@@ -67,18 +70,88 @@ class OrderbookMonitor:
         self.is_running = is_running
         self.order_placed_callback = order_placed_callback
         self.place_early_sell_callback = place_early_sell_callback
+        self.get_minutes_until_resolution = get_minutes_until_resolution
         self.orderbook_poll_interval = config.orderbook_poll_interval
+        
+        # Price tracking for resolution determination
+        # Stores last known orderbook prices for markets near resolution
+        # Format: {market_slug: {"yes_lowest_ask": float, "no_highest_bid": float, "timestamp": datetime}}
+        self.last_orderbook_prices: Dict[str, Dict] = {}
+        
+        # Threshold confirmation tracking
+        # Format: {market_slug: {"started_at": datetime, "side": "YES"/"NO"}}
+        self.markets_in_confirmation: Dict[str, Dict] = {}
+        
+        # Threshold sell confirmation tracking
+        # Format: {trade_id: {"started_at": datetime}}
+        self.threshold_sell_confirmations: Dict[int, Dict] = {}
     
     async def monitoring_loop(self):
         """Poll orderbooks and check for threshold triggers."""
         import asyncio
+        from datetime import datetime, timezone
+        
         while self.is_running():
             try:
+                # Track orderbook prices for markets near resolution (for resolution determination)
+                await self._track_orderbook_prices_near_resolution()
+                
+                # Check for threshold triggers and handle confirmations
                 await self.check_orderbooks_for_triggers()
             except Exception as e:
                 logger.error(f"Error in orderbook monitoring: {e}", exc_info=True)
             
             await asyncio.sleep(self.orderbook_poll_interval)
+    
+    async def _track_orderbook_prices_near_resolution(self):
+        """Track orderbook prices for markets within max_minutes_before_resolution."""
+        from datetime import datetime, timezone
+        
+        # Only track if max_minutes_before_resolution is configured
+        if self.config.max_minutes_before_resolution is None:
+            return
+        
+        for market_slug, market_info in list(self.monitored_markets.items()):
+            market = market_info["market"]
+            minutes_remaining = self.get_minutes_until_resolution(market)
+            
+            # Only track prices if market is within max_minutes_before_resolution
+            if minutes_remaining is not None and minutes_remaining <= self.config.max_minutes_before_resolution:
+                try:
+                    yes_token_id = market_info["yes_token_id"]
+                    no_token_id = market_info["no_token_id"]
+                    
+                    yes_orderbook = fetch_orderbook(yes_token_id)
+                    no_orderbook = fetch_orderbook(no_token_id)
+                    
+                    if yes_orderbook and no_orderbook:
+                        yes_lowest_ask = get_lowest_ask(yes_orderbook)
+                        no_highest_bid = get_highest_bid(no_orderbook)
+                        
+                        # Store prices if we got valid values
+                        if yes_lowest_ask is not None and no_highest_bid is not None:
+                            self.last_orderbook_prices[market_slug] = {
+                                "yes_lowest_ask": yes_lowest_ask,
+                                "no_highest_bid": no_highest_bid,
+                                "timestamp": datetime.now(timezone.utc),
+                            }
+                except Exception as e:
+                    logger.debug(f"Error tracking orderbook prices for {market_slug}: {e}")
+            else:
+                # Remove from tracking if market is no longer near resolution
+                self.last_orderbook_prices.pop(market_slug, None)
+    
+    def get_last_orderbook_prices(self, market_slug: str) -> Optional[Dict]:
+        """
+        Get last tracked orderbook prices for a market (for resolution determination).
+        
+        Args:
+            market_slug: Market slug to get prices for
+            
+        Returns:
+            Dict with "yes_lowest_ask", "no_highest_bid", "timestamp" keys, or None if not tracked
+        """
+        return self.last_orderbook_prices.get(market_slug)
     
     async def check_orderbooks_for_triggers(self):
         """Check all monitored markets for threshold triggers."""
@@ -161,6 +234,91 @@ class OrderbookMonitor:
             if not yes_orderbook or not no_orderbook:
                 continue
             
+            # Check if market is in confirmation period
+            if market_slug in self.markets_in_confirmation:
+                confirmation_info = self.markets_in_confirmation[market_slug]
+                confirmation_started_at = confirmation_info["started_at"]
+                confirmation_side = confirmation_info["side"]
+                
+                from datetime import datetime, timezone
+                time_elapsed = (datetime.now(timezone.utc) - confirmation_started_at).total_seconds()
+                
+                # Check if threshold is still triggered
+                trigger = check_threshold_triggered(
+                    yes_orderbook,
+                    no_orderbook,
+                    self.config.threshold,
+                )
+                
+                if trigger:
+                    side, lowest_ask = trigger
+                    
+                    # Check if same side is still triggered
+                    if side == confirmation_side:
+                        # Check if confirmation period has elapsed
+                        if time_elapsed >= self.config.threshold_confirmation_seconds:
+                            # Confirmation complete - proceed with order placement
+                            logger.info(
+                                f"✅ Threshold confirmation complete for {market_slug}: {side} side still triggered "
+                                f"after {time_elapsed:.1f} seconds. Proceeding with order placement."
+                            )
+                            # Remove from confirmation
+                            self.markets_in_confirmation.pop(market_slug, None)
+                            
+                            # Check upper threshold - don't place order if price is too high
+                            if lowest_ask > self.config.upper_threshold:
+                                logger.info(
+                                    f"Threshold confirmed for {market_slug}: {side} side, lowest_ask={lowest_ask:.4f}, "
+                                    f"but above upper_threshold={self.config.upper_threshold:.4f} - skipping order"
+                                )
+                                continue
+                            
+                            # Final check: verify no bet exists in database
+                            if self.db.has_bet_on_market(market_slug):
+                                logger.warning(
+                                    f"⚠️ Threshold confirmed for {market_slug}, but database shows active bet exists. "
+                                    f"Skipping order to prevent duplicate."
+                                )
+                                self.markets_with_bets.add(market_slug)
+                                continue
+                            
+                            # Mark market as bet on IMMEDIATELY
+                            self.markets_with_bets.add(market_slug)
+                            
+                            # Place order
+                            order_placed = await self.order_placed_callback(market_slug, market_info, side, lowest_ask)
+                            
+                            if not order_placed:
+                                self.markets_with_bets.discard(market_slug)
+                                logger.info(
+                                    f"🔄 Order not placed for {market_slug} - removed from markets_with_bets. "
+                                    f"Will check again on next iteration."
+                                )
+                            continue  # Skip to next market
+                        else:
+                            # Still in confirmation period
+                            logger.debug(
+                                f"⏳ Threshold confirmation in progress for {market_slug}: {side} side triggered, "
+                                f"{time_elapsed:.1f}/{self.config.threshold_confirmation_seconds:.1f} seconds elapsed"
+                            )
+                            continue
+                    else:
+                        # Different side triggered - cancel confirmation
+                        logger.info(
+                            f"🔄 Threshold confirmation cancelled for {market_slug}: "
+                            f"was waiting for {confirmation_side}, but {side} triggered instead"
+                        )
+                        self.markets_in_confirmation.pop(market_slug, None)
+                        # Continue to check if new side should trigger
+                else:
+                    # Threshold no longer triggered - cancel confirmation
+                    logger.info(
+                        f"🔄 Threshold confirmation cancelled for {market_slug}: "
+                        f"threshold no longer triggered after {time_elapsed:.1f} seconds"
+                    )
+                    self.markets_in_confirmation.pop(market_slug, None)
+                    continue
+            
             # Check if threshold is triggered
             trigger = check_threshold_triggered(
                 yes_orderbook,
@@ -191,6 +349,21 @@ class OrderbookMonitor:
                     self.markets_with_bets.add(market_slug)  # Add to memory set
                     continue
                 
+                # Handle threshold confirmation
+                if self.config.threshold_confirmation_seconds > 0.0:
+                    # Start confirmation period
+                    from datetime import datetime, timezone
+                    self.markets_in_confirmation[market_slug] = {
+                        "started_at": datetime.now(timezone.utc),
+                        "side": side,
+                    }
+                    logger.info(
+                        f"⏳ Threshold confirmation started for {market_slug}: {side} side triggered, "
+                        f"waiting {self.config.threshold_confirmation_seconds:.1f} seconds before placing order"
+                    )
+                    continue  # Wait for confirmation period to complete
+                
+                # No confirmation required - place order immediately
                 # Mark market as bet on IMMEDIATELY to prevent buying both YES and NO
                 # This prevents race condition where both sides trigger in same loop iteration
                 # NOTE: We'll remove it if order placement fails (e.g., due to time restriction)
@@ -265,9 +438,73 @@ class OrderbookMonitor:
                         f"condition: {highest_bid:.4f} < {self.config.threshold_sell:.4f} = {highest_bid < self.config.threshold_sell}"
                     )
                     
+                    # Check if trade is in threshold sell confirmation
+                    if trade.id in self.threshold_sell_confirmations:
+                        confirmation_info = self.threshold_sell_confirmations[trade.id]
+                        confirmation_started_at = confirmation_info["started_at"]
+                        
+                        from datetime import datetime, timezone
+                        time_elapsed = (datetime.now(timezone.utc) - confirmation_started_at).total_seconds()
+                        
+                        # Check if still below threshold
+                        if highest_bid < self.config.threshold_sell:
+                            # Check if confirmation period has elapsed
+                            if time_elapsed >= self.config.threshold_sell_confirmation_seconds:
+                                # Confirmation complete - proceed with sell order placement
+                                logger.info(
+                                    f"✅ Threshold sell confirmation complete for trade {trade.id}: "
+                                    f"highest_bid={highest_bid:.4f} still below threshold_sell={self.config.threshold_sell:.4f} "
+                                    f"after {time_elapsed:.1f} seconds. Proceeding with sell order placement."
+                                )
+                                # Remove from confirmation
+                                self.threshold_sell_confirmations.pop(trade.id, None)
+                                
+                                # Place early sell order
+                                sell_price = self.config.threshold_sell - self.config.margin_sell
+                                if sell_price < 0.01:
+                                    sell_price = 0.01  # Minimum price
+                                
+                                logger.info(
+                                    f"Early sell confirmed for trade {trade.id} (market: {trade.market_slug}, no sell order yet): "
+                                    f"highest_bid={highest_bid:.4f} < threshold_sell={self.config.threshold_sell:.4f}, "
+                                    f"placing sell order at {sell_price:.4f}"
+                                )
+                                
+                                await self.place_early_sell_callback(trade, sell_price)
+                            else:
+                                # Still in confirmation period
+                                logger.debug(
+                                    f"⏳ Threshold sell confirmation in progress for trade {trade.id}: "
+                                    f"highest_bid={highest_bid:.4f} < threshold_sell={self.config.threshold_sell:.4f}, "
+                                    f"{time_elapsed:.1f}/{self.config.threshold_sell_confirmation_seconds:.1f} seconds elapsed"
+                                )
+                        else:
+                            # Price recovered above threshold - cancel confirmation
+                            logger.info(
+                                f"🔄 Threshold sell confirmation cancelled for trade {trade.id}: "
+                                f"highest_bid={highest_bid:.4f} recovered above threshold_sell={self.config.threshold_sell:.4f} "
+                                f"after {time_elapsed:.1f} seconds"
+                            )
+                            self.threshold_sell_confirmations.pop(trade.id, None)
+                        continue
+                    
                     # Check if highest_bid < threshold_sell
                     if highest_bid < self.config.threshold_sell:
-                        # Place early sell order
+                        # Handle threshold sell confirmation
+                        if self.config.threshold_sell_confirmation_seconds > 0.0:
+                            # Start confirmation period
+                            from datetime import datetime, timezone
+                            self.threshold_sell_confirmations[trade.id] = {
+                                "started_at": datetime.now(timezone.utc),
+                            }
+                            logger.info(
+                                f"⏳ Threshold sell confirmation started for trade {trade.id}: "
+                                f"highest_bid={highest_bid:.4f} < threshold_sell={self.config.threshold_sell:.4f}, "
+                                f"waiting {self.config.threshold_sell_confirmation_seconds:.1f} seconds before placing sell order"
+                            )
+                            continue  # Wait for confirmation period to complete
+                        
+                        # No confirmation required - place sell order immediately
                         sell_price = self.config.threshold_sell - self.config.margin_sell
                         if sell_price < 0.01:
                             sell_price = 0.01  # Minimum price
@@ -370,9 +607,73 @@ class OrderbookMonitor:
                         f"condition: {highest_bid:.4f} < {self.config.threshold_sell:.4f} = {highest_bid < self.config.threshold_sell}"
                     )
                     
+                    # Check if trade is in threshold sell confirmation
+                    if trade.id in self.threshold_sell_confirmations:
+                        confirmation_info = self.threshold_sell_confirmations[trade.id]
+                        confirmation_started_at = confirmation_info["started_at"]
+                        
+                        from datetime import datetime, timezone
+                        time_elapsed = (datetime.now(timezone.utc) - confirmation_started_at).total_seconds()
+                        
+                        # Check if still below threshold
+                        if highest_bid < self.config.threshold_sell:
+                            # Check if confirmation period has elapsed
+                            if time_elapsed >= self.config.threshold_sell_confirmation_seconds:
+                                # Confirmation complete - proceed with sell order placement
+                                logger.info(
+                                    f"✅ Threshold sell confirmation complete for trade {trade.id} ($0.99 sell): "
+                                    f"highest_bid={highest_bid:.4f} still below threshold_sell={self.config.threshold_sell:.4f} "
+                                    f"after {time_elapsed:.1f} seconds. Proceeding with sell order placement."
+                                )
+                                # Remove from confirmation
+                                self.threshold_sell_confirmations.pop(trade.id, None)
+                                
+                                # Place early sell order (this will cancel the $0.99 order first)
+                                sell_price = self.config.threshold_sell - self.config.margin_sell
+                                if sell_price < 0.01:
+                                    sell_price = 0.01  # Minimum price
+                                
+                                logger.info(
+                                    f"Early sell confirmed for trade {trade.id} (market: {trade.market_slug}, has $0.99 sell order): "
+                                    f"highest_bid={highest_bid:.4f} < threshold_sell={self.config.threshold_sell:.4f}, "
+                                    f"canceling $0.99 order and placing early sell at {sell_price:.4f}"
+                                )
+                                
+                                await self.place_early_sell_callback(trade, sell_price)
+                            else:
+                                # Still in confirmation period
+                                logger.debug(
+                                    f"⏳ Threshold sell confirmation in progress for trade {trade.id} ($0.99 sell): "
+                                    f"highest_bid={highest_bid:.4f} < threshold_sell={self.config.threshold_sell:.4f}, "
+                                    f"{time_elapsed:.1f}/{self.config.threshold_sell_confirmation_seconds:.1f} seconds elapsed"
+                                )
+                        else:
+                            # Price recovered above threshold - cancel confirmation
+                            logger.info(
+                                f"🔄 Threshold sell confirmation cancelled for trade {trade.id} ($0.99 sell): "
+                                f"highest_bid={highest_bid:.4f} recovered above threshold_sell={self.config.threshold_sell:.4f} "
+                                f"after {time_elapsed:.1f} seconds"
+                            )
+                            self.threshold_sell_confirmations.pop(trade.id, None)
+                        continue
+                    
                     # Check if highest_bid < threshold_sell
                     if highest_bid < self.config.threshold_sell:
-                        # Place early sell order (this will cancel the $0.99 order first)
+                        # Handle threshold sell confirmation
+                        if self.config.threshold_sell_confirmation_seconds > 0.0:
+                            # Start confirmation period
+                            from datetime import datetime, timezone
+                            self.threshold_sell_confirmations[trade.id] = {
+                                "started_at": datetime.now(timezone.utc),
+                            }
+                            logger.info(
+                                f"⏳ Threshold sell confirmation started for trade {trade.id} ($0.99 sell): "
+                                f"highest_bid={highest_bid:.4f} < threshold_sell={self.config.threshold_sell:.4f}, "
+                                f"waiting {self.config.threshold_sell_confirmation_seconds:.1f} seconds before placing sell order"
+                            )
+                            continue  # Wait for confirmation period to complete
+                        
+                        # No confirmation required - place sell order immediately
                         sell_price = self.config.threshold_sell - self.config.margin_sell
                         if sell_price < 0.01:
                             sell_price = 0.01  # Minimum price
