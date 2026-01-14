@@ -145,7 +145,50 @@ def get_markets_by_topic(topic: str, limit: int = 50) -> List[Dict]:
     return []
 
 
-def filter_live_markets(markets: List[Dict], max_hours_ahead: int = 4) -> List[Dict]:
+def get_all_live_markets(limit: int = 200) -> List[Dict]:
+    """
+    Get all live markets (not filtered by topic) to find what's actually live.
+    
+    Args:
+        limit: Maximum number of markets
+        
+    Returns:
+        List of market dictionaries
+    """
+    gamma = GammaMarketClient()
+    
+    # Try different approaches to find truly live markets
+    param_variations = [
+        # Approach 1: Standard active/closed filters
+        {"active": True, "closed": False, "archived": False, "limit": limit, "enableOrderBook": True},
+        # Approach 2: Try without active filter
+        {"closed": False, "archived": False, "limit": limit, "enableOrderBook": True},
+        # Approach 3: Try with resolved=false if it exists
+        {"closed": False, "resolved": False, "limit": limit, "enableOrderBook": True},
+    ]
+    
+    all_markets = []
+    seen_ids = set()
+    
+    for params in param_variations:
+        try:
+            print(f"🔍 Trying params: {params}")
+            markets = gamma.get_markets(querystring_params=params, parse_pydantic=False)
+            if markets:
+                print(f"✓ Found {len(markets)} markets")
+                for market in markets:
+                    market_id = market.get("id")
+                    if market_id and market_id not in seen_ids:
+                        seen_ids.add(market_id)
+                        all_markets.append(market)
+        except Exception as e:
+            logger.debug(f"Params {params} didn't work: {e}")
+            continue
+    
+    return all_markets
+
+
+def filter_live_markets(markets: List[Dict], max_hours_ahead: int = 4) -> tuple:
     """
     Filter markets to find truly live ones (ending within next few hours).
     
@@ -154,12 +197,15 @@ def filter_live_markets(markets: List[Dict], max_hours_ahead: int = 4) -> List[D
         max_hours_ahead: Maximum hours ahead to consider "live" (default: 4 hours)
         
     Returns:
-        List of live market dictionaries
+        Tuple of (live_markets, future_markets) where:
+        - live_markets: Markets ending within max_hours_ahead
+        - future_markets: Markets ending beyond max_hours_ahead but in the future
     """
     from datetime import datetime, timezone, timedelta
     from agents.polymarket.btc_market_detector import _parse_datetime_safe
     
     live_markets = []
+    future_markets = []  # Markets ending in the future (beyond max_hours_ahead)
     now_utc = datetime.now(timezone.utc)
     max_time_ahead = timedelta(hours=max_hours_ahead)
     
@@ -173,22 +219,29 @@ def filter_live_markets(markets: List[Dict], max_hours_ahead: int = 4) -> List[D
             if not end_dt:
                 continue
             
-            # Check if market ends within the next max_hours_ahead
+            # Check if market ends in the future
             time_until_end = end_dt - now_utc
             
             # Market must end in the future (not already ended)
-            # and within max_hours_ahead
-            if timedelta(0) < time_until_end <= max_time_ahead:
+            if time_until_end > timedelta(0):
                 market["_minutes_until_end"] = time_until_end.total_seconds() / 60.0
-                live_markets.append(market)
+                market["_hours_until_end"] = time_until_end.total_seconds() / 3600.0
+                
+                # Check if within max_hours_ahead
+                if time_until_end <= max_time_ahead:
+                    live_markets.append(market)
+                else:
+                    # Store for potential display
+                    future_markets.append(market)
         except Exception as e:
             logger.debug(f"Error parsing endDate for market {market.get('id')}: {e}")
             continue
     
     # Sort by time until end (soonest first)
     live_markets.sort(key=lambda m: m.get("_minutes_until_end", float('inf')))
+    future_markets.sort(key=lambda m: m.get("_minutes_until_end", float('inf')))
     
-    return live_markets
+    return live_markets, future_markets
 
 
 def display_market_info(market: Dict, show_details: bool = True):
@@ -247,8 +300,97 @@ def main():
     print("POLYMARKET LIVE SPORTS MARKETS EXPLORER")
     print("="*80)
     
+    # First, try getting ALL live markets to see what's actually live
+    print("\n0. Getting ALL live markets (not filtered by topic)...")
+    all_markets = get_all_live_markets(limit=500)
+    
+    if all_markets:
+        print(f"\n✓ Found {len(all_markets)} total markets")
+        
+        # Filter for markets ending in the future
+        from datetime import datetime, timezone, timedelta
+        from agents.polymarket.btc_market_detector import _parse_datetime_safe
+        
+        now_utc = datetime.now(timezone.utc)
+        future_markets = []
+        
+        for market in all_markets:
+            end_date = market.get("endDate") or market.get("endDateIso")
+            if not end_date:
+                continue
+            
+            try:
+                end_dt = _parse_datetime_safe(end_date)
+                if end_dt:
+                    time_until_end = end_dt - now_utc
+                    if time_until_end > timedelta(0):
+                        market["_hours_until_end"] = time_until_end.total_seconds() / 3600.0
+                        market["_minutes_until_end"] = time_until_end.total_seconds() / 60.0
+                        future_markets.append(market)
+            except Exception as e:
+                continue
+        
+        # Sort by time until end
+        future_markets.sort(key=lambda m: m.get("_minutes_until_end", float('inf')))
+        
+        print(f"✓ Found {len(future_markets)} markets ending in the future")
+        
+        # Filter for sports-related markets
+        sports_keywords = [
+            "nfl", "nba", "nhl", "mlb", "ncaa", "cbb", "cfb",
+            "soccer", "football", "basketball", "hockey", "baseball",
+            "tennis", "golf", "ufc", "boxing", "cricket", "rugby",
+            "score", "points", "win", "lose", "game", "match", "playoff",
+            "championship", "super bowl", "world cup", "stanley cup",
+            "bills", "chiefs", "lakers", "warriors", "celtics", "heat",
+            "cowboys", "packers", "patriots", "steelers"
+        ]
+        
+        sports_future = []
+        for market in future_markets:
+            question = market.get("question", "").lower()
+            description = market.get("description", "").lower()
+            
+            for keyword in sports_keywords:
+                if keyword in question or keyword in description:
+                    sports_future.append(market)
+                    break
+        
+        print(f"✓ Found {len(sports_future)} SPORTS markets ending in the future")
+        
+        if sports_future:
+            print("\n" + "="*80)
+            print("LIVE SPORTS MARKET TITLES (sorted by time until end):")
+            print("="*80)
+            
+            for market in sports_future[:50]:  # Show first 50
+                hours = market.get("_hours_until_end", 0)
+                days = int(hours // 24)
+                hrs = int(hours % 24)
+                if days > 0:
+                    time_str = f"{days}d {hrs}h"
+                elif hrs > 0:
+                    time_str = f"{hrs}h"
+                else:
+                    mins = int(market.get("_minutes_until_end", 0))
+                    time_str = f"{mins}m"
+                
+                question = market.get("question", "N/A")
+                market_id = market.get("id")
+                liquidity = market.get("liquidity", 0)
+                try:
+                    liquidity = float(liquidity) if liquidity else 0.0
+                except (ValueError, TypeError):
+                    liquidity = 0.0
+                
+                print(f"[{time_str:>8}] [{market_id}] ${liquidity:>10,.0f} - {question}")
+        else:
+            print("\n⚠️ No sports markets found ending in the future")
+    
     # Try specific sports topics and filter for truly live markets
-    print("\n1. Finding LIVE markets (ending within next 4 hours)...")
+    print("\n" + "="*80)
+    print("1. Finding LIVE markets by topic (ending within next 4 hours)...")
+    print("="*80)
     
     all_live_markets = []
     
@@ -258,9 +400,11 @@ def main():
         
         if markets:
             # Filter for truly live markets (ending within 4 hours)
-            live_markets = filter_live_markets(markets, max_hours_ahead=4)
+            live_markets, future_markets = filter_live_markets(markets, max_hours_ahead=4)
             all_live_markets.extend(live_markets)
             print(f"  ✓ Found {len(live_markets)} LIVE markets for {topic} (ending within 4 hours)")
+            if future_markets:
+                print(f"  ℹ Found {len(future_markets)} future markets (ending beyond 4 hours)")
     
     if all_live_markets:
         # Remove duplicates (same market might appear in multiple topics)
@@ -294,15 +438,97 @@ def main():
         print("\n⚠️ No live markets found (ending within 4 hours)")
         print("\nTrying to find markets ending within 24 hours...")
         
-        # Try with longer time window
+        # Try with longer time window and show future markets
+        print("\n" + "="*80)
+        print("2. Finding markets ending within 24 hours...")
+        print("="*80)
+        
+        all_future_24h = []
         for topic in ["nfl", "nba", "nhl", "soccer"]:
-            markets = get_markets_by_topic(topic, limit=50)
+            markets = get_markets_by_topic(topic, limit=100)
             if markets:
-                live_markets = filter_live_markets(markets, max_hours_ahead=24)
+                live_markets, future_markets = filter_live_markets(markets, max_hours_ahead=24)
+                all_future_24h.extend(live_markets)
                 if live_markets:
                     print(f"\n✓ Found {len(live_markets)} markets for {topic} ending within 24 hours:")
-                    for market in live_markets[:10]:
+                    for market in live_markets[:15]:
                         display_market_info(market, show_details=False)
+        
+        if all_future_24h:
+            # Remove duplicates
+            seen_ids = set()
+            unique_24h = []
+            for market in all_future_24h:
+                market_id = market.get("id")
+                if market_id not in seen_ids:
+                    seen_ids.add(market_id)
+                    unique_24h.append(market)
+            
+            print(f"\n{'='*80}")
+            print(f"✓ Found {len(unique_24h)} UNIQUE markets ending within 24 hours")
+            print(f"{'='*80}")
+            print("\nMARKET TITLES (ending within 24 hours):")
+            print("-" * 80)
+            for market in unique_24h[:30]:
+                display_market_info(market, show_details=False)
+        else:
+            print("\n⚠️ No markets found ending within 24 hours")
+            print("\nChecking for ANY future markets (regardless of time)...")
+            
+            # Show markets with future endDates regardless of time
+            print("\n" + "="*80)
+            print("3. Finding ANY future markets (regardless of time)...")
+            print("="*80)
+            
+            all_future_markets = []
+            for topic in ["nfl", "nba", "nhl", "soccer"]:
+                markets = get_markets_by_topic(topic, limit=100)
+                if markets:
+                    _, future_markets = filter_live_markets(markets, max_hours_ahead=8760)  # 1 year
+                    all_future_markets.extend(future_markets)
+                    if future_markets:
+                        print(f"\n{topic.upper()} - Found {len(future_markets)} future markets")
+            
+            if all_future_markets:
+                # Remove duplicates and sort by time until end
+                seen_ids = set()
+                unique_future = []
+                for market in all_future_markets:
+                    market_id = market.get("id")
+                    if market_id not in seen_ids:
+                        seen_ids.add(market_id)
+                        unique_future.append(market)
+                
+                unique_future.sort(key=lambda m: m.get("_minutes_until_end", float('inf')))
+                
+                print(f"\n✓ Found {len(unique_future)} UNIQUE future markets")
+                print("\nFUTURE MARKET TITLES (sorted by time until end):")
+                print("-" * 80)
+                
+                for market in unique_future[:50]:  # Show first 50
+                    hours = market.get("_hours_until_end", 0)
+                    days = int(hours // 24)
+                    hrs = int(hours % 24)
+                    if days > 0:
+                        time_str = f"{days}d {hrs}h"
+                    else:
+                        time_str = f"{hrs}h"
+                    question = market.get("question", "N/A")
+                    print(f"[{time_str:>8}] {question}")
+            else:
+                print("\n⚠️ No future markets found")
+                print("\nDebug: Showing sample of markets returned by API (first 20):")
+                print("-" * 80)
+                for topic in ["nfl", "nba"]:
+                    markets = get_markets_by_topic(topic, limit=20)
+                    if markets:
+                        print(f"\n{topic.upper()} - Sample markets:")
+                        for market in markets[:10]:
+                            question = market.get("question", "N/A")
+                            end_date = market.get("endDate") or market.get("endDateIso")
+                            market_id = market.get("id")
+                            print(f"  [{market_id}] {question[:70]}")
+                            print(f"      endDate: {end_date}")
 
 
 if __name__ == "__main__":
