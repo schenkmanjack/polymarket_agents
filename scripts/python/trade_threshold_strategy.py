@@ -110,6 +110,8 @@ class ThresholdTrader:
     def __init__(self, config_path: str):
         """Initialize trader with config."""
         # Proxy is already configured at module level before imports
+        # Use global proxy_url (defined at module level)
+        global proxy_url
         if proxy_url:
             logger.info(f"Proxy configured for trading: {proxy_url.split('@')[1] if '@' in proxy_url else 'configured'}")
         else:
@@ -181,11 +183,9 @@ class ThresholdTrader:
         if self.config.use_websocket_orderbook:
             try:
                 from agents.trading.websocket_orderbook_service import WebSocketOrderbookService
-                from agents.utils.proxy_config import get_proxy
-                
-                proxy_url = get_proxy()
+                # Use module-level proxy_url (already configured)
                 self.websocket_service = WebSocketOrderbookService(
-                    proxy_url=proxy_url,
+                    proxy_url=proxy_url,  # Use module-level proxy_url
                     health_check_timeout=self.config.websocket_health_check_timeout,
                     reconnect_delay=self.config.websocket_reconnect_delay,
                 )
@@ -244,18 +244,17 @@ class ThresholdTrader:
         if self.config.use_websocket_order_status:
             try:
                 from agents.trading.websocket_order_status_service import WebSocketOrderStatusService
-                from agents.utils.proxy_config import get_proxy
                 
                 # Get API credentials from Polymarket client
                 if not hasattr(self.pm, 'credentials') or not self.pm.credentials:
                     logger.warning("⚠️ No API credentials available for WebSocket order status. Falling back to HTTP polling.")
                 else:
-                    proxy_url = get_proxy()
+                    # Use module-level proxy_url (already configured)
                     self.websocket_order_status_service = WebSocketOrderStatusService(
                         api_key=self.pm.credentials.api_key,
                         api_secret=self.pm.credentials.api_secret,
                         api_passphrase=self.pm.credentials.api_passphrase,
-                        proxy_url=proxy_url,
+                        proxy_url=proxy_url,  # Use module-level proxy_url
                         health_check_timeout=self.config.websocket_order_status_health_check_timeout,
                         reconnect_delay=self.config.websocket_order_status_reconnect_delay,
                         on_order_update=self.order_manager._handle_websocket_order_update,
