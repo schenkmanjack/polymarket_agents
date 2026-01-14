@@ -364,22 +364,26 @@ class WebSocketOrderbookService:
                 elif isinstance(ask, list) and len(ask) >= 2:
                     asks_formatted.append([float(ask[0]), float(ask[1])])
         
+        # Calculate best bid/ask before updating cache
+        best_bid = bids_formatted[0][0] if bids_formatted else None
+        best_ask = asks_formatted[0][0] if asks_formatted else None
+        spread = best_ask - best_bid if (best_bid is not None and best_ask is not None) else None
+        
         # Update cache (thread-safe)
         with self._cache_lock:
             cache_entry = self._cache.get(token_id, {})
             update_count = cache_entry.get("update_count", 0) + 1
+            last_bid = cache_entry.get("last_best_bid")
+            last_ask = cache_entry.get("last_best_ask")
             
             self._cache[token_id] = {
                 "bids": bids_formatted,
                 "asks": asks_formatted,
                 "last_update": datetime.now(timezone.utc),
                 "update_count": update_count,
+                "last_best_bid": best_bid,
+                "last_best_ask": best_ask,
             }
-        
-        # Verbose logging: log every orderbook update
-        best_bid = bids_formatted[0][0] if bids_formatted else None
-        best_ask = asks_formatted[0][0] if asks_formatted else None
-        spread = best_ask - best_bid if (best_bid is not None and best_ask is not None) else None
         
         token_short = token_id[:20] if token_id and len(token_id) > 20 else (token_id or "unknown")
         market_slug = self.token_to_market_slug.get(token_id) or "unknown"
@@ -387,13 +391,26 @@ class WebSocketOrderbookService:
         ask_str = f"{best_ask:.4f}" if best_ask is not None else "N/A"
         spread_str = f"{spread:.4f}" if spread is not None else "N/A"
         
-        logger.info(
-            f"📥 WebSocket update | Market: {market_slug} | Token: {token_short}... | "
-            f"Bid: {bid_str} | Ask: {ask_str} | Spread: {spread_str}"
-        )
+        # Log updates at DEBUG level to reduce noise (only log significant changes or periodically)
+        # Log every 100th update or if price changed significantly (>1%)
+        should_log = False
+        if update_count % 100 == 0:
+            should_log = True
+        elif best_bid and best_ask and last_bid and last_ask:
+            # Check if price changed significantly (more than 1%)
+            if abs(best_bid - last_bid) / last_bid > 0.01:
+                should_log = True
+            elif abs(best_ask - last_ask) / last_ask > 0.01:
+                should_log = True
         
-        # Log full orderbook every 20th update
-        if update_count % 20 == 0:
+        if should_log:
+            logger.debug(
+                f"📥 WebSocket update | Market: {market_slug} | Token: {token_short}... | "
+                f"Bid: {bid_str} | Ask: {ask_str} | Spread: {spread_str} (update #{update_count})"
+            )
+        
+        # Log full orderbook every 1000th update (reduced frequency)
+        if update_count % 1000 == 0:
             logger.info(f"  📊 Full orderbook for {token_short}... (update #{update_count}):")
             logger.info(f"    Top 5 bids: {bids_formatted[:5]}")
             logger.info(f"    Top 5 asks: {asks_formatted[:5]}")
