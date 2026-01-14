@@ -12,5 +12,5 @@
   "max_minutes_before_resolution": 1,
   "orderbook_poll_interval": 0.1,
   "threshold_confirmation_seconds": 2,
-  "threshold_sell_confirmation_seconds": 2
+  "threshold_sell_confirmation_seconds": 0
 }
