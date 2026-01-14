@@ -27,6 +27,7 @@ class MarketDetector:
         monitored_markets: Dict[str, Dict],
         markets_with_bets: Set[str],
         is_running: Callable[[], bool],
+        websocket_service=None,
     ):
         """
         Initialize market detector.
@@ -36,11 +37,13 @@ class MarketDetector:
             monitored_markets: Dict to store monitored markets (market_slug -> market_info)
             markets_with_bets: Set of market slugs we've bet on
             is_running: Callable that returns current running status (allows real-time updates)
+            websocket_service: Optional WebSocketOrderbookService instance for subscribing to tokens
         """
         self.config = config
         self.monitored_markets = monitored_markets
         self.markets_with_bets = markets_with_bets
         self.is_running = is_running
+        self.websocket_service = websocket_service
     
     async def detection_loop(self):
         """Continuously detect new markets."""
@@ -94,6 +97,10 @@ class MarketDetector:
                     "no_token_id": token_ids[1],
                 }
                 logger.info(f"Added new 15m market to monitoring: {event_slug}")
+                
+                # Subscribe tokens to WebSocket if service is available
+                if self.websocket_service:
+                    self.websocket_service.subscribe_tokens(token_ids, market_slug=event_slug)
         
         except Exception as e:
             logger.error(f"Error checking 15m markets: {e}", exc_info=True)
@@ -130,6 +137,10 @@ class MarketDetector:
                     "no_token_id": token_ids[1],
                 }
                 logger.info(f"Added new 1h market to monitoring: {event_slug}")
+                
+                # Subscribe tokens to WebSocket if service is available
+                if self.websocket_service:
+                    self.websocket_service.subscribe_tokens(token_ids, market_slug=event_slug)
         
         except Exception as e:
             logger.error(f"Error checking 1h markets: {e}", exc_info=True)

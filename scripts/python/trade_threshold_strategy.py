@@ -38,6 +38,7 @@ from agents.trading.orderbook_helper import (
     check_threshold_triggered,
     get_lowest_ask,
     get_highest_bid,
+    set_websocket_service,
 )
 from agents.polymarket.polymarket import Polymarket
 from py_clob_client.order_builder.constants import SELL
@@ -170,10 +171,33 @@ class ThresholdTrader:
         
         # Timing
         self.orderbook_poll_interval = self.config.orderbook_poll_interval  # seconds - configurable polling interval
-        self.order_status_check_interval = 10.0  # seconds
+        self.order_status_check_interval = self.config.order_status_check_interval  # seconds - configurable order status check interval
         self.market_resolution_check_interval = 30.0  # seconds
         
         self.running = False
+        
+        # Initialize WebSocket orderbook service if enabled
+        self.websocket_service = None
+        if self.config.use_websocket_orderbook:
+            try:
+                from agents.trading.websocket_orderbook_service import WebSocketOrderbookService
+                from agents.utils.proxy_config import get_proxy
+                
+                proxy_url = get_proxy()
+                self.websocket_service = WebSocketOrderbookService(
+                    proxy_url=proxy_url,
+                    health_check_timeout=self.config.websocket_health_check_timeout,
+                    reconnect_delay=self.config.websocket_reconnect_delay,
+                )
+                logger.info("✓ WebSocket orderbook service initialized")
+            except ImportError as e:
+                logger.warning(f"⚠️ WebSocket orderbook service not available: {e}. Falling back to HTTP polling.")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to initialize WebSocket orderbook service: {e}. Falling back to HTTP polling.")
+        
+        # Set WebSocket service in orderbook_helper for fallback logic
+        if self.websocket_service:
+            set_websocket_service(self.websocket_service)
         
         # Initialize modules
         self.market_detector = MarketDetector(
@@ -181,6 +205,7 @@ class ThresholdTrader:
             monitored_markets=self.monitored_markets,
             markets_with_bets=self.markets_with_bets,
             is_running=lambda: self.running,
+            websocket_service=self.websocket_service,
         )
         
         self.orderbook_monitor = OrderbookMonitor(
@@ -197,8 +222,10 @@ class ThresholdTrader:
             order_placed_callback=self._place_order,
             place_early_sell_callback=self._place_early_sell_order,
             get_minutes_until_resolution=get_minutes_until_resolution,
+            websocket_service=self.websocket_service,
         )
         
+        # Initialize OrderManager first (needed for WebSocket callbacks)
         self.order_manager = OrderManager(
             config=self.config,
             open_trades=self.open_trades,
@@ -209,7 +236,38 @@ class ThresholdTrader:
             deployment_id=self.deployment_id,
             is_running=lambda: self.running,
             place_sell_order_callback=self._place_initial_sell_order,
+            websocket_order_status_service=None,  # Will be set below
         )
+        
+        # Initialize WebSocket order status service if enabled
+        self.websocket_order_status_service = None
+        if self.config.use_websocket_order_status:
+            try:
+                from agents.trading.websocket_order_status_service import WebSocketOrderStatusService
+                from agents.utils.proxy_config import get_proxy
+                
+                # Get API credentials from Polymarket client
+                if not hasattr(self.pm, 'credentials') or not self.pm.credentials:
+                    logger.warning("⚠️ No API credentials available for WebSocket order status. Falling back to HTTP polling.")
+                else:
+                    proxy_url = get_proxy()
+                    self.websocket_order_status_service = WebSocketOrderStatusService(
+                        api_key=self.pm.credentials.api_key,
+                        api_secret=self.pm.credentials.api_secret,
+                        api_passphrase=self.pm.credentials.api_passphrase,
+                        proxy_url=proxy_url,
+                        health_check_timeout=self.config.websocket_order_status_health_check_timeout,
+                        reconnect_delay=self.config.websocket_order_status_reconnect_delay,
+                        on_order_update=self.order_manager._handle_websocket_order_update,
+                        on_trade_update=self.order_manager._handle_websocket_trade_update,
+                    )
+                    # Set WebSocket service in OrderManager
+                    self.order_manager.websocket_order_status_service = self.websocket_order_status_service
+                    logger.info("✓ WebSocket order status service initialized")
+            except ImportError as e:
+                logger.warning(f"⚠️ WebSocket order status service not available: {e}. Falling back to HTTP polling.")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to initialize WebSocket order status service: {e}. Falling back to HTTP polling.")
     
     async def start(self):
         """Start the trading loop."""
@@ -250,8 +308,34 @@ class ThresholdTrader:
         
         logger.info("=" * 80)
         
+        # Start WebSocket services if enabled
+        # Start orderbook WebSocket service (before resuming monitoring so we can subscribe)
+        if self.websocket_service:
+            try:
+                await self.websocket_service.start()
+                logger.info("✓ WebSocket orderbook service started")
+            except Exception as e:
+                logger.error(f"Failed to start WebSocket orderbook service: {e}", exc_info=True)
+                logger.warning("Continuing with HTTP polling fallback")
+        
+        # Start order status WebSocket service
+        if self.websocket_order_status_service:
+            try:
+                await self.websocket_order_status_service.start()
+                logger.info("✓ WebSocket order status service started")
+            except Exception as e:
+                logger.error(f"Failed to start WebSocket order status service: {e}", exc_info=True)
+                logger.warning("Continuing with HTTP polling fallback")
+        
         # Resume monitoring markets we've bet on
         await self._resume_monitoring()
+        
+        # Subscribe resumed markets to WebSocket if service is available
+        if self.websocket_service:
+            for market_slug, market_info in self.monitored_markets.items():
+                token_ids = market_info.get("token_ids", [])
+                if token_ids:
+                    self.websocket_service.subscribe_tokens(token_ids, market_slug=market_slug)
         
         self.running = True
         
@@ -330,6 +414,21 @@ class ThresholdTrader:
             self.running = False
             logger.info("Trading stopped - cancelling all background tasks...")
             
+            # Stop WebSocket services
+            if self.websocket_service:
+                try:
+                    await self.websocket_service.stop()
+                    logger.info("✓ WebSocket orderbook service stopped")
+                except Exception as e:
+                    logger.error(f"Error stopping WebSocket orderbook service: {e}")
+            
+            if self.websocket_order_status_service:
+                try:
+                    await self.websocket_order_status_service.stop()
+                    logger.info("✓ WebSocket order status service stopped")
+                except Exception as e:
+                    logger.error(f"Error stopping WebSocket order status service: {e}")
+            
             # Cancel all tasks
             for name, task in tasks.items():
                 if not task.done():
@@ -367,6 +466,8 @@ class ThresholdTrader:
                         "no_token_id": token_ids[1] if len(token_ids) > 1 else None,
                     }
                     logger.info(f"Resuming monitoring for market: {market_slug}")
+                    
+                    # Note: WebSocket subscription will happen after start() is called
             
             # Track open buy orders
             if trade.order_id and trade.order_status in ["open", "partial"]:

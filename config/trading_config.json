@@ -13,5 +13,12 @@
   "max_minutes_before_resolution": 1,
   "orderbook_poll_interval": 0.1,
   "threshold_confirmation_seconds": 0,
-  "threshold_sell_confirmation_seconds": 0
+  "threshold_sell_confirmation_seconds": 0,
+  "use_websocket_orderbook": true,
+  "websocket_reconnect_delay": 5.0,
+  "websocket_health_check_timeout": 14.0,
+  "order_status_check_interval": 1.0,
+  "use_websocket_order_status": true,
+  "websocket_order_status_reconnect_delay": 5.0,
+  "websocket_order_status_health_check_timeout": 14.0
 }

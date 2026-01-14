@@ -2,6 +2,7 @@
 Orderbook helper functions for live trading.
 
 Provides functions to fetch orderbook data and check threshold conditions.
+Supports both WebSocket (real-time) and HTTP (fallback) orderbook fetching.
 """
 import logging
 import httpx
@@ -10,10 +11,20 @@ from agents.utils.proxy_config import get_proxy_dict
 
 logger = logging.getLogger(__name__)
 
+# Global WebSocket service instance (set by ThresholdTrader)
+_websocket_service = None
+_fallback_logged = False  # Track if we've logged fallback message
+
+
+def set_websocket_service(service):
+    """Set the global WebSocket service instance."""
+    global _websocket_service
+    _websocket_service = service
+
 
 def fetch_orderbook(token_id: str) -> Optional[Dict]:
     """
-    Fetch orderbook from CLOB API (same as monitoring script).
+    Fetch orderbook from WebSocket cache (if available) or HTTP API (fallback).
     
     Args:
         token_id: CLOB token ID
@@ -21,6 +32,24 @@ def fetch_orderbook(token_id: str) -> Optional[Dict]:
     Returns:
         Dict with 'bids' and 'asks' (lists of [price, size] tuples), or None if error
     """
+    global _websocket_service, _fallback_logged
+    
+    # Try WebSocket cache first if service is available and connected
+    if _websocket_service and _websocket_service.is_connected():
+        orderbook = _websocket_service.get_orderbook(token_id)
+        if orderbook:
+            # WebSocket is working - log once if we were previously falling back
+            if _fallback_logged:
+                logger.info("✓ WebSocket orderbook service is working again - switching back to WebSocket")
+                _fallback_logged = False
+            return orderbook
+        # Cache miss or stale - fall through to HTTP
+    
+    # Fallback to HTTP
+    if not _fallback_logged:
+        logger.warning("⚠️ Falling back to HTTP for orderbook data (WebSocket unavailable or cache miss)")
+        _fallback_logged = True
+    
     try:
         url = "https://clob.polymarket.com/book"
         proxies = get_proxy_dict()

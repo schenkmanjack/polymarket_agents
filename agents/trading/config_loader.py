@@ -129,6 +129,61 @@ class TradingConfig:
         if not isinstance(always_use_initial_principal, bool):
             raise ValueError(f"always_use_initial_principal must be a boolean, got {always_use_initial_principal}")
         
+        # Validate use_websocket_orderbook (optional, defaults to True)
+        use_websocket_orderbook = self.config.get('use_websocket_orderbook', True)
+        if not isinstance(use_websocket_orderbook, bool):
+            raise ValueError(f"use_websocket_orderbook must be a boolean, got {use_websocket_orderbook}")
+        
+        # Validate websocket_reconnect_delay (optional, defaults to 5.0)
+        websocket_reconnect_delay = self.config.get('websocket_reconnect_delay', 5.0)
+        try:
+            websocket_reconnect_delay = float(websocket_reconnect_delay)
+            if websocket_reconnect_delay < 0:
+                raise ValueError("websocket_reconnect_delay must be >= 0")
+        except (ValueError, TypeError):
+            raise ValueError(f"websocket_reconnect_delay must be a number >= 0, got {websocket_reconnect_delay}")
+        
+        # Validate websocket_health_check_timeout (optional, defaults to 14.0)
+        websocket_health_check_timeout = self.config.get('websocket_health_check_timeout', 14.0)
+        try:
+            websocket_health_check_timeout = float(websocket_health_check_timeout)
+            if websocket_health_check_timeout <= 0:
+                raise ValueError("websocket_health_check_timeout must be > 0")
+        except (ValueError, TypeError):
+            raise ValueError(f"websocket_health_check_timeout must be a number > 0, got {websocket_health_check_timeout}")
+        
+        # Validate order_status_check_interval (optional, defaults to 10.0)
+        order_status_check_interval = self.config.get('order_status_check_interval', 10.0)
+        try:
+            order_status_check_interval = float(order_status_check_interval)
+            if order_status_check_interval <= 0:
+                raise ValueError("order_status_check_interval must be > 0")
+        except (ValueError, TypeError):
+            raise ValueError(f"order_status_check_interval must be a number > 0, got {order_status_check_interval}")
+        
+        # Validate use_websocket_order_status (optional, defaults to True)
+        use_websocket_order_status = self.config.get('use_websocket_order_status', True)
+        if not isinstance(use_websocket_order_status, bool):
+            raise ValueError(f"use_websocket_order_status must be a boolean, got {use_websocket_order_status}")
+        
+        # Validate websocket_order_status_reconnect_delay (optional, defaults to 5.0)
+        websocket_order_status_reconnect_delay = self.config.get('websocket_order_status_reconnect_delay', 5.0)
+        try:
+            websocket_order_status_reconnect_delay = float(websocket_order_status_reconnect_delay)
+            if websocket_order_status_reconnect_delay < 0:
+                raise ValueError("websocket_order_status_reconnect_delay must be >= 0")
+        except (ValueError, TypeError):
+            raise ValueError(f"websocket_order_status_reconnect_delay must be a number >= 0, got {websocket_order_status_reconnect_delay}")
+        
+        # Validate websocket_order_status_health_check_timeout (optional, defaults to 14.0)
+        websocket_order_status_health_check_timeout = self.config.get('websocket_order_status_health_check_timeout', 14.0)
+        try:
+            websocket_order_status_health_check_timeout = float(websocket_order_status_health_check_timeout)
+            if websocket_order_status_health_check_timeout <= 0:
+                raise ValueError("websocket_order_status_health_check_timeout must be > 0")
+        except (ValueError, TypeError):
+            raise ValueError(f"websocket_order_status_health_check_timeout must be a number > 0, got {websocket_order_status_health_check_timeout}")
+        
         logger.info("✓ Config validation passed")
     
     @property
@@ -196,6 +251,41 @@ class TradingConfig:
     def always_use_initial_principal(self) -> bool:
         """If True, always use initial_principal for bet sizing calculations, regardless of current principal."""
         return bool(self.config.get('always_use_initial_principal', False))
+    
+    @property
+    def use_websocket_orderbook(self) -> bool:
+        """If True, use WebSocket for real-time orderbook updates instead of HTTP polling."""
+        return bool(self.config.get('use_websocket_orderbook', True))
+    
+    @property
+    def websocket_reconnect_delay(self) -> float:
+        """Initial delay before reconnecting WebSocket (exponential backoff)."""
+        return float(self.config.get('websocket_reconnect_delay', 5.0))
+    
+    @property
+    def websocket_health_check_timeout(self) -> float:
+        """Seconds of silence before considering WebSocket connection dead."""
+        return float(self.config.get('websocket_health_check_timeout', 14.0))
+    
+    @property
+    def order_status_check_interval(self) -> float:
+        """Seconds between order status checks. How frequently to check if orders are filled."""
+        return float(self.config.get('order_status_check_interval', 10.0))
+    
+    @property
+    def use_websocket_order_status(self) -> bool:
+        """If True, use WebSocket for real-time order status updates instead of HTTP polling."""
+        return bool(self.config.get('use_websocket_order_status', True))
+    
+    @property
+    def websocket_order_status_reconnect_delay(self) -> float:
+        """Initial delay before reconnecting order status WebSocket (exponential backoff)."""
+        return float(self.config.get('websocket_order_status_reconnect_delay', 5.0))
+    
+    @property
+    def websocket_order_status_health_check_timeout(self) -> float:
+        """Seconds of silence before considering order status WebSocket connection dead."""
+        return float(self.config.get('websocket_order_status_health_check_timeout', 14.0))
     
     def get_amount_invested(self, principal: float) -> float:
         """

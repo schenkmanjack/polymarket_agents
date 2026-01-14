@@ -39,6 +39,7 @@ class OrderbookMonitor:
         order_placed_callback: Callable[[str, Dict, str, float], Awaitable[bool]],
         place_early_sell_callback: Callable[[RealTradeThreshold, float], Awaitable[None]],
         get_minutes_until_resolution: Callable[[Dict], Optional[float]],
+        websocket_service=None,
     ):
         """
         Initialize orderbook monitor.
@@ -57,6 +58,7 @@ class OrderbookMonitor:
             order_placed_callback: Async function(market_slug, market_info, side, lowest_ask) -> bool
             place_early_sell_callback: Async function(trade, sell_price) -> None
             get_minutes_until_resolution: Callable that takes market dict and returns minutes until resolution
+            websocket_service: Optional WebSocketOrderbookService instance for real-time orderbook updates
         """
         self.config = config
         self.monitored_markets = monitored_markets
@@ -72,6 +74,7 @@ class OrderbookMonitor:
         self.place_early_sell_callback = place_early_sell_callback
         self.get_minutes_until_resolution = get_minutes_until_resolution
         self.orderbook_poll_interval = config.orderbook_poll_interval
+        self.websocket_service = websocket_service
         
         # Price tracking for resolution determination
         # Stores last known orderbook prices for markets near resolution
@@ -241,6 +244,13 @@ class OrderbookMonitor:
             market = market_info["market"]
             if not is_market_active(market):
                 logger.info(f"Market {market_slug} is no longer active, removing from monitoring")
+                # Unsubscribe tokens from WebSocket if service is available
+                if self.websocket_service:
+                    yes_token_id = market_info.get("yes_token_id")
+                    no_token_id = market_info.get("no_token_id")
+                    if yes_token_id or no_token_id:
+                        tokens_to_remove = [t for t in [yes_token_id, no_token_id] if t]
+                        self.websocket_service.unsubscribe_tokens(tokens_to_remove)
                 self.monitored_markets.pop(market_slug, None)
                 continue
             

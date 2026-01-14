@@ -46,6 +46,7 @@ class OrderManager:
         deployment_id: str,
         is_running: Callable[[], bool],
         place_sell_order_callback: Callable[[RealTradeThreshold], Awaitable[None]],
+        websocket_order_status_service=None,
     ):
         """
         Initialize order manager.
@@ -60,6 +61,7 @@ class OrderManager:
             deployment_id: Deployment ID for database queries
             is_running: Callable that returns current running status
             place_sell_order_callback: Async function(trade) -> None (called when buy order fills)
+            websocket_order_status_service: Optional WebSocketOrderStatusService instance for real-time order updates
         """
         self.config = config
         self.open_trades = open_trades
@@ -70,16 +72,246 @@ class OrderManager:
         self.deployment_id = deployment_id
         self.is_running = is_running
         self.place_sell_order_callback = place_sell_order_callback
+        self.websocket_order_status_service = websocket_order_status_service
         
         # Tracking dictionaries
         self.orders_not_found = {}  # order_id -> retry_count
         self.sell_orders_not_found = {}  # sell_order_id -> retry_count
         self.orders_checked_open = {}  # order_id -> check_count
         self.max_order_not_found_retries = MAX_ORDER_NOT_FOUND_RETRIES
-        self.order_status_check_interval = ORDER_STATUS_CHECK_INTERVAL
+        self.order_status_check_interval = config.order_status_check_interval
         
         # Re-pricing tracking for threshold sell orders
         self._threshold_sell_reprice_attempts = {}  # trade_id -> attempt_count
+        
+        # Track if we're using WebSocket (for fallback logic)
+        self._using_websocket = False
+        self._websocket_fallback_logged = False
+    
+    async def _handle_websocket_order_update(self, order_data: Dict):
+        """
+        Handle order status update from WebSocket.
+        
+        Called when WebSocket receives an order update (placement, cancellation, fill).
+        
+        Args:
+            order_data: Order update data from WebSocket
+        """
+        try:
+            order_id = order_data.get("id") or order_data.get("order_id") or order_data.get("orderID")
+            order_status = order_data.get("status", "unknown")
+            
+            if not order_id:
+                logger.warning(f"⚠️ WebSocket order update missing order_id: {order_data}")
+                return
+            
+            logger.info(
+                f"📋 WebSocket order update | Order: {order_id[:20]}... | Status: {order_status} | "
+                f"Size: {order_data.get('size', 'N/A')} | Price: {order_data.get('price', 'N/A')}"
+            )
+            
+            # Check if this is a buy order we're tracking
+            if order_id in self.open_trades:
+                trade_id = self.open_trades[order_id]
+                trade = self.db.get_trade_by_id(trade_id)
+                
+                if trade:
+                    # Update order status in database
+                    if order_status in ["filled", "FILLED", "complete", "COMPLETE"]:
+                        # Order filled - update database
+                        filled_shares = order_data.get("size") or order_data.get("filled_amount") or trade.order_size
+                        if filled_shares:
+                            filled_shares = float(filled_shares)
+                        else:
+                            filled_shares = trade.order_size
+                        
+                        fill_price = order_data.get("price") or trade.order_price
+                        if fill_price:
+                            fill_price = float(fill_price)
+                        else:
+                            fill_price = trade.order_price
+                        
+                        logger.info(
+                            f"✅ WebSocket: Buy order {order_id[:20]}... FILLED | "
+                            f"Trade ID: {trade_id} | Filled shares: {filled_shares} @ ${fill_price:.4f}"
+                        )
+                        
+                        # Update database using update_trade_fill (same as HTTP polling)
+                        from agents.backtesting.backtesting_utils import calculate_polymarket_fee
+                        dollars_spent = filled_shares * fill_price
+                        fee = calculate_polymarket_fee(fill_price, dollars_spent)
+                        
+                        self.db.update_trade_fill(
+                            trade_id=trade_id,
+                            filled_shares=filled_shares,
+                            fill_price=fill_price,
+                            dollars_spent=dollars_spent,
+                            fee=fee,
+                            order_status="filled",
+                        )
+                        
+                        # Remove from open_trades
+                        self.open_trades.pop(order_id, None)
+                        self.orders_not_found.pop(order_id, None)
+                        self.orders_checked_open.discard(order_id)
+                        
+                        # Trigger sell order placement
+                        if self.place_sell_order_callback:
+                            try:
+                                await self.place_sell_order_callback(trade)
+                            except Exception as e:
+                                logger.error(f"Error placing sell order after WebSocket fill: {e}", exc_info=True)
+                    
+                    elif order_status in ["cancelled", "CANCELLED", "canceled"]:
+                        logger.info(f"❌ WebSocket: Buy order {order_id[:20]}... CANCELLED")
+                        self.db.update_order_status(
+                            trade_id=trade_id,
+                            order_status="cancelled",
+                            order_id=order_id,
+                        )
+                        self.open_trades.pop(order_id, None)
+            
+            # Check if this is a sell order we're tracking
+            elif order_id in self.open_sell_orders:
+                trade_id = self.open_sell_orders[order_id]
+                trade = self.db.get_trade_by_id(trade_id)
+                
+                if trade:
+                    if order_status in ["filled", "FILLED", "complete", "COMPLETE"]:
+                        filled_shares = order_data.get("size") or order_data.get("filled_amount") or trade.sell_order_size
+                        if filled_shares:
+                            filled_shares = float(filled_shares)
+                        else:
+                            filled_shares = trade.sell_order_size
+                        
+                        fill_price = order_data.get("price") or trade.sell_order_price
+                        if fill_price:
+                            fill_price = float(fill_price)
+                        else:
+                            fill_price = trade.sell_order_price
+                        
+                        logger.info(
+                            f"✅ WebSocket: Sell order {order_id[:20]}... FILLED | "
+                            f"Trade ID: {trade_id} | Filled shares: {filled_shares} @ ${fill_price:.4f}"
+                        )
+                        
+                        # Update database using update_sell_order_fill
+                        from agents.backtesting.backtesting_utils import calculate_polymarket_fee
+                        dollars_received = filled_shares * fill_price
+                        fee = calculate_polymarket_fee(fill_price, dollars_received)
+                        
+                        self.db.update_sell_order_fill(
+                            trade_id=trade_id,
+                            sell_order_status="filled",
+                            sell_shares_filled=filled_shares,
+                            sell_dollars_received=dollars_received,
+                            sell_fee=fee,
+                        )
+                        self.open_sell_orders.pop(order_id, None)
+                    
+                    elif order_status in ["cancelled", "CANCELLED", "canceled"]:
+                        logger.info(f"❌ WebSocket: Sell order {order_id[:20]}... CANCELLED")
+                        # Update sell order status via update_sell_order
+                        self.db.update_sell_order(
+                            trade_id=trade_id,
+                            sell_order_id=order_id,
+                            sell_order_price=trade.sell_order_price or 0.0,
+                            sell_order_size=trade.sell_order_size or 0.0,
+                            sell_order_status="cancelled",
+                        )
+                        self.open_sell_orders.pop(order_id, None)
+        
+        except Exception as e:
+            logger.error(f"Error handling WebSocket order update: {e}", exc_info=True)
+    
+    async def _handle_websocket_trade_update(self, trade_data: Dict):
+        """
+        Handle trade/fill update from WebSocket.
+        
+        Called when WebSocket receives a trade event (order was matched/filled).
+        
+        Args:
+            trade_data: Trade update data from WebSocket
+        """
+        try:
+            order_id = trade_data.get("order_id") or trade_data.get("orderID")
+            trade_id_ws = trade_data.get("id") or trade_data.get("trade_id")
+            size = trade_data.get("size", 0)
+            price = trade_data.get("price", 0)
+            
+            logger.info(
+                f"💰 WebSocket TRADE/FILL | Order: {order_id[:20] if order_id else 'N/A'}... | "
+                f"Size: {size} | Price: {price:.4f} | Trade ID: {trade_id_ws[:20] if trade_id_ws else 'N/A'}..."
+            )
+            
+            # Check if this is a buy order fill
+            if order_id and order_id in self.open_trades:
+                trade_id = self.open_trades[order_id]
+                trade = self.db.get_trade_by_id(trade_id)
+                
+                if trade:
+                    filled_shares = float(size) if size else trade.order_size
+                    
+                    logger.info(
+                        f"✅ WebSocket TRADE: Buy order {order_id[:20]}... FILLED | "
+                        f"Trade ID: {trade_id} | Filled: {filled_shares} @ ${price:.4f}"
+                    )
+                    
+                    # Update database using update_trade_fill (same as HTTP polling)
+                    from agents.backtesting.backtesting_utils import calculate_polymarket_fee
+                    dollars_spent = filled_shares * price
+                    fee = calculate_polymarket_fee(price, dollars_spent)
+                    
+                    self.db.update_trade_fill(
+                        trade_id=trade_id,
+                        filled_shares=filled_shares,
+                        fill_price=price,
+                        dollars_spent=dollars_spent,
+                        fee=fee,
+                        order_status="filled",
+                    )
+                    
+                    # Remove from open_trades
+                    self.open_trades.pop(order_id, None)
+                    self.orders_not_found.pop(order_id, None)
+                    self.orders_checked_open.discard(order_id)
+                    
+                    # Trigger sell order placement immediately
+                    if self.place_sell_order_callback:
+                        try:
+                            await self.place_sell_order_callback(trade)
+                        except Exception as e:
+                            logger.error(f"Error placing sell order after WebSocket trade: {e}", exc_info=True)
+            
+            # Check if this is a sell order fill
+            elif order_id and order_id in self.open_sell_orders:
+                trade_id = self.open_sell_orders[order_id]
+                trade = self.db.get_trade_by_id(trade_id)
+                
+                if trade:
+                    filled_shares = float(size) if size else trade.sell_order_size
+                    
+                    logger.info(
+                        f"✅ WebSocket TRADE: Sell order {order_id[:20]}... FILLED | "
+                        f"Trade ID: {trade_id} | Filled: {filled_shares} @ ${price:.4f}"
+                    )
+                    
+                    # Update database using update_sell_order_fill
+                    from agents.backtesting.backtesting_utils import calculate_polymarket_fee
+                    dollars_received = filled_shares * price
+                    fee = calculate_polymarket_fee(price, dollars_received)
+                    
+                    self.db.update_sell_order_fill(
+                        trade_id=trade_id,
+                        sell_order_status="filled",
+                        sell_shares_filled=filled_shares,
+                        sell_dollars_received=dollars_received,
+                        sell_fee=fee,
+                    )
+                    self.open_sell_orders.pop(order_id, None)
+        
+        except Exception as e:
+            logger.error(f"Error handling WebSocket trade update: {e}", exc_info=True)
     
     async def place_buy_order(
         self,
@@ -310,25 +542,47 @@ class OrderManager:
         return True
     
     async def status_check_loop(self):
-        """Check order status every 2 seconds if orders are open, otherwise every 10 seconds."""
+        """Check order status via WebSocket (if available) or HTTP polling (fallback)."""
+        # If WebSocket is available and connected, rely on it for real-time updates
+        # Still do periodic HTTP checks as backup
         while self.is_running():
             try:
-                await self.check_order_statuses()
+                # Check if WebSocket is working
+                if self.websocket_order_status_service and self.websocket_order_status_service.is_connected():
+                    self._using_websocket = True
+                    if self._websocket_fallback_logged:
+                        logger.info("✓ WebSocket order status service is working again - using real-time updates")
+                        self._websocket_fallback_logged = False
+                    
+                    # WebSocket is handling updates in real-time, but still do periodic HTTP checks as backup
+                    # Use longer interval since WebSocket provides instant updates
+                    await asyncio.sleep(self.order_status_check_interval)
+                    # Still do HTTP check as backup
+                    await self.check_order_statuses()
+                else:
+                    # Fallback to HTTP polling
+                    if not self._websocket_fallback_logged:
+                        logger.warning("⚠️ Falling back to HTTP polling for order status (WebSocket unavailable)")
+                        self._websocket_fallback_logged = True
+                    self._using_websocket = False
+                    
+                    await self.check_order_statuses()
+                    
+                    # Use 2 seconds if there are open orders, otherwise use default interval
+                    has_open_orders = self.open_trades or self.open_sell_orders
+                    if not has_open_orders:
+                        # Check database only if memory is empty (e.g., after script restart)
+                        open_trades_db = self.db.get_open_trades(deployment_id=self.deployment_id)
+                        open_sell_orders_db = self.db.get_open_sell_orders(deployment_id=self.deployment_id)
+                        has_open_orders = bool(open_trades_db or open_sell_orders_db)
+                    
+                    if has_open_orders:
+                        await asyncio.sleep(2.0)  # Check every 2 seconds when orders are open
+                    else:
+                        await asyncio.sleep(self.order_status_check_interval)  # Default interval when no open orders
             except Exception as e:
                 logger.error(f"Error checking order status: {e}", exc_info=True)
-            
-            # Use 2 seconds if there are open orders, otherwise use default 10 seconds
-            has_open_orders = self.open_trades or self.open_sell_orders
-            if not has_open_orders:
-                # Check database only if memory is empty (e.g., after script restart)
-                open_trades_db = self.db.get_open_trades(deployment_id=self.deployment_id)
-                open_sell_orders_db = self.db.get_open_sell_orders(deployment_id=self.deployment_id)
-                has_open_orders = bool(open_trades_db or open_sell_orders_db)
-            
-            if has_open_orders:
-                await asyncio.sleep(2.0)  # Check every 2 seconds when orders are open
-            else:
-                await asyncio.sleep(self.order_status_check_interval)  # Default 10 seconds when no open orders
+                await asyncio.sleep(1.0)
     
     async def check_order_statuses(self):
         """Check status of all open orders."""
