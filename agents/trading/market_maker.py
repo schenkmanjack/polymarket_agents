@@ -1190,10 +1190,22 @@ class MarketMaker:
                 return
             
             # Calculate sell prices
-            sell_price = midpoint + self.config.offset_above_midpoint
+            # Strategy: Sell at midpoint + offset, but ensure we're competitive
+            base_sell_price = midpoint + self.config.offset_above_midpoint
+            
+            # If best bid exists and our price is above it, consider matching best bid for immediate fill
+            # But for market making, we want to sell above market, so we'll use the calculated price
+            sell_price = base_sell_price
             
             # Cap at 0.99 (max sell price)
             sell_price = min(sell_price, 0.99)
+            
+            # Warn if price is uncompetitive
+            if best_bid and sell_price > best_bid + 0.01:  # More than 1% above best bid
+                logger.warning(
+                    f"   ⚠️ WARNING: Sell price (${sell_price:.4f}) is ${sell_price - best_bid:.4f} above best bid (${best_bid:.4f}). "
+                    f"Orders may not fill unless market moves up or buyers pay premium."
+                )
             
             midpoint_type = "weighted" if self.config.use_weighted_midpoint else "simple"
             logger.info("=" * 80)

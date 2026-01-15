@@ -4,7 +4,7 @@
   "price_step": 0.01,
   "wait_after_fill": 5.0,
   "wait_if_neither_fills": 10.0,
-  "merge_threshold": 1.02,
+  "merge_threshold": 1.0,
   "wait_before_resplit": 24.0,
   "max_iterations_neither_fills": 20,
   "poll_interval": 0.1,
