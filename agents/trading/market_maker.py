@@ -179,9 +179,17 @@ class MarketMaker:
                     RealMarketMakerPosition.id.desc()
                 ).limit(limit).all()
                 logger.info(f"Found {len(all_positions)} recent positions in database to check")
+                
+                if len(all_positions) == 0:
+                    logger.info("No positions found in database - nothing to redeem")
+                else:
+                    logger.info("Checking each position for redeemable shares...")
                 logger.info("")
                 
                 redeemable_count = 0
+                skipped_no_shares = 0
+                skipped_not_resolved = 0
+                skipped_no_winning_side = 0
                 
                 for db_pos in all_positions:
                     try:
@@ -199,13 +207,15 @@ class MarketMaker:
                             logger.warning(f"Could not check balances for {db_pos.market_slug}")
                             continue
                         
-                        if yes_balance == 0 and no_balance == 0:
-                            logger.debug(f"✓ {db_pos.market_slug}: No shares remaining")
-                            continue
-                        
                         logger.info(f"📊 {db_pos.market_slug}:")
                         logger.info(f"   YES shares: {yes_balance:.2f}, NO shares: {no_balance:.2f}")
                         logger.info(f"   Status: {db_pos.position_status}, Winning side: {db_pos.winning_side}")
+                        
+                        if yes_balance == 0 and no_balance == 0:
+                            logger.info(f"   ✓ No shares remaining (already redeemed)")
+                            skipped_no_shares += 1
+                            logger.info("")
+                            continue
                         
                         # Create position object for redemption/merging
                         position = MarketMakerPosition(
@@ -221,8 +231,7 @@ class MarketMaker:
                             no_filled=(no_balance == 0),
                         )
                         
-                        # Only merge/redeem if position is resolved (not during active market making)
-                        # The purpose of splitting is to sell each side separately, so we don't merge while active
+                        # Process all positions - merge/redeem based on status
                         if db_pos.position_status == "resolved":
                             # Case 1: Both YES and NO shares exist - merge equal amounts back to USDC
                             if yes_balance > 0 and no_balance > 0:
@@ -278,11 +287,44 @@ class MarketMaker:
                                 redeemable_count += 1
                             else:
                                 logger.info(f"   Market resolved but winning_side not recorded - skipping redemption")
-                        elif yes_balance == 0 and no_balance == 0:
-                            logger.info(f"   ✓ All shares already redeemed/merged")
+                                skipped_no_winning_side += 1
+                        elif db_pos.position_status != "resolved":
+                            # Position not resolved - check if we should merge equal amounts anyway
+                            # (This handles cases where positions weren't properly marked as resolved)
+                            if yes_balance > 0 and no_balance > 0:
+                                merge_amount = min(yes_balance, no_balance)
+                                if abs(yes_balance - no_balance) < 0.01:  # Essentially equal
+                                    logger.info(
+                                        f"   ⚠️ Position status is '{db_pos.position_status}' (not resolved), "
+                                        f"but both sides exist in equal amounts ({merge_amount:.2f}). "
+                                        f"Attempting to merge back to ${merge_amount:.2f} USDC..."
+                                    )
+                                    logger.info(f"   (Note: This should only happen if market resolved but status wasn't updated)")
+                                    loop = asyncio.get_event_loop()
+                                    merge_result = await loop.run_in_executor(
+                                        None,
+                                        self.pm.merge_positions,
+                                        db_pos.condition_id,
+                                        merge_amount
+                                    )
+                                    if merge_result:
+                                        logger.info(f"   ✅ Successfully merged {merge_amount:.2f} YES + NO → ${merge_amount:.2f} USDC")
+                                        redeemable_count += 1
+                                    else:
+                                        logger.warning(f"   ⚠️ Merge failed - market may still be active")
+                                        skipped_not_resolved += 1
+                                else:
+                                    logger.info(f"   Market status: {db_pos.position_status} - shares exist but amounts unequal")
+                                    logger.info(f"   (YES: {yes_balance:.2f}, NO: {no_balance:.2f}) - skipping")
+                                    skipped_not_resolved += 1
+                            else:
+                                logger.info(f"   Market status: {db_pos.position_status} - only one side has shares")
+                                logger.info(f"   (YES: {yes_balance:.2f}, NO: {no_balance:.2f}) - skipping")
+                                skipped_not_resolved += 1
                         else:
-                            logger.info(f"   Market still active (status: {db_pos.position_status}) - skipping merge/redemption")
-                            logger.info(f"   (Purpose of split is to sell each side separately during market making)")
+                            # This shouldn't happen, but handle it
+                            logger.info(f"   Unknown status: {db_pos.position_status} - skipping")
+                            skipped_not_resolved += 1
                         
                         logger.info("")
                         
@@ -294,7 +336,12 @@ class MarketMaker:
                 session.close()
             
             logger.info("=" * 80)
-            logger.info(f"SCAN COMPLETE: Processed {redeemable_count} positions with redeemable shares")
+            logger.info(f"SCAN COMPLETE:")
+            logger.info(f"  - Positions checked: {len(all_positions)}")
+            logger.info(f"  - Positions with redeemable shares: {redeemable_count}")
+            logger.info(f"  - Skipped (no shares): {skipped_no_shares}")
+            logger.info(f"  - Skipped (not resolved): {skipped_not_resolved}")
+            logger.info(f"  - Skipped (no winning_side): {skipped_no_winning_side}")
             logger.info("=" * 80)
             
         except Exception as e:
