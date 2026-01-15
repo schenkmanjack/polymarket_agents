@@ -9,7 +9,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, Optional, Set, Callable
+from typing import Dict, Optional, Set, Callable, List
 
 from agents.trading.market_maker_config import MarketMakerConfig
 from agents.trading.trade_db import TradeDatabase, RealMarketMakerPosition
@@ -154,6 +154,240 @@ class MarketMaker:
         
         self.running = False
     
+    async def scan_wallet_and_redeem(self, limit: int = 10):
+        """
+        Scan Polygon wallet directly for conditional tokens from database-tracked positions.
+        Checks wallet balances for positions in the database and redeems winning shares.
+        
+        Args:
+            limit: Maximum number of recent positions to check (default: 10)
+        """
+        try:
+            logger.info("=" * 80)
+            logger.info(f"SCANNING POLYGON WALLET FOR REDEEMABLE CONDITIONAL TOKENS (past {limit} positions)")
+            logger.info("=" * 80)
+            
+            direct_wallet = self.pm.get_address_for_private_key()
+            logger.info(f"Wallet address: {direct_wallet}")
+            logger.info("")
+            
+            # Get recent positions from database (ordered by ID, most recent first)
+            # Note: Using ID as proxy for creation time since it auto-increments
+            session = self.db.SessionLocal()
+            try:
+                all_positions = session.query(RealMarketMakerPosition).order_by(
+                    RealMarketMakerPosition.id.desc()
+                ).limit(limit).all()
+                logger.info(f"Found {len(all_positions)} recent positions in database to check")
+                logger.info("")
+                
+                redeemable_count = 0
+                
+                for db_pos in all_positions:
+                    try:
+                        # Check wallet balances
+                        yes_balance = self.pm.get_conditional_token_balance(
+                            db_pos.yes_token_id,
+                            wallet_address=direct_wallet
+                        )
+                        no_balance = self.pm.get_conditional_token_balance(
+                            db_pos.no_token_id,
+                            wallet_address=direct_wallet
+                        )
+                        
+                        if yes_balance is None or no_balance is None:
+                            logger.warning(f"Could not check balances for {db_pos.market_slug}")
+                            continue
+                        
+                        if yes_balance == 0 and no_balance == 0:
+                            logger.debug(f"✓ {db_pos.market_slug}: No shares remaining")
+                            continue
+                        
+                        logger.info(f"📊 {db_pos.market_slug}:")
+                        logger.info(f"   YES shares: {yes_balance:.2f}, NO shares: {no_balance:.2f}")
+                        logger.info(f"   Status: {db_pos.position_status}, Winning side: {db_pos.winning_side}")
+                        
+                        # Create position object for redemption/merging
+                        position = MarketMakerPosition(
+                            market_slug=db_pos.market_slug,
+                            market={},  # Not needed for redemption
+                            condition_id=db_pos.condition_id,
+                            yes_token_id=db_pos.yes_token_id,
+                            no_token_id=db_pos.no_token_id,
+                            split_amount=db_pos.split_amount,
+                            yes_shares=yes_balance,
+                            no_shares=no_balance,
+                            yes_filled=(yes_balance == 0),
+                            no_filled=(no_balance == 0),
+                        )
+                        
+                        # Only merge/redeem if position is resolved (not during active market making)
+                        # The purpose of splitting is to sell each side separately, so we don't merge while active
+                        if db_pos.position_status == "resolved":
+                            # Case 1: Both YES and NO shares exist - merge equal amounts back to USDC
+                            if yes_balance > 0 and no_balance > 0:
+                                merge_amount = min(yes_balance, no_balance)
+                                if abs(yes_balance - no_balance) < 0.01:  # Essentially equal
+                                    logger.info(
+                                        f"   💰 Both sides exist in equal amounts ({merge_amount:.2f}). "
+                                        f"Merging back to ${merge_amount:.2f} USDC..."
+                                    )
+                                    loop = asyncio.get_event_loop()
+                                    merge_result = await loop.run_in_executor(
+                                        None,
+                                        self.pm.merge_positions,
+                                        db_pos.condition_id,
+                                        merge_amount
+                                    )
+                                    if merge_result:
+                                        logger.info(f"   ✅ Successfully merged {merge_amount:.2f} YES + NO → ${merge_amount:.2f} USDC")
+                                        redeemable_count += 1
+                                        # Update remaining balances
+                                        yes_balance -= merge_amount
+                                        no_balance -= merge_amount
+                                    else:
+                                        logger.error(f"   ❌ Failed to merge positions")
+                                else:
+                                    logger.info(
+                                        f"   💰 Unequal amounts (YES: {yes_balance:.2f}, NO: {no_balance:.2f}). "
+                                        f"Merging {merge_amount:.2f} equal amounts..."
+                                    )
+                                    loop = asyncio.get_event_loop()
+                                    merge_result = await loop.run_in_executor(
+                                        None,
+                                        self.pm.merge_positions,
+                                        db_pos.condition_id,
+                                        merge_amount
+                                    )
+                                    if merge_result:
+                                        logger.info(f"   ✅ Successfully merged {merge_amount:.2f} YES + NO → ${merge_amount:.2f} USDC")
+                                        redeemable_count += 1
+                                        yes_balance -= merge_amount
+                                        no_balance -= merge_amount
+                            
+                            # Case 2: Position is resolved and we know winning side - redeem winning shares
+                            if db_pos.winning_side:
+                            # Update position with remaining balances after merge
+                            position.yes_shares = yes_balance
+                            position.no_shares = no_balance
+                            position.yes_filled = (yes_balance == 0)
+                            position.no_filled = (no_balance == 0)
+                            
+                            logger.info(f"   Market is RESOLVED - redeeming winning shares...")
+                                await self._redeem_winning_shares(position, db_pos.winning_side)
+                                redeemable_count += 1
+                            else:
+                                logger.info(f"   Market resolved but winning_side not recorded - skipping redemption")
+                        elif yes_balance == 0 and no_balance == 0:
+                            logger.info(f"   ✓ All shares already redeemed/merged")
+                        else:
+                            logger.info(f"   Market still active (status: {db_pos.position_status}) - skipping merge/redemption")
+                            logger.info(f"   (Purpose of split is to sell each side separately during market making)")
+                        
+                        logger.info("")
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing {db_pos.market_slug}: {e}", exc_info=True)
+                        continue
+                
+            finally:
+                session.close()
+            
+            logger.info("=" * 80)
+            logger.info(f"SCAN COMPLETE: Processed {redeemable_count} positions with redeemable shares")
+            logger.info("=" * 80)
+            
+        except Exception as e:
+            logger.error(f"Error scanning wallet: {e}", exc_info=True)
+    
+    async def redeem_past_positions(self, condition_ids: Optional[List[str]] = None):
+        """
+        Scan wallet and redeem winning shares from past/resolved markets.
+        
+        Args:
+            condition_ids: Optional list of condition IDs to check. If None, checks all positions in database.
+        """
+        try:
+            logger.info("=" * 80)
+            logger.info("SCANNING WALLET FOR PAST POSITIONS TO REDEEM")
+            logger.info("=" * 80)
+            
+            # Get positions from database
+            session = self.db.SessionLocal()
+            try:
+                query = session.query(RealMarketMakerPosition).filter(
+                    RealMarketMakerPosition.position_status == "resolved"
+                )
+                
+                if condition_ids:
+                    query = query.filter(RealMarketMakerPosition.condition_id.in_(condition_ids))
+                
+                resolved_positions = query.all()
+                logger.info(f"Found {len(resolved_positions)} resolved positions in database")
+                
+                for db_pos in resolved_positions:
+                    try:
+                        # Check if shares still exist in wallet
+                        direct_wallet = self.pm.get_address_for_private_key()
+                        yes_balance = self.pm.get_conditional_token_balance(
+                            db_pos.yes_token_id, 
+                            wallet_address=direct_wallet
+                        )
+                        no_balance = self.pm.get_conditional_token_balance(
+                            db_pos.no_token_id,
+                            wallet_address=direct_wallet
+                        )
+                        
+                        if yes_balance is None or no_balance is None:
+                            logger.warning(f"Could not check balances for {db_pos.market_slug}")
+                            continue
+                        
+                        if yes_balance == 0 and no_balance == 0:
+                            logger.info(f"✓ {db_pos.market_slug}: No shares remaining (already redeemed)")
+                            continue
+                        
+                        logger.info(
+                            f"📊 {db_pos.market_slug}: YES={yes_balance:.2f}, NO={no_balance:.2f}, "
+                            f"winning_side={db_pos.winning_side}"
+                        )
+                        
+                        # Create position object for redemption
+                        position = MarketMakerPosition(
+                            market_slug=db_pos.market_slug,
+                            market={},  # Not needed for redemption
+                            condition_id=db_pos.condition_id,
+                            yes_token_id=db_pos.yes_token_id,
+                            no_token_id=db_pos.no_token_id,
+                            split_amount=db_pos.split_amount,
+                            yes_shares=yes_balance,
+                            no_shares=no_balance,
+                            yes_filled=(yes_balance == 0),
+                            no_filled=(no_balance == 0),
+                        )
+                        
+                        # Redeem shares
+                        if db_pos.winning_side:
+                            await self._redeem_winning_shares(position, db_pos.winning_side)
+                        else:
+                            logger.warning(
+                                f"⚠️ {db_pos.market_slug}: No winning_side recorded. "
+                                f"Cannot determine which shares to redeem."
+                            )
+                            
+                    except Exception as e:
+                        logger.error(f"Error processing {db_pos.market_slug}: {e}", exc_info=True)
+                        continue
+                
+            finally:
+                session.close()
+                
+            logger.info("=" * 80)
+            logger.info("FINISHED SCANNING PAST POSITIONS")
+            logger.info("=" * 80)
+            
+        except Exception as e:
+            logger.error(f"Error scanning past positions: {e}", exc_info=True)
+    
     async def start(self):
         """Start the market maker loop."""
         logger.info("=" * 80)
@@ -226,6 +460,15 @@ class MarketMaker:
             for market_slug, position in self.active_positions.items():
                 token_ids = [position.yes_token_id, position.no_token_id]
                 self.websocket_service.subscribe_tokens(token_ids, market_slug=market_slug)
+        
+        # On new deployment: scan and redeem past 10 positions
+        logger.info("")
+        logger.info("Scanning wallet for past positions to redeem (past 10)...")
+        try:
+            await self.scan_wallet_and_redeem(limit=10)
+        except Exception as e:
+            logger.error(f"Error scanning wallet for past positions: {e}", exc_info=True)
+        logger.info("")
         
         self.running = True
         
@@ -651,6 +894,23 @@ class MarketMaker:
         """Split USDC into YES + NO shares."""
         logger.info(f"Splitting ${self.config.split_amount:.2f} USDC into YES + NO shares...")
         
+        # Pre-check balance before attempting split
+        try:
+            current_balance = self.pm.get_usdc_balance()
+            if current_balance < self.config.split_amount:
+                logger.error(
+                    f"❌ Insufficient USDC balance for split: "
+                    f"have ${current_balance:.2f}, need ${self.config.split_amount:.2f}. "
+                    f"Skipping split for this market."
+                )
+                logger.info(
+                    f"💡 Transfer USDC to wallet: {self.pm.get_address_for_private_key()}"
+                )
+                return None
+            logger.info(f"✓ Balance check passed: ${current_balance:.2f} >= ${self.config.split_amount:.2f}")
+        except Exception as e:
+            logger.warning(f"Could not check balance before split: {e}. Proceeding anyway...")
+        
         try:
             # Call split_position synchronously (it's a blocking web3 call)
             # Run in executor to avoid blocking the event loop
@@ -731,9 +991,15 @@ class MarketMaker:
             await asyncio.sleep(5.0)
             
             # Verify shares are available on-chain
-            logger.info("🔍 Verifying YES and NO shares are available on-chain...")
-            yes_balance = self.pm.get_conditional_token_balance(position.yes_token_id)
-            no_balance = self.pm.get_conditional_token_balance(position.no_token_id)
+            # IMPORTANT: Split always goes to direct wallet (on-chain transaction), not proxy wallet
+            # So we must check the direct wallet address, not proxy wallet
+            direct_wallet_address = self.pm.get_address_for_private_key()
+            logger.info(
+                f"🔍 Verifying YES and NO shares are available on-chain "
+                f"(checking direct wallet: {direct_wallet_address[:10]}...{direct_wallet_address[-8:]})..."
+            )
+            yes_balance = self.pm.get_conditional_token_balance(position.yes_token_id, wallet_address=direct_wallet_address)
+            no_balance = self.pm.get_conditional_token_balance(position.no_token_id, wallet_address=direct_wallet_address)
             
             if yes_balance is None or no_balance is None:
                 logger.error("❌ Could not check conditional token balances - aborting order placement")
@@ -750,9 +1016,9 @@ class MarketMaker:
                     f"Shares may still be settling. Waiting 5 more seconds..."
                 )
                 await asyncio.sleep(5.0)
-                # Re-check after wait
-                yes_balance = self.pm.get_conditional_token_balance(position.yes_token_id)
-                no_balance = self.pm.get_conditional_token_balance(position.no_token_id)
+                # Re-check after wait (still checking direct wallet)
+                yes_balance = self.pm.get_conditional_token_balance(position.yes_token_id, wallet_address=direct_wallet_address)
+                no_balance = self.pm.get_conditional_token_balance(position.no_token_id, wallet_address=direct_wallet_address)
                 if yes_balance is None or no_balance is None:
                     logger.error("❌ Could not re-check conditional token balances - aborting order placement")
                     return
@@ -1770,6 +2036,9 @@ class MarketMaker:
             # Calculate payout for remaining shares
             await self._calculate_resolution_payout(position, winning_side, yes_highest_bid, no_highest_bid)
             
+            # Automatically redeem winning shares
+            await self._redeem_winning_shares(position, winning_side)
+            
             # Close position
             await self._close_position(position, reason="resolved")
             
@@ -1844,6 +2113,129 @@ class MarketMaker:
                     
         except Exception as e:
             logger.error(f"Error calculating resolution payout: {e}", exc_info=True)
+    
+    async def _redeem_winning_shares(self, position: MarketMakerPosition, winning_side: str):
+        """
+        Automatically redeem winning shares after market resolution.
+        
+        Strategy (only after market resolution):
+        1. If both YES and NO shares remain in equal amounts: merge them back to USDC
+        2. If only winning side shares remain: sell them at $0.99 (should fill immediately after resolution)
+        3. If only losing side shares remain: do nothing (worthless)
+        
+        Note: This is ONLY called after market resolution. We don't merge during active market making
+        because the purpose of splitting is to sell each side separately.
+        """
+        try:
+            # Calculate remaining shares (shares that weren't sold during market making)
+            yes_remaining = position.yes_shares if not position.yes_filled else 0.0
+            no_remaining = position.no_shares if not position.no_filled else 0.0
+            
+            logger.info(
+                f"🔄 Attempting to redeem shares for {position.market_slug} (AFTER RESOLUTION): "
+                f"winning_side={winning_side}, yes_remaining={yes_remaining:.2f}, no_remaining={no_remaining:.2f}"
+            )
+            
+            # Case 1: Both sides remain unsold - merge equal amounts back to USDC
+            # This only happens if neither side sold during market making
+            if yes_remaining > 0 and no_remaining > 0:
+                merge_amount = min(yes_remaining, no_remaining)
+                if abs(yes_remaining - no_remaining) < 0.01:  # Essentially equal
+                    logger.info(
+                        f"💰 Both sides remain unsold in equal amounts ({merge_amount:.2f}). "
+                        f"Merging back to ${merge_amount:.2f} USDC..."
+                    )
+                    loop = asyncio.get_event_loop()
+                    merge_result = await loop.run_in_executor(
+                        None,
+                        self.pm.merge_positions,
+                        position.condition_id,
+                        merge_amount
+                    )
+                    if merge_result:
+                        logger.info(f"✅ Successfully merged {merge_amount:.2f} YES + NO → ${merge_amount:.2f} USDC")
+                        # Update remaining shares
+                        yes_remaining -= merge_amount
+                        no_remaining -= merge_amount
+                    else:
+                        logger.error(f"❌ Failed to merge positions")
+                else:
+                    logger.info(
+                        f"⚠️ Unequal amounts (YES: {yes_remaining:.2f}, NO: {no_remaining:.2f}). "
+                        f"Will merge {merge_amount:.2f} and handle remainder separately."
+                    )
+                    loop = asyncio.get_event_loop()
+                    merge_result = await loop.run_in_executor(
+                        None,
+                        self.pm.merge_positions,
+                        position.condition_id,
+                        merge_amount
+                    )
+                    if merge_result:
+                        logger.info(f"✅ Successfully merged {merge_amount:.2f} YES + NO → ${merge_amount:.2f} USDC")
+                        yes_remaining -= merge_amount
+                        no_remaining -= merge_amount
+            
+            # Case 2: Only winning side remains unsold - sell at $0.99 (should fill immediately)
+            if winning_side == "YES" and yes_remaining > 0:
+                logger.info(
+                    f"💰 YES won - selling {yes_remaining:.2f} YES shares at $0.99 "
+                    f"(should fill immediately after resolution)..."
+                )
+                try:
+                    # Place sell order at $0.99 (just below $1.00 to ensure fill)
+                    loop = asyncio.get_event_loop()
+                    order_result = await loop.run_in_executor(
+                        None,
+                        self.pm.execute_order,
+                        price=0.99,
+                        size=yes_remaining,
+                        side="SELL",
+                        token_id=position.yes_token_id
+                    )
+                    if order_result and order_result.get("order_id"):
+                        logger.info(f"✅ Placed sell order for {yes_remaining:.2f} YES shares: {order_result.get('order_id')}")
+                    else:
+                        logger.warning(f"⚠️ Failed to place sell order for YES shares")
+                except Exception as e:
+                    logger.error(f"❌ Error selling YES shares: {e}", exc_info=True)
+            
+            elif winning_side == "NO" and no_remaining > 0:
+                logger.info(
+                    f"💰 NO won - selling {no_remaining:.2f} NO shares at $0.99 "
+                    f"(should fill immediately after resolution)..."
+                )
+                try:
+                    # Place sell order at $0.99 (just below $1.00 to ensure fill)
+                    loop = asyncio.get_event_loop()
+                    order_result = await loop.run_in_executor(
+                        None,
+                        self.pm.execute_order,
+                        price=0.99,
+                        size=no_remaining,
+                        side="SELL",
+                        token_id=position.no_token_id
+                    )
+                    if order_result and order_result.get("order_id"):
+                        logger.info(f"✅ Placed sell order for {no_remaining:.2f} NO shares: {order_result.get('order_id')}")
+                    else:
+                        logger.warning(f"⚠️ Failed to place sell order for NO shares")
+                except Exception as e:
+                    logger.error(f"❌ Error selling NO shares: {e}", exc_info=True)
+            
+            # Case 3: Only losing side remains - do nothing (worthless)
+            if (winning_side == "YES" and no_remaining > 0) or (winning_side == "NO" and yes_remaining > 0):
+                losing_shares = no_remaining if winning_side == "YES" else yes_remaining
+                logger.info(
+                    f"💔 Losing side shares remain ({losing_shares:.2f} {'NO' if winning_side == 'YES' else 'YES'}), "
+                    f"but they're worthless. No action needed."
+                )
+            
+            if yes_remaining == 0 and no_remaining == 0:
+                logger.info(f"✅ All shares redeemed for {position.market_slug}")
+                
+        except Exception as e:
+            logger.error(f"Error redeeming winning shares: {e}", exc_info=True)
     
     async def _close_position(self, position: MarketMakerPosition, reason: str):
         """Close a position."""

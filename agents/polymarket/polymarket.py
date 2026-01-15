@@ -89,11 +89,12 @@ class Polymarket:
             {"inputs": [{"internalType": "address", "name": "operator", "type": "address"}, {"internalType": "bool", "name": "approved", "type": "bool"}], "name": "setApprovalForAll", "outputs": [], "stateMutability": "nonpayable", "type": "function"}
         ]"""
         
-        # CTF contract ABI with splitPosition function
+        # CTF contract ABI with splitPosition and mergePositions functions
         self.ctf_abi = """[
             {"inputs": [{"internalType": "address", "name": "account", "type": "address"}, {"internalType": "uint256", "name": "id", "type": "uint256"}], "name": "balanceOf", "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
             {"inputs": [{"internalType": "address", "name": "operator", "type": "address"}, {"internalType": "bool", "name": "approved", "type": "bool"}], "name": "setApprovalForAll", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
-            {"inputs": [{"internalType": "address", "name": "collateralToken", "type": "address"}, {"internalType": "bytes32", "name": "parentCollectionId", "type": "bytes32"}, {"internalType": "bytes32", "name": "conditionId", "type": "bytes32"}, {"internalType": "uint256[]", "name": "partition", "type": "uint256[]"}, {"internalType": "uint256", "name": "amount", "type": "uint256"}], "name": "splitPosition", "outputs": [], "stateMutability": "nonpayable", "type": "function"}
+            {"inputs": [{"internalType": "address", "name": "collateralToken", "type": "address"}, {"internalType": "bytes32", "name": "parentCollectionId", "type": "bytes32"}, {"internalType": "bytes32", "name": "conditionId", "type": "bytes32"}, {"internalType": "uint256[]", "name": "partition", "type": "uint256[]"}, {"internalType": "uint256", "name": "amount", "type": "uint256"}], "name": "splitPosition", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+            {"inputs": [{"internalType": "address", "name": "collateralToken", "type": "address"}, {"internalType": "bytes32", "name": "parentCollectionId", "type": "bytes32"}, {"internalType": "bytes32", "name": "conditionId", "type": "bytes32"}, {"internalType": "uint256[]", "name": "partition", "type": "uint256[]"}, {"internalType": "uint256", "name": "amount", "type": "uint256"}], "name": "mergePositions", "outputs": [], "stateMutability": "nonpayable", "type": "function"}
         ]"""
 
         # USDC.e (bridged USDC) - required by Polymarket CTF contract
@@ -1237,6 +1238,10 @@ class Polymarket:
         """
         try:
             wallet_address = self.get_address_for_private_key()
+            logger.info(
+                f"🔧 Splitting position: wallet={wallet_address[:10]}...{wallet_address[-8:]}, "
+                f"amount=${amount_usdc:.2f}, condition_id={condition_id[:20]}..."
+            )
             
             # Convert condition_id to bytes32
             # Condition ID from API can be:
@@ -1412,6 +1417,138 @@ class Polymarket:
                 
         except Exception as e:
             logger.error(f"❌❌❌ Error splitting position: {e}", exc_info=True)
+            logger.error(f"   Full exception details logged above")
+            return None
+    
+    def merge_positions(
+        self,
+        condition_id: str,
+        amount_usdc: float
+    ) -> Optional[Dict]:
+        """
+        Merge equal amounts of YES + NO shares back into USDC using CTF contract's mergePositions function.
+        
+        This atomically converts X YES + X NO shares back into $X USDC in one transaction.
+        Requires equal amounts of YES and NO shares.
+        
+        Args:
+            condition_id: Condition ID (bytes32) from market data (market.conditionId)
+            amount_usdc: Amount of shares to merge (will convert X YES + X NO → $X USDC)
+            
+        Returns:
+            Transaction receipt dict, or None if error
+        """
+        try:
+            wallet_address = self.get_address_for_private_key()
+            logger.info(
+                f"🔧 Merging positions: wallet={wallet_address[:10]}...{wallet_address[-8:]}, "
+                f"amount=${amount_usdc:.2f} (will merge {amount_usdc:.2f} YES + {amount_usdc:.2f} NO → ${amount_usdc:.2f} USDC), "
+                f"condition_id={condition_id[:20]}..."
+            )
+            
+            # Convert condition_id to bytes32 (same logic as split_position)
+            if isinstance(condition_id, str):
+                condition_id_str = condition_id.strip()
+                if condition_id_str.startswith('0x'):
+                    hex_str = condition_id_str[2:]
+                    hex_str = hex_str.zfill(64)
+                    condition_id_bytes32 = bytes.fromhex(hex_str)
+                elif all(c in '0123456789abcdefABCDEF' for c in condition_id_str):
+                    hex_str = condition_id_str.zfill(64)
+                    condition_id_bytes32 = bytes.fromhex(hex_str)
+                else:
+                    condition_id_int = int(condition_id_str)
+                    condition_id_bytes32 = condition_id_int.to_bytes(32, byteorder='big')
+            else:
+                condition_id_int = int(condition_id)
+                condition_id_bytes32 = condition_id_int.to_bytes(32, byteorder='big')
+            
+            # Ensure it's exactly 32 bytes
+            if len(condition_id_bytes32) < 32:
+                condition_id_bytes32 = condition_id_bytes32.rjust(32, b'\x00')
+            elif len(condition_id_bytes32) > 32:
+                condition_id_bytes32 = condition_id_bytes32[-32:]
+            
+            # Convert amount to 6 decimals (USDC uses 6 decimals)
+            amount_raw = int(amount_usdc * 1e6)
+            
+            # Build mergePositions transaction
+            # Parameters same as splitPosition:
+            # - collateralToken: USDC address
+            # - parentCollectionId: bytes32(0) for Polymarket
+            # - conditionId: bytes32 condition ID
+            # - partition: [1, 2] for binary YES/NO markets
+            # - amount: amount in USDC (6 decimals)
+            
+            parent_collection_id = b'\x00' * 32  # bytes32(0) for Polymarket
+            partition = [1, 2]  # Binary market: YES (1) and NO (2)
+            
+            logger.info(
+                f"Merging {amount_usdc:.2f} YES + {amount_usdc:.2f} NO shares back to ${amount_usdc:.2f} USDC "
+                f"(condition_id: {condition_id[:20]}...)"
+            )
+            
+            # Build transaction
+            nonce = self.web3.eth.get_transaction_count(wallet_address)
+            
+            merge_txn = self.ctf.functions.mergePositions(
+                self.usdc_address,
+                parent_collection_id,
+                condition_id_bytes32,
+                partition,
+                amount_raw
+            ).build_transaction({
+                "chainId": self.chain_id,
+                "from": wallet_address,
+                "nonce": nonce,
+                "gas": 500000,  # Reasonable gas limit for mergePositions
+                "gasPrice": self.web3.eth.gas_price
+            })
+            
+            # Sign transaction
+            signed_txn = self.web3.eth.account.sign_transaction(
+                merge_txn, private_key=self.private_key
+            )
+            
+            # Send transaction
+            logger.info("Sending mergePositions transaction...")
+            raw_tx = getattr(signed_txn, 'raw_transaction', None) or getattr(signed_txn, 'rawTransaction', None)
+            if not raw_tx:
+                raise ValueError("Could not extract raw transaction from signed transaction")
+            tx_hash = self.web3.eth.send_raw_transaction(raw_tx)
+            logger.info(f"Transaction sent: {tx_hash.hex()}")
+            
+            # Wait for receipt
+            logger.info(f"Waiting for transaction receipt (timeout: 300s)...")
+            logger.info(f"Transaction hash: {tx_hash.hex()}")
+            logger.info(f"Polygonscan: https://polygonscan.com/tx/{tx_hash.hex()}")
+            
+            try:
+                receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+            except Exception as e:
+                logger.warning(f"Timeout waiting for receipt, trying direct fetch: {e}")
+                receipt = self.web3.eth.get_transaction_receipt(tx_hash)
+            
+            if receipt.status == 1:
+                logger.info(f"✅✅✅ Merge positions successful! ✅✅✅")
+                logger.info(f"   Transaction: {tx_hash.hex()}")
+                logger.info(f"   Merged {amount_usdc:.2f} YES + {amount_usdc:.2f} NO → ${amount_usdc:.2f} USDC")
+                logger.info(f"   Block: {receipt.blockNumber}, Gas used: {receipt.gasUsed}")
+                return {
+                    "transaction_hash": tx_hash.hex(),
+                    "receipt": receipt,
+                    "status": "success",
+                    "amount_usdc": amount_usdc
+                }
+            else:
+                logger.error(f"❌❌❌ Merge positions failed! ❌❌❌")
+                logger.error(f"   Transaction: {tx_hash.hex()}")
+                logger.error(f"   Receipt status: {receipt.status} (0 = failed, 1 = success)")
+                logger.error(f"   Check transaction: https://polygonscan.com/tx/{tx_hash.hex()}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌❌❌ Error merging positions: {e}", exc_info=True)
             logger.error(f"   Full exception details logged above")
             return None
     
