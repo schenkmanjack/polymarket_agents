@@ -472,6 +472,18 @@ class Polymarket:
             f"fee_rate_bps={fee_rate_bps}, order_type={order_type}"
         )
         
+        # Get appropriate client (direct wallet for conditional token SELL orders)
+        client_to_use = self._get_client_for_order(side, token_id)
+        if not client_to_use:
+            raise ValueError("No CLOB client available for placing order")
+        
+        if client_to_use == self.direct_wallet_client:
+            logger.info(f"  Using DIRECT WALLET client (shares are in direct wallet)")
+        elif client_to_use == self.client and self.proxy_wallet_address:
+            logger.info(f"  Using PROXY WALLET client (gasless trading)")
+        else:
+            logger.info(f"  Using standard client")
+        
         # If fee_rate_bps not specified, try with default (0) and auto-detect from error
         if fee_rate_bps is None:
             if auto_detect_fee:
@@ -481,7 +493,7 @@ class Polymarket:
                     order_args = OrderArgs(price=price, size=size, side=side, token_id=token_id, fee_rate_bps=0)
                     logger.debug(f"  OrderArgs created: {order_args}")
                     logger.debug(f"  Calling client.create_order()...")
-                    signed_order = self.client.create_order(order_args)
+                    signed_order = client_to_use.create_order(order_args)
                     logger.debug(f"  Signed order created, calling client.post_order() with order_type={order_type}...")
                     response = client_to_use.post_order(signed_order, order_type)
                     logger.info(f"  ✅ Order posted successfully, response: {response}")
