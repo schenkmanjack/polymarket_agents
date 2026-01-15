@@ -1052,8 +1052,11 @@ class MarketMaker:
                     return
             
             # Ensure conditional token allowances are set (required for selling)
+            # IMPORTANT: Check allowances for DIRECT wallet (where shares are), not proxy wallet
             logger.info("🔍 Checking conditional token allowances for exchange contracts...")
-            allowances_ok = self.pm.ensure_conditional_token_allowances()
+            logger.info(f"   Checking allowances for DIRECT wallet: {direct_wallet_address[:10]}...{direct_wallet_address[-8:]}")
+            logger.info(f"   (Shares are in direct wallet, so allowances must be set for direct wallet)")
+            allowances_ok = self.pm.ensure_conditional_token_allowances(wallet_address=direct_wallet_address)
             if not allowances_ok:
                 logger.warning(
                     "⚠️ Conditional token allowances not set. This may cause order placement to fail. "

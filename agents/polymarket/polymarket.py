@@ -1040,7 +1040,7 @@ class Polymarket:
             )
             return None
     
-    def ensure_conditional_token_allowances(self) -> bool:
+    def ensure_conditional_token_allowances(self, wallet_address: Optional[str] = None) -> bool:
         """
         Ensure conditional token allowances are set for all required exchange contracts.
         This is critical for selling shares - the exchange contracts need permission to transfer your conditional tokens.
@@ -1050,14 +1050,22 @@ class Polymarket:
         - 0xC5d563A36AE78145C45a50134d48A1215220f80a (Neg risk markets)
         - 0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296 (Neg risk adapter)
         
+        Args:
+            wallet_address: Optional wallet address to check. If None, uses direct wallet (where shares are).
+                          IMPORTANT: Shares from split are in direct wallet, so we must check direct wallet allowances.
+        
         Returns:
             True if all allowances are set (or if using proxy wallet where this may not be needed),
             False if allowances need to be set but couldn't be set
         """
         try:
-            # If using proxy wallet (signature_type=2), allowances may be handled differently
-            # For now, we'll check and log, but not fail if using proxy wallet
-            wallet_address = self.proxy_wallet_address or self.get_address_for_private_key()
+            # IMPORTANT: Shares from split are in DIRECT wallet, so we must check direct wallet allowances
+            # Even if using proxy wallet for trading, the shares are in direct wallet
+            if wallet_address:
+                address_to_check = wallet_address
+            else:
+                # Default to direct wallet (where shares are)
+                address_to_check = self.get_address_for_private_key()
             
             exchange_addresses = [
                 ("0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E", "Main exchange"),
@@ -1103,31 +1111,43 @@ class Polymarket:
                 missing = [name for name, addr, approved in approval_results if approved is False]
                 missing_addresses = [addr for name, addr, approved in approval_results if approved is False]
                 
-                # For non-proxy wallets, try to set approvals automatically
-                if not self.proxy_wallet_address and missing_addresses:
-                    logger.info(
-                        f"🔧 Attempting to set conditional token allowances for: {', '.join(missing)}"
-                    )
-                    all_set_successfully = True
-                    for exchange_addr, exchange_name in exchange_addresses:
-                        if exchange_addr in missing_addresses:
-                            if self._set_conditional_token_approval(exchange_addr, exchange_name):
-                                logger.info(f"✅ Successfully set approval for {exchange_name}")
-                            else:
-                                logger.error(f"❌ Failed to set approval for {exchange_name}")
-                                all_set_successfully = False
-                    
-                    # Re-check approvals after setting them
-                    if all_set_successfully:
-                        logger.info("🔄 Re-checking conditional token allowances after setting them...")
-                        all_approved = True
+                # Try to set approvals automatically for the wallet where shares are (direct wallet)
+                # Even if using proxy wallet for trading, shares are in direct wallet, so we need direct wallet allowances
+                if missing_addresses:
+                    # Check if we're checking direct wallet or proxy wallet
+                    is_direct_wallet = (address_to_check == self.get_address_for_private_key())
+                    if is_direct_wallet or not self.proxy_wallet_address:
+                        logger.info(
+                            f"🔧 Attempting to set conditional token allowances for: {', '.join(missing)} "
+                            f"(wallet: {address_to_check[:10]}...{address_to_check[-8:]})"
+                        )
+                        all_set_successfully = True
                         for exchange_addr, exchange_name in exchange_addresses:
-                            is_approved = self.check_conditional_token_allowance(exchange_addr, wallet_address)
-                            if is_approved is False:
-                                all_approved = False
-                                logger.warning(f"  ⚠️ Approval still not set for {exchange_name}")
-                            elif is_approved is True:
-                                logger.info(f"  ✓ Approval confirmed for {exchange_name}")
+                            if exchange_addr in missing_addresses:
+                                if self._set_conditional_token_approval(exchange_addr, exchange_name, wallet_address=address_to_check):
+                                    logger.info(f"✅ Successfully set approval for {exchange_name}")
+                                else:
+                                    logger.error(f"❌ Failed to set approval for {exchange_name}")
+                                    all_set_successfully = False
+                        
+                        # Re-check approvals after setting them
+                        if all_set_successfully:
+                            logger.info("🔄 Re-checking conditional token allowances after setting them...")
+                            all_approved = True
+                            for exchange_addr, exchange_name in exchange_addresses:
+                                is_approved = self.check_conditional_token_allowance(exchange_addr, address_to_check)
+                                if is_approved is False:
+                                    all_approved = False
+                                    logger.warning(f"  ⚠️ Approval still not set for {exchange_name}")
+                                elif is_approved is True:
+                                    logger.info(f"  ✓ Approval confirmed for {exchange_name}")
+                    else:
+                        logger.warning(
+                            f"⚠️ Cannot auto-set allowances for proxy wallet. "
+                            f"Shares are in direct wallet ({self.get_address_for_private_key()[:10]}...), "
+                            f"but checking proxy wallet ({address_to_check[:10]}...). "
+                            f"Please set allowances manually for direct wallet."
+                        )
                 
                 if all_approved:
                     logger.info("✅ All conditional token allowances are set - ready for selling")
@@ -1143,13 +1163,14 @@ class Polymarket:
             logger.error(f"❌ Error ensuring conditional token allowances: {e}", exc_info=True)
             return False
     
-    def _set_conditional_token_approval(self, exchange_address: str, exchange_name: str) -> bool:
+    def _set_conditional_token_approval(self, exchange_address: str, exchange_name: str, wallet_address: Optional[str] = None) -> bool:
         """
         Set conditional token approval for a specific exchange contract.
         
         Args:
             exchange_address: Exchange contract address to approve
             exchange_name: Human-readable name for logging
+            wallet_address: Optional wallet address to set approval for. If None, uses direct wallet.
         
         Returns:
             True if approval was set successfully, False otherwise
@@ -1159,10 +1180,23 @@ class Polymarket:
                 logger.error("Cannot set approval: no private key available")
                 return False
             
-            wallet_address = self.get_address_for_private_key()
+            # Use provided wallet address or default to direct wallet
+            if wallet_address is None:
+                wallet_address = self.get_address_for_private_key()
+            
+            # We can only sign transactions with the direct wallet's private key
+            signer_address = self.get_address_for_private_key()
+            if wallet_address != signer_address:
+                logger.warning(
+                    f"⚠️ Cannot set approval for {wallet_address[:10]}... using different private key. "
+                    f"Only can set approval for direct wallet {signer_address[:10]}..."
+                )
+                return False
+            
             logger.info(
                 f"🔧 Setting conditional token approval for {exchange_name} "
-                f"({exchange_address[:10]}...{exchange_address[-8:]})"
+                f"({exchange_address[:10]}...{exchange_address[-8:]}) "
+                f"for wallet {wallet_address[:10]}...{wallet_address[-8:]}"
             )
             
             # Build transaction
