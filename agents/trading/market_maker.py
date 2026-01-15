@@ -319,6 +319,90 @@ class MarketMaker:
         except Exception as e:
             logger.error(f"Error scanning wallet: {e}", exc_info=True)
     
+    async def _merge_resolved_positions_for_capital(self, limit: int = 20):
+        """
+        Merge resolved positions to free up USDC capital when balance is low.
+        This is called before attempting a new split if balance is insufficient.
+        
+        Args:
+            limit: Maximum number of recent positions to check (default: 20)
+        """
+        try:
+            logger.info("=" * 80)
+            logger.info("MERGING RESOLVED POSITIONS TO FREE UP USDC CAPITAL")
+            logger.info("=" * 80)
+            
+            direct_wallet = self.pm.get_address_for_private_key()
+            
+            # Get resolved positions from database
+            session = self.db.SessionLocal()
+            try:
+                resolved_positions = session.query(RealMarketMakerPosition).filter(
+                    RealMarketMakerPosition.position_status == "resolved"
+                ).order_by(
+                    RealMarketMakerPosition.id.desc()
+                ).limit(limit).all()
+                
+                logger.info(f"Found {len(resolved_positions)} resolved positions to check for merging")
+                
+                merged_count = 0
+                total_usdc_freed = 0.0
+                
+                for db_pos in resolved_positions:
+                    try:
+                        # Check wallet balances
+                        yes_balance = self.pm.get_conditional_token_balance(
+                            db_pos.yes_token_id,
+                            wallet_address=direct_wallet
+                        )
+                        no_balance = self.pm.get_conditional_token_balance(
+                            db_pos.no_token_id,
+                            wallet_address=direct_wallet
+                        )
+                        
+                        if yes_balance is None or no_balance is None:
+                            continue
+                        
+                        if yes_balance == 0 and no_balance == 0:
+                            continue
+                        
+                        # Merge equal amounts of YES + NO back to USDC
+                        if yes_balance > 0 and no_balance > 0:
+                            merge_amount = min(yes_balance, no_balance)
+                            logger.info(
+                                f"💰 Merging {db_pos.market_slug}: "
+                                f"{merge_amount:.2f} YES + {merge_amount:.2f} NO → ${merge_amount:.2f} USDC"
+                            )
+                            
+                            loop = asyncio.get_event_loop()
+                            merge_result = await loop.run_in_executor(
+                                None,
+                                self.pm.merge_positions,
+                                db_pos.condition_id,
+                                merge_amount
+                            )
+                            
+                            if merge_result:
+                                logger.info(f"   ✅ Successfully merged → ${merge_amount:.2f} USDC freed")
+                                merged_count += 1
+                                total_usdc_freed += merge_amount
+                            else:
+                                logger.warning(f"   ❌ Failed to merge")
+                        
+                    except Exception as e:
+                        logger.error(f"Error merging {db_pos.market_slug}: {e}", exc_info=True)
+                        continue
+                
+                logger.info("=" * 80)
+                logger.info(f"MERGE COMPLETE: Merged {merged_count} positions, freed ${total_usdc_freed:.2f} USDC")
+                logger.info("=" * 80)
+                
+            finally:
+                session.close()
+                
+        except Exception as e:
+            logger.error(f"Error merging resolved positions for capital: {e}", exc_info=True)
+    
     async def redeem_past_positions(self, condition_ids: Optional[List[str]] = None):
         """
         Scan wallet and redeem winning shares from past/resolved markets.
@@ -836,6 +920,27 @@ class MarketMaker:
             logger.info(f"Found new BTC 1h market: {market_slug}")
             logger.info(f"  Question: {market.get('question', 'N/A')}")
             logger.info(f"  Condition ID: {condition_id}")
+            
+            # Check balance before attempting split - merge resolved positions if needed
+            try:
+                current_balance = self.pm.get_usdc_balance()
+                if current_balance < self.config.split_amount:
+                    logger.info(
+                        f"💰 Insufficient USDC balance: ${current_balance:.2f} < ${self.config.split_amount:.2f}. "
+                        f"Attempting to merge resolved positions to free up capital..."
+                    )
+                    await self._merge_resolved_positions_for_capital()
+                    # Re-check balance after merging
+                    new_balance = self.pm.get_usdc_balance()
+                    logger.info(f"💰 Balance after merge attempt: ${new_balance:.2f}")
+                    if new_balance < self.config.split_amount:
+                        logger.warning(
+                            f"⚠️ Still insufficient balance after merge: ${new_balance:.2f} < ${self.config.split_amount:.2f}. "
+                            f"Skipping this market."
+                        )
+                        return
+            except Exception as e:
+                logger.warning(f"Could not check/merge before split: {e}. Proceeding anyway...")
             
             # Subscribe to tokens for WebSocket orderbook updates
             if self.websocket_service:
