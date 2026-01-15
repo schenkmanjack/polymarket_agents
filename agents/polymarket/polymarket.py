@@ -1122,23 +1122,41 @@ class Polymarket:
                             f"(wallet: {address_to_check[:10]}...{address_to_check[-8:]})"
                         )
                         all_set_successfully = True
-                        for exchange_addr, exchange_name in exchange_addresses:
+                        import time
+                        for idx, (exchange_addr, exchange_name) in enumerate(exchange_addresses):
                             if exchange_addr in missing_addresses:
-                                if self._set_conditional_token_approval(exchange_addr, exchange_name, wallet_address=address_to_check):
+                                # Small delay between approval transactions to allow previous one to propagate
+                                if idx > 0:
+                                    logger.info(f"⏳ Waiting 3 seconds before next approval transaction (to allow previous to propagate)...")
+                                    time.sleep(3)
+                                
+                                logger.info(f"🔧 Setting approval for {exchange_name}...")
+                                approval_result = self._set_conditional_token_approval(exchange_addr, exchange_name, wallet_address=address_to_check)
+                                if approval_result:
                                     logger.info(f"✅ Successfully set approval for {exchange_name}")
+                                    # Small delay after successful approval to allow blockchain state to update
+                                    if idx < len([a for a in exchange_addresses if a[0] in missing_addresses]) - 1:
+                                        logger.info(f"⏳ Waiting 2 seconds for blockchain state to update...")
+                                        time.sleep(2)
                                 else:
                                     logger.error(f"❌ Failed to set approval for {exchange_name}")
+                                    logger.error(f"   This approval is required for placing sell orders. Please check the transaction above.")
                                     all_set_successfully = False
+                                    # Continue trying other approvals even if one fails
                         
-                        # Re-check approvals after setting them
+                        # Re-check approvals after setting them (with a small delay to allow blockchain to update)
                         if all_set_successfully:
+                            logger.info("⏳ Waiting 3 seconds for approvals to propagate on blockchain...")
+                            import time
+                            time.sleep(3)
+                            
                             logger.info("🔄 Re-checking conditional token allowances after setting them...")
                             all_approved = True
                             for exchange_addr, exchange_name in exchange_addresses:
                                 is_approved = self.check_conditional_token_allowance(exchange_addr, address_to_check)
                                 if is_approved is False:
                                     all_approved = False
-                                    logger.warning(f"  ⚠️ Approval still not set for {exchange_name}")
+                                    logger.warning(f"  ⚠️ Approval still not set for {exchange_name} - transaction may still be pending")
                                 elif is_approved is True:
                                     logger.info(f"  ✓ Approval confirmed for {exchange_name}")
                     else:
@@ -1200,7 +1218,9 @@ class Polymarket:
             )
             
             # Build transaction
-            nonce = self.web3.eth.get_transaction_count(wallet_address)
+            # Get nonce with 'pending' to include pending transactions
+            nonce = self.web3.eth.get_transaction_count(wallet_address, 'pending')
+            logger.debug(f"   Using nonce: {nonce} for approval transaction")
             
             approval_txn = self.ctf.functions.setApprovalForAll(
                 exchange_address, True
@@ -1226,26 +1246,43 @@ class Polymarket:
             logger.info(f"Polygonscan: https://polygonscan.com/tx/{tx_hash.hex()}")
             
             # Wait for receipt
+            logger.info(f"⏳ Waiting for transaction receipt (timeout: 300s)...")
             try:
                 receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+                logger.info(f"✅ Transaction receipt received! Status: {receipt.status}")
             except Exception as e:
-                logger.warning(f"Timeout waiting for receipt, trying direct fetch: {e}")
-                receipt = self.web3.eth.get_transaction_receipt(tx_hash)
+                logger.warning(f"⚠️ Timeout waiting for receipt, trying direct fetch: {e}")
+                try:
+                    receipt = self.web3.eth.get_transaction_receipt(tx_hash)
+                    logger.info(f"✅ Retrieved receipt directly! Status: {receipt.status}")
+                except Exception as get_error:
+                    logger.error(
+                        f"❌ Could not retrieve transaction receipt: {get_error}. "
+                        f"Transaction may still be pending. Check Polygonscan: https://polygonscan.com/tx/{tx_hash.hex()}"
+                    )
+                    return False
             
             if receipt.status == 1:
                 logger.info(
-                    f"✅ Successfully set conditional token approval for {exchange_name}. "
-                    f"Transaction: {tx_hash.hex()}"
+                    f"✅✅✅ Successfully set conditional token approval for {exchange_name}! ✅✅✅"
                 )
+                logger.info(f"   Transaction: {tx_hash.hex()}")
+                logger.info(f"   Block: {receipt.blockNumber}, Gas used: {receipt.gasUsed}")
                 return True
             else:
                 logger.error(
                     f"❌ Failed to set conditional token approval for {exchange_name}. "
-                    f"Transaction status: {receipt.status}"
+                    f"Transaction status: {receipt.status} (0 = failed, 1 = success)"
                 )
+                logger.error(f"   Transaction: {tx_hash.hex()}")
+                logger.error(f"   Polygonscan: https://polygonscan.com/tx/{tx_hash.hex()}")
                 return False
                 
         except Exception as e:
+            logger.error(
+                f"❌ Error setting conditional token approval for {exchange_name}: {e}",
+                exc_info=True
+            )
             logger.error(
                 f"❌ Error setting conditional token approval for {exchange_name}: {e}",
                 exc_info=True

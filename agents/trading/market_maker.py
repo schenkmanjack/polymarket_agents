@@ -1157,10 +1157,15 @@ class MarketMaker:
             logger.info(f"   (Shares are in direct wallet, so allowances must be set for direct wallet)")
             allowances_ok = self.pm.ensure_conditional_token_allowances(wallet_address=direct_wallet_address)
             if not allowances_ok:
-                logger.warning(
-                    "⚠️ Conditional token allowances not set. This may cause order placement to fail. "
-                    "The code will attempt to place orders anyway, but they may fail with 'not enough balance / allowance'."
+                logger.error(
+                    "❌ Conditional token allowances NOT set. Cannot place sell orders. "
+                    "Please check the approval transactions above and ensure they completed successfully."
                 )
+                logger.error(
+                    "   Orders will fail with 'not enough balance / allowance' error. "
+                    "Aborting order placement until allowances are set."
+                )
+                return
             
             # Get orderbook for YES side (NO should be symmetric)
             yes_orderbook = fetch_orderbook(position.yes_token_id)
