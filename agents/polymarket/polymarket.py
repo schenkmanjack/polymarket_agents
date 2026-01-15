@@ -1265,12 +1265,31 @@ class Polymarket:
             logger.info(f"Transaction sent: {tx_hash.hex()}")
             
             # Wait for receipt
-            logger.info("Waiting for transaction receipt...")
-            receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+            logger.info(f"Waiting for transaction receipt (timeout: 300s)...")
+            logger.info(f"Transaction hash: {tx_hash.hex()}")
+            logger.info(f"Polygonscan: https://polygonscan.com/tx/{tx_hash.hex()}")
+            
+            try:
+                receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+                logger.info(f"✅ Transaction receipt received! Status: {receipt.status}")
+            except Exception as receipt_error:
+                logger.error(f"❌ Error waiting for transaction receipt: {receipt_error}")
+                logger.warning(f"⚠️ Attempting to check transaction status directly...")
+                # Try to get receipt directly (might have been mined but wait timed out)
+                try:
+                    receipt = self.web3.eth.get_transaction_receipt(tx_hash)
+                    logger.info(f"✅ Retrieved receipt directly! Status: {receipt.status}")
+                except Exception as get_error:
+                    logger.error(f"❌ Could not retrieve receipt: {get_error}")
+                    logger.error(f"❌ Split transaction may have failed or is still pending")
+                    logger.info(f"💡 Check transaction status manually: https://polygonscan.com/tx/{tx_hash.hex()}")
+                    return None
             
             if receipt.status == 1:
-                logger.info(f"✅ Split position successful! Transaction: {tx_hash.hex()}")
+                logger.info(f"✅✅✅ Split position successful! ✅✅✅")
+                logger.info(f"   Transaction: {tx_hash.hex()}")
                 logger.info(f"   Split ${amount_usdc:.2f} USDC → {amount_usdc:.2f} YES + {amount_usdc:.2f} NO shares")
+                logger.info(f"   Block: {receipt.blockNumber}, Gas used: {receipt.gasUsed}")
                 return {
                     "transaction_hash": tx_hash.hex(),
                     "receipt": receipt,
@@ -1279,11 +1298,15 @@ class Polymarket:
                     "shares_per_side": amount_usdc
                 }
             else:
-                logger.error(f"❌ Split position failed! Transaction: {tx_hash.hex()}")
+                logger.error(f"❌❌❌ Split position failed! ❌❌❌")
+                logger.error(f"   Transaction: {tx_hash.hex()}")
+                logger.error(f"   Receipt status: {receipt.status} (0 = failed, 1 = success)")
+                logger.error(f"   Check transaction: https://polygonscan.com/tx/{tx_hash.hex()}")
                 return None
                 
         except Exception as e:
-            logger.error(f"❌ Error splitting position: {e}", exc_info=True)
+            logger.error(f"❌❌❌ Error splitting position: {e}", exc_info=True)
+            logger.error(f"   Full exception details logged above")
             return None
     
     def get_notifications(self) -> Optional[List[Dict]]:

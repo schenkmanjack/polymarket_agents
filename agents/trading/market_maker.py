@@ -626,13 +626,21 @@ class MarketMaker:
                 position.db_position_id = db_position.id
             
             # Place sell orders
+            logger.info(f"📤 Placing sell orders for {market_slug}...")
             await self._place_sell_orders(position)
+            
+            # Verify orders were placed
+            if not position.yes_order_id and not position.no_order_id:
+                logger.error(f"❌ Failed to place sell orders for {market_slug} - no order IDs")
+                return False
             
             # Track position
             self.active_positions[market_slug] = position
             self.monitored_markets.add(market_slug)
             
-            logger.info(f"✅ Started market making for {market_slug}")
+            logger.info(f"✅✅✅ Started market making for {market_slug} ✅✅✅")
+            logger.info(f"   YES order: {position.yes_order_id[:20] if position.yes_order_id else 'None'}... @ ${position.yes_order_price:.4f}")
+            logger.info(f"   NO order: {position.no_order_id[:20] if position.no_order_id else 'None'}... @ ${position.no_order_price:.4f}")
             return True
             
         except Exception as e:
@@ -661,6 +669,11 @@ class MarketMaker:
                     f"or transaction failed. Check logs above for details."
                 )
                 return None
+            
+            # Log successful split
+            tx_hash = split_result.get("transaction_hash")
+            logger.info(f"✅✅✅ Split completed successfully! Transaction: {tx_hash}")
+            logger.info(f"   Proceeding to place sell orders...")
             
             return split_result
             
