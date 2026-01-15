@@ -1333,6 +1333,9 @@ class MarketMaker:
                 return True
             
             # Check database for recent active/pending positions for this market
+            # Only skip if:
+            # 1. Position is from current deployment (same deployment_id), OR
+            # 2. Position is from previous deployment but has orders (actually active, not just failed pending)
             session = self.db.SessionLocal()
             try:
                 existing = session.query(RealMarketMakerPosition).filter(
@@ -1341,11 +1344,30 @@ class MarketMaker:
                 ).order_by(RealMarketMakerPosition.id.desc()).first()
                 
                 if existing:
-                    logger.info(
-                        f"Found existing {existing.position_status} position for {market_slug} "
-                        f"(ID: {existing.id}). Skipping duplicate split."
-                    )
-                    return True
+                    # Check if it's from current deployment
+                    is_current_deployment = (existing.deployment_id == self.deployment_id)
+                    
+                    # Check if it has actual orders (meaning it's truly active, not just a failed pending)
+                    has_orders = (existing.yes_order_id is not None) or (existing.no_order_id is not None)
+                    
+                    if is_current_deployment:
+                        logger.info(
+                            f"Found existing {existing.position_status} position for {market_slug} "
+                            f"(ID: {existing.id}, current deployment). Skipping duplicate split."
+                        )
+                        return True
+                    elif has_orders:
+                        logger.info(
+                            f"Found existing {existing.position_status} position for {market_slug} "
+                            f"(ID: {existing.id}, previous deployment with orders). Skipping duplicate split."
+                        )
+                        return True
+                    else:
+                        # Previous deployment, pending status, no orders = likely failed, allow retry
+                        logger.info(
+                            f"Found pending position from previous deployment (ID: {existing.id}) "
+                            f"with no orders - likely failed. Allowing new split attempt."
+                        )
             finally:
                 session.close()
             
