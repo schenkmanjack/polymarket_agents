@@ -29,6 +29,7 @@ from py_clob_client.clob_types import (
     OrderType,
     OrderBookSummary,
     TradeParams,
+    PostOrdersArgs,
 )
 from py_clob_client.order_builder.constants import BUY, SELL
 
@@ -87,9 +88,9 @@ class Polymarket:
             {"inputs": [{"internalType": "address", "name": "collateralToken", "type": "address"}, {"internalType": "bytes32", "name": "parentCollectionId", "type": "bytes32"}, {"internalType": "bytes32", "name": "conditionId", "type": "bytes32"}, {"internalType": "uint256[]", "name": "partition", "type": "uint256[]"}, {"internalType": "uint256", "name": "amount", "type": "uint256"}], "name": "splitPosition", "outputs": [], "stateMutability": "nonpayable", "type": "function"}
         ]"""
 
-        # Native USDC on Polygon (newer, preferred)
-        # USDC.e (bridged) was: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-        self.usdc_address = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+        # USDC.e (bridged USDC) - required by Polymarket CTF contract
+        # Note: CTF splitPosition function requires USDC.e, not Native USDC
+        self.usdc_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
         self.ctf_address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 
         self.web3 = Web3(Web3.HTTPProvider(self.polygon_rpc))
@@ -631,6 +632,137 @@ class Polymarket:
                 return None
         except Exception as e:
             logger.error(f"Error canceling order {order_id}: {e}")
+            return None
+    
+    def cancel_orders_batch(self, order_ids: List[str]) -> Optional[Dict]:
+        """
+        Cancel multiple orders in a single batch request.
+        
+        Args:
+            order_ids: List of order IDs to cancel
+            
+        Returns:
+            Batch cancellation response dict, or None if error occurred
+        """
+        if not self.client:
+            logger.error("CLOB client not initialized - cannot cancel orders")
+            return None
+        
+        if not order_ids:
+            logger.warning("No order IDs provided for batch cancel")
+            return None
+        
+        try:
+            if hasattr(self.client, 'cancel_orders'):
+                logger.info(f"Batch cancelling {len(order_ids)} orders...")
+                result = self.client.cancel_orders(order_ids)
+                if result is None:
+                    logger.warning("⚠️ Batch cancel returned None - batch operation may have failed")
+                return result
+            else:
+                logger.warning("⚠️ CLOB client does not have cancel_orders method, falling back to individual cancels")
+                # Fallback to individual cancels
+                results = []
+                for order_id in order_ids:
+                    result = self.cancel_order(order_id)
+                    if result:
+                        results.append(result)
+                if results:
+                    logger.info(f"✅ Fallback: Successfully cancelled {len(results)}/{len(order_ids)} orders individually")
+                    return {"results": results}
+                else:
+                    logger.error(f"❌ Fallback: Failed to cancel any of {len(order_ids)} orders")
+                    return None
+        except Exception as e:
+            logger.error(f"❌ Error batch canceling orders: {e}", exc_info=True)
+            logger.warning("⚠️ Batch cancel failed with exception, returning None")
+            return None
+    
+    def place_orders_batch(self, orders: List[Dict]) -> Optional[Dict]:
+        """
+        Place multiple orders in a single batch request.
+        
+        Args:
+            orders: List of order dicts, each with:
+                - price: float
+                - size: float
+                - side: "BUY" or "SELL"
+                - token_id: str
+                - fee_rate_bps: Optional[int] (default: None, auto-detect)
+                - order_type: OrderType (default: OrderType.GTC)
+        
+        Returns:
+            Batch placement response dict, or None if error occurred
+        """
+        if not self.client:
+            logger.error("CLOB client not initialized - cannot place orders")
+            return None
+        
+        if not orders:
+            logger.warning("No orders provided for batch placement")
+            return None
+        
+        try:
+            if hasattr(self.client, 'post_orders'):
+                logger.info(f"Batch placing {len(orders)} orders...")
+                
+                # Convert order dicts to PostOrdersArgs
+                post_orders_args = []
+                for order_dict in orders:
+                    price = order_dict['price']
+                    size = order_dict['size']
+                    side = order_dict['side']
+                    token_id = order_dict['token_id']
+                    fee_rate_bps = order_dict.get('fee_rate_bps')
+                    order_type = order_dict.get('order_type', OrderType.GTC)
+                    
+                    # Create order using client.create_order
+                    order_args = OrderArgs(
+                        price=price,
+                        size=size,
+                        side=side,
+                        token_id=token_id,
+                        fee_rate_bps=fee_rate_bps,
+                    )
+                    
+                    signed_order = self.client.create_order(order_args)
+                    
+                    post_orders_args.append(
+                        PostOrdersArgs(
+                            order=signed_order,
+                            orderType=order_type,
+                        )
+                    )
+                
+                # Place orders in batch
+                result = self.client.post_orders(post_orders_args)
+                if result is None:
+                    logger.warning("⚠️ Batch place returned None - batch operation may have failed")
+                return result
+            else:
+                logger.warning("⚠️ CLOB client does not have post_orders method, falling back to individual placements")
+                # Fallback to individual placements
+                results = []
+                for order_dict in orders:
+                    result = self.execute_order(
+                        price=order_dict['price'],
+                        size=order_dict['size'],
+                        side=order_dict['side'],
+                        token_id=order_dict['token_id'],
+                        fee_rate_bps=order_dict.get('fee_rate_bps'),
+                        order_type=order_dict.get('order_type', OrderType.GTC),
+                    )
+                    if result:
+                        results.append(result)
+                if results:
+                    logger.info(f"✅ Fallback: Successfully placed {len(results)}/{len(orders)} orders individually")
+                    return {"results": results}
+                else:
+                    logger.error(f"❌ Fallback: Failed to place any of {len(orders)} orders")
+                    return None
+        except Exception as e:
+            logger.error(f"❌ Error batch placing orders: {e}", exc_info=True)
+            logger.warning("⚠️ Batch place failed with exception, returning None")
             return None
 
     def get_usdc_balance(self) -> float:

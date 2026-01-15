@@ -70,6 +70,22 @@ class MarketMakerConfig:
         if not isinstance(wait_after_fill, (int, float)) or wait_after_fill < 0.0:
             raise ValueError(f"wait_after_fill must be a non-negative float, got {wait_after_fill}")
         
+        wait_if_neither_fills = self.config.get('wait_if_neither_fills', 10.0)
+        if not isinstance(wait_if_neither_fills, (int, float)) or wait_if_neither_fills < 0.0:
+            raise ValueError(f"wait_if_neither_fills must be a non-negative float, got {wait_if_neither_fills}")
+        
+        merge_threshold = self.config.get('merge_threshold', 1.02)
+        if not isinstance(merge_threshold, (int, float)) or merge_threshold <= 0.0:
+            raise ValueError(f"merge_threshold must be a positive float, got {merge_threshold}")
+        
+        wait_before_resplit = self.config.get('wait_before_resplit', 24.0)
+        if not isinstance(wait_before_resplit, (int, float)) or wait_before_resplit < 0.0:
+            raise ValueError(f"wait_before_resplit must be a non-negative float, got {wait_before_resplit}")
+        
+        max_iterations_neither_fills = self.config.get('max_iterations_neither_fills', 20)
+        if not isinstance(max_iterations_neither_fills, int) or max_iterations_neither_fills < 1:
+            raise ValueError(f"max_iterations_neither_fills must be a positive integer, got {max_iterations_neither_fills}")
+        
         poll_interval = self.config.get('poll_interval')
         if poll_interval is None:
             raise ValueError("Missing required config field: poll_interval")
@@ -211,3 +227,23 @@ class MarketMakerConfig:
     def midpoint_depth_levels(self) -> int:
         """Number of orderbook levels to consider for weighted midpoint calculation."""
         return int(self.config.get('midpoint_depth_levels', 5))
+    
+    @property
+    def wait_if_neither_fills(self) -> float:
+        """Seconds to wait if neither side fills before adjusting both prices."""
+        return float(self.config.get('wait_if_neither_fills', 10.0))
+    
+    @property
+    def merge_threshold(self) -> float:
+        """If yes_price + no_price <= this threshold, merge orders and re-split."""
+        return float(self.config.get('merge_threshold', 1.02))
+    
+    @property
+    def wait_before_resplit(self) -> float:
+        """Seconds to wait after merging before doing another split."""
+        return float(self.config.get('wait_before_resplit', 24.0))
+    
+    @property
+    def max_iterations_neither_fills(self) -> int:
+        """Maximum number of adjustment iterations when neither side fills."""
+        return int(self.config.get('max_iterations_neither_fills', 20))

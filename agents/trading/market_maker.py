@@ -70,6 +70,12 @@ class MarketMakerPosition:
     max_adjustments: int = 10
     last_adjustment_time: Optional[datetime] = None  # When we last adjusted price
     
+    # Neither-fills tracking
+    neither_fills_iteration_count: int = 0  # How many times we've adjusted when neither fills
+    orders_placed_time: Optional[datetime] = None  # When orders were first placed
+    merged_waiting_resplit: bool = False  # True if we've merged and are waiting to re-split
+    merged_at: Optional[datetime] = None  # When we merged (cancelled both orders)
+    
     # Database record ID
     db_position_id: Optional[int] = None
 
@@ -737,57 +743,66 @@ class MarketMaker:
                 f"{midpoint_type} midpoint={midpoint:.4f}, sell_price={sell_price:.4f}"
             )
             
-            # Place YES and NO sell orders in parallel to reduce latency
+            # Place YES and NO sell orders in batch to reduce latency
             loop = asyncio.get_event_loop()
             
-            # Create tasks for both orders to execute concurrently
-            yes_task = loop.run_in_executor(
+            orders_to_place = [
+                {
+                    "price": sell_price,
+                    "size": position.yes_shares,
+                    "side": "SELL",
+                    "token_id": position.yes_token_id,
+                },
+                {
+                    "price": sell_price,
+                    "size": position.no_shares,
+                    "side": "SELL",
+                    "token_id": position.no_token_id,
+                }
+            ]
+            
+            # Execute batch order placement
+            batch_result = await loop.run_in_executor(
                 None,
-                self.pm.execute_order,
-                sell_price,
-                position.yes_shares,
-                "SELL",
-                position.yes_token_id,
+                self.pm.place_orders_batch,
+                orders_to_place
             )
             
-            no_task = loop.run_in_executor(
-                None,
-                self.pm.execute_order,
-                sell_price,
-                position.no_shares,
-                "SELL",
-                position.no_token_id,
-            )
-            
-            # Execute both orders concurrently
-            yes_order_response, no_order_response = await asyncio.gather(
-                yes_task,
-                no_task,
-                return_exceptions=True
-            )
-            
-            # Process YES order result
-            if isinstance(yes_order_response, Exception):
-                logger.error(f"Exception placing YES order: {yes_order_response}", exc_info=True)
-            elif yes_order_response:
-                yes_order_id = self.pm.extract_order_id(yes_order_response)
-                if yes_order_id:
-                    position.yes_order_id = yes_order_id
-                    position.yes_order_price = sell_price
-                    logger.info(f"✅ Placed YES sell order: {yes_order_id}")
-            
-            # Process NO order result
-            if isinstance(no_order_response, Exception):
-                logger.error(f"Exception placing NO order: {no_order_response}", exc_info=True)
-            elif no_order_response:
-                no_order_id = self.pm.extract_order_id(no_order_response)
-                if no_order_id:
-                    position.no_order_id = no_order_id
-                    position.no_order_price = sell_price
-                    logger.info(f"✅ Placed NO sell order: {no_order_id}")
+            # Process batch result
+            if batch_result:
+                # Extract order IDs from batch response
+                if isinstance(batch_result, dict):
+                    results = batch_result.get("results", batch_result.get("data", []))
+                    if isinstance(results, list) and len(results) >= 2:
+                        yes_order_id = self.pm.extract_order_id(results[0])
+                        no_order_id = self.pm.extract_order_id(results[1])
+                        
+                        if yes_order_id:
+                            position.yes_order_id = yes_order_id
+                            position.yes_order_price = sell_price
+                            logger.info(f"✅ Placed YES sell order: {yes_order_id}")
+                        else:
+                            logger.warning(f"⚠️ Could not extract YES order ID from batch response: {results[0]}")
+                        
+                        if no_order_id:
+                            position.no_order_id = no_order_id
+                            position.no_order_price = sell_price
+                            logger.info(f"✅ Placed NO sell order: {no_order_id}")
+                        else:
+                            logger.warning(f"⚠️ Could not extract NO order ID from batch response: {results[1]}")
+                    else:
+                        logger.warning(f"⚠️ Unexpected batch place response format - expected list with 2+ items, got: {batch_result}")
+                        logger.warning(f"   Response type: {type(results) if 'results' in locals() else 'unknown'}, length: {len(results) if isinstance(results, list) else 'N/A'}")
+                else:
+                    logger.warning(f"⚠️ Unexpected batch place response type - expected dict, got: {type(batch_result)}")
+                    logger.warning(f"   Response: {batch_result}")
+            else:
+                logger.error(f"❌ Batch order placement failed for {position.market_slug} - batch_result is None or empty")
+                logger.warning(f"⚠️ Initial sell orders were not placed - position may be incomplete")
             
             # Update database once after both orders are placed
             if position.yes_order_id or position.no_order_id:
+                position.orders_placed_time = datetime.now(timezone.utc)
                 self._update_position_in_db(position)
                     
         except Exception as e:
@@ -1099,10 +1114,20 @@ class MarketMaker:
                 await self._handle_both_filled(position)
                 return
             
+            # Handle merged state: waiting to re-split
+            if position.merged_waiting_resplit:
+                await self._check_resplit_ready(position)
+                return
+            
             # Handle imbalanced fill: one side filled, other hasn't
             # Check if wait_after_fill time has passed since last adjustment (or first fill)
             if (position.yes_filled and not position.no_filled) or (position.no_filled and not position.yes_filled):
                 await self._check_and_adjust_if_needed(position)
+                return
+            
+            # Handle neither side filled: check if we should adjust both prices or merge
+            if not position.yes_filled and not position.no_filled:
+                await self._check_neither_fills_and_adjust(position)
                 
         except Exception as e:
             logger.error(f"Error processing position {market_slug}: {e}", exc_info=True)
@@ -1181,6 +1206,236 @@ class MarketMaker:
             
         except Exception as e:
             logger.error(f"Error checking and adjusting: {e}", exc_info=True)
+    
+    async def _check_neither_fills_and_adjust(self, position: MarketMakerPosition):
+        """Check if neither side has filled and adjust both prices or merge."""
+        try:
+            # Need orders_placed_time to know when to check
+            if not position.orders_placed_time:
+                return
+            
+            # Check if we've exceeded max iterations
+            if position.neither_fills_iteration_count >= self.config.max_iterations_neither_fills:
+                logger.warning(
+                    f"Max iterations ({self.config.max_iterations_neither_fills}) reached for {position.market_slug} "
+                    f"with neither side filling. Stopping adjustments."
+                )
+                return
+            
+            # Calculate time since orders were placed (or last adjustment)
+            reference_time = position.last_adjustment_time if position.last_adjustment_time else position.orders_placed_time
+            time_since_reference = (datetime.now(timezone.utc) - reference_time).total_seconds()
+            
+            # Check if wait_if_neither_fills time has passed
+            if time_since_reference >= self.config.wait_if_neither_fills:
+                # Check current prices
+                yes_price = position.yes_order_price or 0.0
+                no_price = position.no_order_price or 0.0
+                price_sum = yes_price + no_price
+                
+                # Check if we should merge (price sum <= threshold)
+                if price_sum <= self.config.merge_threshold:
+                    logger.info(
+                        f"Price sum ({price_sum:.4f}) <= merge_threshold ({self.config.merge_threshold:.4f}) "
+                        f"for {position.market_slug}. Merging orders and will re-split."
+                    )
+                    await self._merge_and_wait_resplit(position)
+                else:
+                    # Adjust both prices down by price_step
+                    logger.info(
+                        f"Neither side filled after {time_since_reference:.1f}s "
+                        f"(wait_if_neither_fills={self.config.wait_if_neither_fills:.1f}s). "
+                        f"Adjusting both prices by -{self.config.price_step:.4f}"
+                    )
+                    await self._adjust_both_prices(position)
+            
+        except Exception as e:
+            logger.error(f"Error checking neither fills: {e}", exc_info=True)
+    
+    async def _check_resplit_ready(self, position: MarketMakerPosition):
+        """Check if it's time to re-split after merging."""
+        try:
+            if not position.merged_at:
+                # Reset merged state if merged_at is missing
+                position.merged_waiting_resplit = False
+                return
+            
+            time_since_merge = (datetime.now(timezone.utc) - position.merged_at).total_seconds()
+            
+            if time_since_merge >= self.config.wait_before_resplit:
+                logger.info(
+                    f"Wait time ({self.config.wait_before_resplit:.1f}s) elapsed since merge. "
+                    f"Re-splitting for {position.market_slug}..."
+                )
+                
+                # Reset merged state
+                position.merged_waiting_resplit = False
+                position.merged_at = None
+                position.neither_fills_iteration_count = 0
+                position.last_adjustment_time = None
+                
+                # Re-split
+                split_result = await self._split_position(position.condition_id)
+                if split_result:
+                    # Update shares (should be same as split_amount)
+                    position.yes_shares = self.config.split_amount
+                    position.no_shares = self.config.split_amount
+                    position.split_transaction_hash = split_result.get("transaction_hash")
+                    
+                    # Place new sell orders
+                    await self._place_sell_orders(position)
+                    
+                    # Update database
+                    self._update_position_in_db(position)
+                else:
+                    logger.error(f"Failed to re-split for {position.market_slug}")
+                    position.merged_waiting_resplit = True  # Keep in merged state to retry
+            
+        except Exception as e:
+            logger.error(f"Error checking resplit ready: {e}", exc_info=True)
+    
+    async def _adjust_both_prices(self, position: MarketMakerPosition):
+        """Cancel both orders and place new ones at lower prices (both reduced by price_step) using batch operations."""
+        try:
+            if not position.yes_order_id or not position.no_order_id:
+                logger.warning(f"Cannot adjust both prices: missing order IDs for {position.market_slug}")
+                return
+            
+            # Calculate new prices (both reduced by price_step)
+            new_yes_price = max(0.01, (position.yes_order_price or 0.0) - self.config.price_step)
+            new_no_price = max(0.01, (position.no_order_price or 0.0) - self.config.price_step)
+            
+            logger.info(
+                f"Adjusting both prices for {position.market_slug}: "
+                f"YES {position.yes_order_price:.4f} → {new_yes_price:.4f}, "
+                f"NO {position.no_order_price:.4f} → {new_no_price:.4f}"
+            )
+            
+            # Batch cancel both orders
+            loop = asyncio.get_event_loop()
+            cancel_result = await loop.run_in_executor(
+                None,
+                self.pm.cancel_orders_batch,
+                [position.yes_order_id, position.no_order_id]
+            )
+            
+            if cancel_result:
+                logger.info(f"✅ Batch cancelled both orders for {position.market_slug}")
+            else:
+                logger.error(f"❌ Batch cancel failed for {position.market_slug} - cancel_result is None or empty")
+                logger.warning(f"⚠️ Cannot proceed with price adjustment - orders may still be active")
+                return
+            
+            # Batch place new orders at adjusted prices
+            orders_to_place = [
+                {
+                    "price": new_yes_price,
+                    "size": position.yes_shares,
+                    "side": "SELL",
+                    "token_id": position.yes_token_id,
+                },
+                {
+                    "price": new_no_price,
+                    "size": position.no_shares,
+                    "side": "SELL",
+                    "token_id": position.no_token_id,
+                }
+            ]
+            
+            place_result = await loop.run_in_executor(
+                None,
+                self.pm.place_orders_batch,
+                orders_to_place
+            )
+            
+            if place_result:
+                # Extract order IDs from batch response
+                # The response structure may vary, so we need to handle it
+                if isinstance(place_result, dict):
+                    # Try to extract order IDs from response
+                    # Response might be a list or dict with results
+                    results = place_result.get("results", place_result.get("data", []))
+                    if isinstance(results, list) and len(results) >= 2:
+                        yes_order_id = self.pm.extract_order_id(results[0])
+                        no_order_id = self.pm.extract_order_id(results[1])
+                        
+                        if yes_order_id:
+                            position.yes_order_id = yes_order_id
+                            position.yes_order_price = new_yes_price
+                            logger.info(f"✅ Placed adjusted YES sell order: {yes_order_id} @ ${new_yes_price:.4f}")
+                        else:
+                            logger.warning(f"⚠️ Could not extract YES order ID from batch response: {results[0]}")
+                        
+                        if no_order_id:
+                            position.no_order_id = no_order_id
+                            position.no_order_price = new_no_price
+                            logger.info(f"✅ Placed adjusted NO sell order: {no_order_id} @ ${new_no_price:.4f}")
+                        else:
+                            logger.warning(f"⚠️ Could not extract NO order ID from batch response: {results[1]}")
+                    else:
+                        logger.warning(f"⚠️ Unexpected batch place response format - expected list with 2+ items, got: {place_result}")
+                        logger.warning(f"   Response type: {type(results) if 'results' in locals() else 'unknown'}, length: {len(results) if isinstance(results, list) else 'N/A'}")
+                else:
+                    logger.warning(f"⚠️ Unexpected batch place response type - expected dict, got: {type(place_result)}")
+                    logger.warning(f"   Response: {place_result}")
+            else:
+                logger.error(f"❌ Batch order placement failed for {position.market_slug} - place_result is None or empty")
+                logger.warning(f"⚠️ Orders were cancelled but new orders were not placed - position may be in inconsistent state")
+            
+            # Update tracking
+            position.neither_fills_iteration_count += 1
+            position.last_adjustment_time = datetime.now(timezone.utc)
+            position.orders_placed_time = datetime.now(timezone.utc)  # Reset timer
+            
+            # Update database
+            self._update_position_in_db(position)
+            
+        except Exception as e:
+            logger.error(f"Error adjusting both prices: {e}", exc_info=True)
+    
+    async def _merge_and_wait_resplit(self, position: MarketMakerPosition):
+        """Cancel both orders and set merged state to wait for re-split using batch cancel."""
+        try:
+            if not position.yes_order_id or not position.no_order_id:
+                logger.warning(f"Cannot merge: missing order IDs for {position.market_slug}")
+                return
+            
+            logger.info(f"Merging orders for {position.market_slug} (batch cancelling both orders)")
+            
+            # Batch cancel both orders
+            loop = asyncio.get_event_loop()
+            cancel_result = await loop.run_in_executor(
+                None,
+                self.pm.cancel_orders_batch,
+                [position.yes_order_id, position.no_order_id]
+            )
+            
+            if cancel_result:
+                logger.info(f"✅ Batch cancelled both orders for {position.market_slug}")
+            else:
+                logger.error(f"❌ Batch cancel failed during merge for {position.market_slug} - cancel_result is None or empty")
+                logger.warning(f"⚠️ Orders may still be active - merge state may be inconsistent")
+            
+            # Clear order IDs and prices
+            position.yes_order_id = None
+            position.no_order_id = None
+            position.yes_order_price = None
+            position.no_order_price = None
+            
+            # Set merged state
+            position.merged_waiting_resplit = True
+            position.merged_at = datetime.now(timezone.utc)
+            
+            logger.info(
+                f"✅ Merged orders for {position.market_slug}. "
+                f"Will re-split after {self.config.wait_before_resplit:.1f} seconds."
+            )
+            
+            # Update database
+            self._update_position_in_db(position)
+            
+        except Exception as e:
+            logger.error(f"Error merging orders: {e}", exc_info=True)
     
     async def _adjust_unfilled_side(self, position: MarketMakerPosition, side: str):
         """Cancel unfilled order and place new order at lower price."""
