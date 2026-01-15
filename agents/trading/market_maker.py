@@ -232,6 +232,8 @@ class MarketMaker:
                         )
                         
                         # Process all positions - merge/redeem based on status
+                        # IMPORTANT: Only merge/resolve if position is marked as resolved
+                        # We don't merge active positions because the purpose is to sell each side separately
                         if db_pos.position_status == "resolved":
                             # Case 1: Both YES and NO shares exist - merge equal amounts back to USDC
                             if yes_balance > 0 and no_balance > 0:
@@ -288,42 +290,12 @@ class MarketMaker:
                             else:
                                 logger.info(f"   Market resolved but winning_side not recorded - skipping redemption")
                                 skipped_no_winning_side += 1
-                        elif db_pos.position_status != "resolved":
-                            # Position not resolved - check if we should merge equal amounts anyway
-                            # (This handles cases where positions weren't properly marked as resolved)
-                            if yes_balance > 0 and no_balance > 0:
-                                merge_amount = min(yes_balance, no_balance)
-                                if abs(yes_balance - no_balance) < 0.01:  # Essentially equal
-                                    logger.info(
-                                        f"   ⚠️ Position status is '{db_pos.position_status}' (not resolved), "
-                                        f"but both sides exist in equal amounts ({merge_amount:.2f}). "
-                                        f"Attempting to merge back to ${merge_amount:.2f} USDC..."
-                                    )
-                                    logger.info(f"   (Note: This should only happen if market resolved but status wasn't updated)")
-                                    loop = asyncio.get_event_loop()
-                                    merge_result = await loop.run_in_executor(
-                                        None,
-                                        self.pm.merge_positions,
-                                        db_pos.condition_id,
-                                        merge_amount
-                                    )
-                                    if merge_result:
-                                        logger.info(f"   ✅ Successfully merged {merge_amount:.2f} YES + NO → ${merge_amount:.2f} USDC")
-                                        redeemable_count += 1
-                                    else:
-                                        logger.warning(f"   ⚠️ Merge failed - market may still be active")
-                                        skipped_not_resolved += 1
-                                else:
-                                    logger.info(f"   Market status: {db_pos.position_status} - shares exist but amounts unequal")
-                                    logger.info(f"   (YES: {yes_balance:.2f}, NO: {no_balance:.2f}) - skipping")
-                                    skipped_not_resolved += 1
-                            else:
-                                logger.info(f"   Market status: {db_pos.position_status} - only one side has shares")
-                                logger.info(f"   (YES: {yes_balance:.2f}, NO: {no_balance:.2f}) - skipping")
-                                skipped_not_resolved += 1
                         else:
-                            # This shouldn't happen, but handle it
-                            logger.info(f"   Unknown status: {db_pos.position_status} - skipping")
+                            # Position not resolved - do NOT merge (market making is still active)
+                            # The purpose of splitting is to sell each side separately
+                            logger.info(f"   Market status: '{db_pos.position_status}' - position is still active")
+                            logger.info(f"   (YES: {yes_balance:.2f}, NO: {no_balance:.2f}) - NOT merging (market making in progress)")
+                            logger.info(f"   These shares are being used for market making - will be redeemed after market resolves")
                             skipped_not_resolved += 1
                         
                         logger.info("")
