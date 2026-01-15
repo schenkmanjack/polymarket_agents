@@ -29,9 +29,17 @@ from py_clob_client.clob_types import (
     OrderType,
     OrderBookSummary,
     TradeParams,
-    PostOrdersArgs,
 )
 from py_clob_client.order_builder.constants import BUY, SELL
+from dataclasses import dataclass
+from typing import Dict, Any
+
+# PostOrdersArgs doesn't exist in py-clob-client 0.17.5, so we define it ourselves
+@dataclass
+class PostOrdersArgs:
+    """Dataclass for batch order placement (matches py-clob-client API)."""
+    order: Dict[str, Any]
+    orderType: OrderType
 
 from agents.utils.objects import SimpleMarket, SimpleEvent
 
@@ -680,7 +688,7 @@ class Polymarket:
     
     def place_orders_batch(self, orders: List[Dict]) -> Optional[Dict]:
         """
-        Place multiple orders in a single batch request.
+        Place multiple orders in a single batch request using post_orders.
         
         Args:
             orders: List of order dicts, each with:
@@ -706,7 +714,7 @@ class Polymarket:
             if hasattr(self.client, 'post_orders'):
                 logger.info(f"Batch placing {len(orders)} orders...")
                 
-                # Convert order dicts to PostOrdersArgs
+                # Convert order dicts to PostOrdersArgs (matching Gemini's pattern)
                 post_orders_args = []
                 for order_dict in orders:
                     price = order_dict['price']
@@ -727,6 +735,7 @@ class Polymarket:
                     
                     signed_order = self.client.create_order(order_args)
                     
+                    # Create PostOrdersArgs instance
                     post_orders_args.append(
                         PostOrdersArgs(
                             order=signed_order,
@@ -740,22 +749,40 @@ class Polymarket:
                     logger.warning("⚠️ Batch place returned None - batch operation may have failed")
                 return result
             else:
-                logger.warning("⚠️ CLOB client does not have post_orders method, falling back to individual placements")
-                # Fallback to individual placements
+                logger.warning("⚠️ CLOB client does not have post_orders method, falling back to parallel individual placements")
+                # Fallback: Use ThreadPoolExecutor to place orders in parallel (non-blocking)
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                
+                def place_single_order(order_dict):
+                    """Place a single order."""
+                    try:
+                        return self.execute_order(
+                            price=order_dict['price'],
+                            size=order_dict['size'],
+                            side=order_dict['side'],
+                            token_id=order_dict['token_id'],
+                            fee_rate_bps=order_dict.get('fee_rate_bps'),
+                            order_type=order_dict.get('order_type', OrderType.GTC),
+                        )
+                    except Exception as e:
+                        logger.error(f"Error placing order in fallback: {e}")
+                        return None
+                
+                # Place all orders in parallel using thread pool
                 results = []
-                for order_dict in orders:
-                    result = self.execute_order(
-                        price=order_dict['price'],
-                        size=order_dict['size'],
-                        side=order_dict['side'],
-                        token_id=order_dict['token_id'],
-                        fee_rate_bps=order_dict.get('fee_rate_bps'),
-                        order_type=order_dict.get('order_type', OrderType.GTC),
-                    )
-                    if result:
-                        results.append(result)
+                with ThreadPoolExecutor(max_workers=len(orders)) as executor:
+                    future_to_order = {
+                        executor.submit(place_single_order, order_dict): order_dict
+                        for order_dict in orders
+                    }
+                    
+                    for future in as_completed(future_to_order):
+                        result = future.result()
+                        if result:
+                            results.append(result)
+                
                 if results:
-                    logger.info(f"✅ Fallback: Successfully placed {len(results)}/{len(orders)} orders individually")
+                    logger.info(f"✅ Fallback: Successfully placed {len(results)}/{len(orders)} orders in parallel")
                     return {"results": results}
                 else:
                     logger.error(f"❌ Fallback: Failed to place any of {len(orders)} orders")
