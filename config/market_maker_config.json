@@ -19,5 +19,5 @@
   "use_websocket_order_status": true,
   "websocket_order_status_health_check_timeout": 14.0,
   "websocket_order_status_reconnect_delay": 5.0,
-  "merge_transaction_hashes": ["0xcf8e99d2d9bbcfe577f5576903ebfe14a6fcb59e003ac3587eda9d3f66d478bf", "0xe712c1813b0b3680c45619353c2ffe6c65d1bbba15730c51a10498ffb02a96bd", "0xf3114c20d11c23a06afb55fc3a7d99c53854d7b092cf829faa82ed1256215fd8"]
+  "merge_transaction_hashes": ["0xcf8e99d2d9bbcfe577f5576903ebfe14a6fcb59e003ac3587eda9d3f66d478bf", "0xe712c1813b0b3680c45619353c2ffe6c65d1bbba15730c51a10498ffb02a96bd", "0xf3114c20d11c23a06afb55fc3a7d99c53854d7b092cf829faa82ed1256215fd8", "0xaa33dd2ebbefec45a03b9dd060c1da6bfda430856ca10f495e10bb6b5bffcc89", "0xcf8e99d2d9bbcfe577f5576903ebfe14a6fcb59e003ac3587eda9d3f66d478bf"]
 }

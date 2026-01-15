@@ -1327,6 +1327,28 @@ class MarketMaker:
     ) -> bool:
         """Start market making for a new market. Returns True if successful, False otherwise."""
         try:
+            # Check if we already have an active position for this market (prevent duplicate splits)
+            if market_slug in self.active_positions:
+                logger.debug(f"Already have active position for {market_slug}, skipping")
+                return True
+            
+            # Check database for recent active/pending positions for this market
+            session = self.db.SessionLocal()
+            try:
+                existing = session.query(RealMarketMakerPosition).filter(
+                    RealMarketMakerPosition.market_slug == market_slug,
+                    RealMarketMakerPosition.position_status.in_(['active', 'pending'])
+                ).order_by(RealMarketMakerPosition.id.desc()).first()
+                
+                if existing:
+                    logger.info(
+                        f"Found existing {existing.position_status} position for {market_slug} "
+                        f"(ID: {existing.id}). Skipping duplicate split."
+                    )
+                    return True
+            finally:
+                session.close()
+            
             # Create position object (before split, so we can track it in DB)
             position = MarketMakerPosition(
                 market_slug=market_slug,
@@ -1736,6 +1758,28 @@ class MarketMaker:
                     
         except Exception as e:
             logger.error(f"Error placing sell orders: {e}", exc_info=True)
+    
+    def _update_split_status_in_db(self, db_position_id: int, transaction_hash: Optional[str], status: str):
+        """Update split transaction hash and status in database."""
+        try:
+            session = self.db.SessionLocal()
+            try:
+                db_position = session.query(RealMarketMakerPosition).filter(
+                    RealMarketMakerPosition.id == db_position_id
+                ).first()
+                
+                if db_position:
+                    if transaction_hash:
+                        db_position.split_transaction_hash = transaction_hash
+                    db_position.position_status = status
+                    db_position.updated_at = datetime.now(timezone.utc)
+                    session.commit()
+                    logger.info(f"Updated position {db_position_id} in database: status={status}, tx_hash={transaction_hash}")
+                    
+            finally:
+                session.close()
+        except Exception as e:
+            logger.error(f"Error updating split status in database: {e}", exc_info=True)
     
     def _update_position_in_db(self, position: MarketMakerPosition):
         """Update position in database."""
@@ -2810,9 +2854,26 @@ class MarketMaker:
         because the purpose of splitting is to sell each side separately.
         """
         try:
-            # Calculate remaining shares (shares that weren't sold during market making)
-            yes_remaining = position.yes_shares if not position.yes_filled else 0.0
-            no_remaining = position.no_shares if not position.no_filled else 0.0
+            # Check ACTUAL wallet balances (more reliable than position object)
+            direct_wallet = self.pm.get_address_for_private_key()
+            yes_balance = self.pm.get_conditional_token_balance(
+                position.yes_token_id,
+                wallet_address=direct_wallet
+            )
+            no_balance = self.pm.get_conditional_token_balance(
+                position.no_token_id,
+                wallet_address=direct_wallet
+            )
+            
+            if yes_balance is None or no_balance is None:
+                logger.warning(f"Could not check wallet balances for {position.market_slug}, using position object values")
+                # Fallback to position object values
+                yes_remaining = position.yes_shares if not position.yes_filled else 0.0
+                no_remaining = position.no_shares if not position.no_filled else 0.0
+            else:
+                # Use actual wallet balances
+                yes_remaining = yes_balance
+                no_remaining = no_balance
             
             logger.info(
                 f"🔄 Attempting to redeem shares for {position.market_slug} (AFTER RESOLUTION): "
