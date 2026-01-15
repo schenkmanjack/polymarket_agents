@@ -2290,11 +2290,22 @@ class MarketMaker:
                     position.no_shares = self.config.split_amount
                     position.split_transaction_hash = split_result.get("transaction_hash")
                     
+                    # Reset fill states for new orders
+                    position.yes_filled = False
+                    position.no_filled = False
+                    position.yes_fill_time = None
+                    position.no_fill_time = None
+                    position.orders_placed_time = None  # Will be set when orders are placed
+                    
                     # Place new sell orders
                     await self._place_sell_orders(position)
                     
-                    # Update database
+                    # Update database - mark as active with new transaction hash
+                    if position.db_position_id:
+                        self._update_split_status_in_db(position.db_position_id, position.split_transaction_hash, "active")
                     self._update_position_in_db(position)
+                    
+                    logger.info(f"✅ Re-split complete for {position.market_slug}. New orders placed.")
                 else:
                     logger.error(f"Failed to re-split for {position.market_slug}")
                     position.merged_waiting_resplit = True  # Keep in merged state to retry
@@ -2929,13 +2940,15 @@ class MarketMaker:
                 try:
                     # Place sell order at $0.99 (just below $1.00 to ensure fill)
                     loop = asyncio.get_event_loop()
+                    # Use lambda to wrap keyword arguments (run_in_executor doesn't accept kwargs)
                     order_result = await loop.run_in_executor(
                         None,
-                        self.pm.execute_order,
-                        price=0.99,
-                        size=yes_remaining,
-                        side="SELL",
-                        token_id=position.yes_token_id
+                        lambda: self.pm.execute_order(
+                            price=0.99,
+                            size=yes_remaining,
+                            side="SELL",
+                            token_id=position.yes_token_id
+                        )
                     )
                     if order_result and order_result.get("order_id"):
                         logger.info(f"✅ Placed sell order for {yes_remaining:.2f} YES shares: {order_result.get('order_id')}")
@@ -2952,13 +2965,15 @@ class MarketMaker:
                 try:
                     # Place sell order at $0.99 (just below $1.00 to ensure fill)
                     loop = asyncio.get_event_loop()
+                    # Use lambda to wrap keyword arguments (run_in_executor doesn't accept kwargs)
                     order_result = await loop.run_in_executor(
                         None,
-                        self.pm.execute_order,
-                        price=0.99,
-                        size=no_remaining,
-                        side="SELL",
-                        token_id=position.no_token_id
+                        lambda: self.pm.execute_order(
+                            price=0.99,
+                            size=no_remaining,
+                            side="SELL",
+                            token_id=position.no_token_id
+                        )
                     )
                     if order_result and order_result.get("order_id"):
                         logger.info(f"✅ Placed sell order for {no_remaining:.2f} NO shares: {order_result.get('order_id')}")
