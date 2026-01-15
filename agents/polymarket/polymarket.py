@@ -141,6 +141,23 @@ class Polymarket:
         
         self.credentials = self.client.create_or_derive_api_creds()
         self.client.set_api_creds(self.credentials)
+        
+        # Create a separate client for direct wallet orders (used when selling conditional tokens)
+        # Conditional tokens from split are in direct wallet, so we need to use direct wallet for sell orders
+        self.direct_wallet_client = None
+        if self.private_key:
+            try:
+                self.direct_wallet_client = ClobClient(
+                    host=self.clob_url,
+                    key=self.private_key,
+                    chain_id=self.chain_id
+                    # No funder parameter = uses direct wallet (signature_type=0)
+                )
+                # Use same API credentials
+                self.direct_wallet_client.set_api_creds(self.credentials)
+                logger.info("✓ Direct wallet CLOB client initialized (for conditional token sell orders)")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not initialize direct wallet client: {e}")
         # print(self.credentials)
 
     def _init_approvals(self, run: bool = False) -> None:
@@ -399,6 +416,34 @@ class Polymarket:
         order = builder.build_signed_order(order_data)
         return order
 
+    def _get_client_for_order(self, side: str, token_id: str) -> Optional[ClobClient]:
+        """
+        Get the appropriate CLOB client for placing an order.
+        
+        For SELL orders of conditional tokens (from split), use direct wallet client
+        because shares are in direct wallet, not proxy wallet.
+        
+        For other orders, use proxy wallet client if available (gasless trading).
+        
+        Args:
+            side: "BUY" or "SELL"
+            token_id: Token ID (conditional tokens are very long numeric strings)
+        
+        Returns:
+            ClobClient instance to use for this order
+        """
+        # For SELL orders, use direct wallet client if available
+        # (conditional tokens from split are in direct wallet)
+        if side == "SELL" and self.direct_wallet_client:
+            # Check if this is a conditional token (very long numeric token_id)
+            # Conditional tokens typically have token IDs that are very long numbers
+            if token_id and len(token_id) > 30:  # Conditional tokens have long numeric IDs
+                logger.debug(f"Using direct wallet client for SELL order (conditional token)")
+                return self.direct_wallet_client
+        
+        # For all other orders, use the default client (proxy wallet if available)
+        return self.client
+    
     def execute_order(self, price, size, side, token_id, fee_rate_bps: Optional[int] = None, auto_detect_fee: bool = True, order_type: OrderType = OrderType.GTC) -> Dict:
         """
         Place a limit order.
@@ -438,7 +483,7 @@ class Polymarket:
                     logger.debug(f"  Calling client.create_order()...")
                     signed_order = self.client.create_order(order_args)
                     logger.debug(f"  Signed order created, calling client.post_order() with order_type={order_type}...")
-                    response = self.client.post_order(signed_order, order_type)
+                    response = client_to_use.post_order(signed_order, order_type)
                     logger.info(f"  ✅ Order posted successfully, response: {response}")
                     return response
                 except PolyApiException as e:
@@ -472,8 +517,8 @@ class Polymarket:
                                 # Retry with detected fee rate
                                 logger.debug(f"  Retrying with fee_rate_bps={detected_fee}...")
                                 order_args = OrderArgs(price=price, size=size, side=side, token_id=token_id, fee_rate_bps=detected_fee)
-                                signed_order = self.client.create_order(order_args)
-                                response = self.client.post_order(signed_order, order_type)
+                                signed_order = client_to_use.create_order(order_args)
+                                response = client_to_use.post_order(signed_order, order_type)
                                 logger.info(f"  ✅ Order posted successfully after fee detection, response: {response}")
                                 return response
                     # If we can't parse the error, re-raise it
@@ -491,9 +536,9 @@ class Polymarket:
         order_args = OrderArgs(price=price, size=size, side=side, token_id=token_id, fee_rate_bps=fee_rate_bps)
         logger.debug(f"  OrderArgs created: {order_args}")
         logger.debug(f"  Calling client.create_order()...")
-        signed_order = self.client.create_order(order_args)
+        signed_order = client_to_use.create_order(order_args)
         logger.debug(f"  Signed order created, calling client.post_order() with order_type={order_type}...")
-        response = self.client.post_order(signed_order, order_type)
+        response = client_to_use.post_order(signed_order, order_type)
         logger.info(f"  ✅ Order posted successfully, response: {response}")
         return response
     
@@ -735,7 +780,13 @@ class Polymarket:
                         fee_rate_bps=fee_rate_bps,
                     )
                     
-                    signed_order = self.client.create_order(order_args)
+                    # Get appropriate client for this order (direct wallet for conditional token SELL orders)
+                    client_to_use = self._get_client_for_order(side, token_id)
+                    if not client_to_use:
+                        logger.error(f"No CLOB client available for order")
+                        continue
+                    
+                    signed_order = client_to_use.create_order(order_args)
                     
                     # Create PostOrdersArgs instance
                     post_orders_args.append(
@@ -745,8 +796,23 @@ class Polymarket:
                         )
                     )
                 
+                # Determine which client to use for batch placement
+                # If all orders are SELL orders of conditional tokens, use direct wallet client
+                all_conditional_sells = all(
+                    order_dict.get('side') == 'SELL' and 
+                    order_dict.get('token_id') and 
+                    len(str(order_dict.get('token_id'))) > 30
+                    for order_dict in orders
+                )
+                
+                client_to_use = self.direct_wallet_client if (all_conditional_sells and self.direct_wallet_client) else self.client
+                if client_to_use == self.direct_wallet_client:
+                    logger.info(f"  Using DIRECT WALLET client for batch (conditional token SELL orders)")
+                elif client_to_use == self.client and self.proxy_wallet_address:
+                    logger.info(f"  Using PROXY WALLET client for batch (gasless trading)")
+                
                 # Place orders in batch
-                result = self.client.post_orders(post_orders_args)
+                result = client_to_use.post_orders(post_orders_args)
                 if result is None:
                     logger.warning("⚠️ Batch place returned None - batch operation may have failed")
                 return result
