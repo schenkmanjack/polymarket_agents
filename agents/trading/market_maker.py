@@ -267,13 +267,13 @@ class MarketMaker:
                             
                             # Case 2: Position is resolved and we know winning side - redeem winning shares
                             if db_pos.winning_side:
-                            # Update position with remaining balances after merge
-                            position.yes_shares = yes_balance
-                            position.no_shares = no_balance
-                            position.yes_filled = (yes_balance == 0)
-                            position.no_filled = (no_balance == 0)
-                            
-                            logger.info(f"   Market is RESOLVED - redeeming winning shares...")
+                                # Update position with remaining balances after merge
+                                position.yes_shares = yes_balance
+                                position.no_shares = no_balance
+                                position.yes_filled = (yes_balance == 0)
+                                position.no_filled = (no_balance == 0)
+                                
+                                logger.info(f"   Market is RESOLVED - redeeming winning shares...")
                                 await self._redeem_winning_shares(position, db_pos.winning_side)
                                 redeemable_count += 1
                             else:
