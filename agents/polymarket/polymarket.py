@@ -153,9 +153,11 @@ class Polymarket:
                     chain_id=self.chain_id
                     # No funder parameter = uses direct wallet (signature_type=0)
                 )
-                # Use same API credentials
-                self.direct_wallet_client.set_api_creds(self.credentials)
+                # Create separate API credentials for direct wallet (credentials are wallet-specific)
+                direct_wallet_credentials = self.direct_wallet_client.create_or_derive_api_creds()
+                self.direct_wallet_client.set_api_creds(direct_wallet_credentials)
                 logger.info("✓ Direct wallet CLOB client initialized (for conditional token sell orders)")
+                logger.info(f"  Direct wallet address: {self.get_address_for_private_key()}")
             except Exception as e:
                 logger.warning(f"⚠️ Could not initialize direct wallet client: {e}")
         # print(self.credentials)

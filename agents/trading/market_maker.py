@@ -1174,6 +1174,10 @@ class MarketMaker:
                 logger.error(f"Could not fetch orderbook for YES token {position.yes_token_id}")
                 return
             
+            # Get market prices for comparison
+            best_bid = get_highest_bid(yes_orderbook)
+            best_ask = get_lowest_ask(yes_orderbook)
+            
             # Calculate midpoint (weighted or simple)
             midpoint = calculate_midpoint(
                 yes_orderbook,
@@ -1192,10 +1196,40 @@ class MarketMaker:
             sell_price = min(sell_price, 0.99)
             
             midpoint_type = "weighted" if self.config.use_weighted_midpoint else "simple"
-            logger.info(
-                f"Placing sell orders for {position.market_slug}: "
-                f"{midpoint_type} midpoint={midpoint:.4f}, sell_price={sell_price:.4f}"
-            )
+            logger.info("=" * 80)
+            logger.info(f"📊 MARKET ANALYSIS for {position.market_slug}:")
+            logger.info(f"   Best BID (highest buyer): ${best_bid:.4f}" if best_bid else "   Best BID: None")
+            logger.info(f"   Best ASK (lowest seller): ${best_ask:.4f}" if best_ask else "   Best ASK: None")
+            logger.info(f"   {midpoint_type.upper()} Midpoint: ${midpoint:.4f}")
+            logger.info(f"   Our SELL price: ${sell_price:.4f} (midpoint + {self.config.offset_above_midpoint:.4f})")
+            
+            # Check if our price is competitive
+            if best_ask is not None:
+                if sell_price > best_ask:
+                    logger.warning(
+                        f"   ⚠️ Our sell price (${sell_price:.4f}) is HIGHER than best ask (${best_ask:.4f}) - "
+                        f"orders may not fill quickly (we're ${sell_price - best_ask:.4f} above market)"
+                    )
+                elif sell_price < best_ask:
+                    logger.info(
+                        f"   ✓ Our sell price (${sell_price:.4f}) is BELOW best ask (${best_ask:.4f}) - "
+                        f"should fill immediately (${best_ask - sell_price:.4f} better than market)"
+                    )
+                else:
+                    logger.info(f"   ✓ Our sell price matches best ask (${sell_price:.4f})")
+            
+            if best_bid is not None:
+                if sell_price <= best_bid:
+                    logger.info(
+                        f"   ✅ Our sell price (${sell_price:.4f}) is AT or BELOW best bid (${best_bid:.4f}) - "
+                        f"should fill immediately!"
+                    )
+                else:
+                    logger.info(
+                        f"   📈 Our sell price (${sell_price:.4f}) is ${sell_price - best_bid:.4f} above best bid (${best_bid:.4f})"
+                    )
+            
+            logger.info("=" * 80)
             
             # Place YES and NO sell orders in batch to reduce latency
             loop = asyncio.get_event_loop()
@@ -1235,6 +1269,14 @@ class MarketMaker:
                             position.yes_order_id = yes_order_id
                             position.yes_order_price = sell_price
                             logger.info(f"✅ Placed YES sell order: {yes_order_id}")
+                            
+                            # Verify order status immediately
+                            await asyncio.sleep(1.0)  # Brief wait for order to propagate
+                            yes_status = self.pm.get_order_status(yes_order_id)
+                            if yes_status:
+                                logger.info(f"   📋 YES order status: {yes_status.get('status', 'unknown')}")
+                            else:
+                                logger.warning(f"   ⚠️ Could not get YES order status immediately after placement")
                         else:
                             logger.warning(f"⚠️ Could not extract YES order ID from batch response: {results[0]}")
                         
@@ -1242,6 +1284,14 @@ class MarketMaker:
                             position.no_order_id = no_order_id
                             position.no_order_price = sell_price
                             logger.info(f"✅ Placed NO sell order: {no_order_id}")
+                            
+                            # Verify order status immediately
+                            await asyncio.sleep(1.0)  # Brief wait for order to propagate
+                            no_status = self.pm.get_order_status(no_order_id)
+                            if no_status:
+                                logger.info(f"   📋 NO order status: {no_status.get('status', 'unknown')}")
+                            else:
+                                logger.warning(f"   ⚠️ Could not get NO order status immediately after placement")
                         else:
                             logger.warning(f"⚠️ Could not extract NO order ID from batch response: {results[1]}")
                     else:
@@ -1254,10 +1304,46 @@ class MarketMaker:
                 logger.error(f"❌ Batch order placement failed for {position.market_slug} - batch_result is None or empty")
                 logger.warning(f"⚠️ Initial sell orders were not placed - position may be incomplete")
             
-            # Update database once after both orders are placed
+            # Verify orders were placed successfully and check their status
             if position.yes_order_id or position.no_order_id:
                 position.orders_placed_time = datetime.now(timezone.utc)
                 self._update_position_in_db(position)
+                
+                # Wait a moment for orders to appear on orderbook
+                await asyncio.sleep(2.0)
+                
+                # Verify orders are on the orderbook
+                logger.info("🔍 Verifying orders appear on orderbook...")
+                yes_orderbook_after = fetch_orderbook(position.yes_token_id)
+                no_orderbook_after = fetch_orderbook(position.no_token_id)
+                
+                if yes_orderbook_after and position.yes_order_id:
+                    asks = yes_orderbook_after.get("asks", [])
+                    our_price_found = any(
+                        abs(float(ask[0]) - position.yes_order_price) < 0.0001 
+                        for ask in asks[:10]  # Check top 10 asks
+                    )
+                    if our_price_found:
+                        logger.info(f"   ✅ YES order found on orderbook at ${position.yes_order_price:.4f}")
+                    else:
+                        logger.warning(
+                            f"   ⚠️ YES order NOT found on orderbook at ${position.yes_order_price:.4f}. "
+                            f"Top asks: {[f'${ask[0]:.4f}' for ask in asks[:5]]}"
+                        )
+                
+                if no_orderbook_after and position.no_order_id:
+                    asks = no_orderbook_after.get("asks", [])
+                    our_price_found = any(
+                        abs(float(ask[0]) - position.no_order_price) < 0.0001 
+                        for ask in asks[:10]  # Check top 10 asks
+                    )
+                    if our_price_found:
+                        logger.info(f"   ✅ NO order found on orderbook at ${position.no_order_price:.4f}")
+                    else:
+                        logger.warning(
+                            f"   ⚠️ NO order NOT found on orderbook at ${position.no_order_price:.4f}. "
+                            f"Top asks: {[f'${ask[0]:.4f}' for ask in asks[:5]]}"
+                        )
                     
         except Exception as e:
             logger.error(f"Error placing sell orders: {e}", exc_info=True)
@@ -1972,7 +2058,54 @@ class MarketMaker:
             # Ensure price is valid (between 0.01 and 0.99)
             new_price = max(0.01, min(new_price, 0.99))
             
+            # Check actual wallet balance before placing new order
+            # Use direct wallet address (where shares are)
+            direct_wallet_address = self.pm.get_address_for_private_key()
+            logger.info(f"🔍 Verifying {side} shares are still available before placing new order...")
+            actual_balance = self.pm.get_conditional_token_balance(
+                token_id,
+                wallet_address=direct_wallet_address
+            )
+            
+            if actual_balance is None:
+                logger.error(f"❌ Could not check {side} balance - aborting order placement")
+                return
+            
+            if actual_balance == 0:
+                logger.warning(
+                    f"⚠️ No {side} shares remaining in wallet (balance: 0). "
+                    f"Order may have already filled or shares were moved. Aborting order placement."
+                )
+                # Mark as filled if balance is 0
+                if side == "YES":
+                    position.yes_filled = True
+                    position.yes_fill_time = datetime.now(timezone.utc)
+                else:
+                    position.no_filled = True
+                    position.no_fill_time = datetime.now(timezone.utc)
+                return
+            
+            # Use actual balance (remaining shares), not original split amount
+            remaining_shares = actual_balance
+            if remaining_shares < shares:
+                logger.info(
+                    f"📊 Using remaining balance: {remaining_shares:.2f} shares "
+                    f"(original was {shares:.2f}, {shares - remaining_shares:.2f} already sold)"
+                )
+                shares = remaining_shares
+            
+            # Verify allowances are still set
+            logger.info(f"🔍 Verifying conditional token allowances before placing new order...")
+            allowances_ok = self.pm.ensure_conditional_token_allowances(wallet_address=direct_wallet_address)
+            if not allowances_ok:
+                logger.error(
+                    f"❌ Conditional token allowances NOT set for direct wallet. "
+                    f"Cannot place new order. Please check allowances."
+                )
+                return
+            
             logger.info(f"Placing new {side} sell order at {new_price:.4f} (was {current_price:.4f})")
+            logger.info(f"  Order size: {shares:.2f} shares (remaining balance: {actual_balance:.2f})")
             
             # Place new order
             order_response = self.pm.execute_order(
