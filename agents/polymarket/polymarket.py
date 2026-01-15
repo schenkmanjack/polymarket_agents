@@ -87,7 +87,9 @@ class Polymarket:
             {"inputs": [{"internalType": "address", "name": "collateralToken", "type": "address"}, {"internalType": "bytes32", "name": "parentCollectionId", "type": "bytes32"}, {"internalType": "bytes32", "name": "conditionId", "type": "bytes32"}, {"internalType": "uint256[]", "name": "partition", "type": "uint256[]"}, {"internalType": "uint256", "name": "amount", "type": "uint256"}], "name": "splitPosition", "outputs": [], "stateMutability": "nonpayable", "type": "function"}
         ]"""
 
-        self.usdc_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+        # Native USDC on Polygon (newer, preferred)
+        # USDC.e (bridged) was: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+        self.usdc_address = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
         self.ctf_address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 
         self.web3 = Web3(Web3.HTTPProvider(self.polygon_rpc))
@@ -1007,14 +1009,24 @@ class Polymarket:
             amount_raw = int(amount_usdc * 1e6)
             
             # Check USDC balance
+            logger.info(f"Checking USDC balance for wallet: {wallet_address}")
+            logger.info(f"  USDC contract: {self.usdc_address}")
+            logger.info(f"  CTF contract: {self.ctf_address}")
+            
             usdc_balance = self.usdc.functions.balanceOf(wallet_address).call()
             usdc_balance_float = float(usdc_balance) / 1e6
-            logger.info(f"USDC balance: ${usdc_balance_float:.2f} (need ${amount_usdc:.2f})")
+            logger.info(f"USDC balance: ${usdc_balance_float:.2f} (raw: {usdc_balance}, need ${amount_usdc:.2f})")
             
             if usdc_balance < amount_raw:
                 logger.error(
                     f"Insufficient USDC balance: have ${usdc_balance_float:.2f}, "
                     f"need ${amount_usdc:.2f}"
+                )
+                logger.error(
+                    f"💡 Make sure you sent USDC to this wallet address on Polygon network: {wallet_address}"
+                )
+                logger.error(
+                    f"💡 Check your balance on Polygonscan: https://polygonscan.com/address/{wallet_address}"
                 )
                 return None
             
