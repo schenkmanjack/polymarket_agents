@@ -726,6 +726,55 @@ class MarketMaker:
     async def _place_sell_orders(self, position: MarketMakerPosition):
         """Place sell orders for YES and NO shares."""
         try:
+            # Wait a few seconds after split for shares to settle on-chain
+            logger.info("⏳ Waiting 5 seconds for shares to settle after split...")
+            await asyncio.sleep(5.0)
+            
+            # Verify shares are available on-chain
+            logger.info("🔍 Verifying YES and NO shares are available on-chain...")
+            yes_balance = self.pm.get_conditional_token_balance(position.yes_token_id)
+            no_balance = self.pm.get_conditional_token_balance(position.no_token_id)
+            
+            if yes_balance is None or no_balance is None:
+                logger.error("❌ Could not check conditional token balances - aborting order placement")
+                return
+            
+            logger.info(f"  YES balance: {yes_balance:.2f} shares (expected: {position.yes_shares:.2f})")
+            logger.info(f"  NO balance: {no_balance:.2f} shares (expected: {position.no_shares:.2f})")
+            
+            if yes_balance < position.yes_shares or no_balance < position.no_shares:
+                logger.warning(
+                    f"⚠️ Insufficient shares on-chain! "
+                    f"YES: {yes_balance:.2f} < {position.yes_shares:.2f}, "
+                    f"NO: {no_balance:.2f} < {position.no_shares:.2f}. "
+                    f"Shares may still be settling. Waiting 5 more seconds..."
+                )
+                await asyncio.sleep(5.0)
+                # Re-check after wait
+                yes_balance = self.pm.get_conditional_token_balance(position.yes_token_id)
+                no_balance = self.pm.get_conditional_token_balance(position.no_token_id)
+                if yes_balance is None or no_balance is None:
+                    logger.error("❌ Could not re-check conditional token balances - aborting order placement")
+                    return
+                logger.info(f"  After wait - YES: {yes_balance:.2f}, NO: {no_balance:.2f}")
+                if yes_balance < position.yes_shares or no_balance < position.no_shares:
+                    logger.error(
+                        f"❌ Still insufficient shares after wait! "
+                        f"YES: {yes_balance:.2f} < {position.yes_shares:.2f}, "
+                        f"NO: {no_balance:.2f} < {position.no_shares:.2f}. "
+                        f"Aborting order placement."
+                    )
+                    return
+            
+            # Ensure conditional token allowances are set (required for selling)
+            logger.info("🔍 Checking conditional token allowances for exchange contracts...")
+            allowances_ok = self.pm.ensure_conditional_token_allowances()
+            if not allowances_ok:
+                logger.warning(
+                    "⚠️ Conditional token allowances not set. This may cause order placement to fail. "
+                    "The code will attempt to place orders anyway, but they may fail with 'not enough balance / allowance'."
+                )
+            
             # Get orderbook for YES side (NO should be symmetric)
             yes_orderbook = fetch_orderbook(position.yes_token_id)
             

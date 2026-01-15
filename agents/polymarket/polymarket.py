@@ -1099,15 +1099,121 @@ class Polymarket:
                 logger.info("✅ All conditional token allowances are set - ready for selling")
             else:
                 missing = [name for name, addr, approved in approval_results if approved is False]
-                logger.warning(
-                    f"⚠️ Conditional token allowances NOT set for: {', '.join(missing)}. "
-                    f"This may cause 'not enough balance / allowance' errors when selling. "
-                    f"Consider running _init_approvals(run=True) to set them."
-                )
+                missing_addresses = [addr for name, addr, approved in approval_results if approved is False]
+                
+                # For non-proxy wallets, try to set approvals automatically
+                if not self.proxy_wallet_address and missing_addresses:
+                    logger.info(
+                        f"🔧 Attempting to set conditional token allowances for: {', '.join(missing)}"
+                    )
+                    all_set_successfully = True
+                    for exchange_addr, exchange_name in exchange_addresses:
+                        if exchange_addr in missing_addresses:
+                            if self._set_conditional_token_approval(exchange_addr, exchange_name):
+                                logger.info(f"✅ Successfully set approval for {exchange_name}")
+                            else:
+                                logger.error(f"❌ Failed to set approval for {exchange_name}")
+                                all_set_successfully = False
+                    
+                    # Re-check approvals after setting them
+                    if all_set_successfully:
+                        logger.info("🔄 Re-checking conditional token allowances after setting them...")
+                        all_approved = True
+                        for exchange_addr, exchange_name in exchange_addresses:
+                            is_approved = self.check_conditional_token_allowance(exchange_addr, wallet_address)
+                            if is_approved is False:
+                                all_approved = False
+                                logger.warning(f"  ⚠️ Approval still not set for {exchange_name}")
+                            elif is_approved is True:
+                                logger.info(f"  ✓ Approval confirmed for {exchange_name}")
+                
+                if all_approved:
+                    logger.info("✅ All conditional token allowances are set - ready for selling")
+                else:
+                    logger.warning(
+                        f"⚠️ Conditional token allowances NOT set for: {', '.join(missing)}. "
+                        f"This may cause 'not enough balance / allowance' errors when selling. "
+                        f"Consider running _init_approvals(run=True) to set them."
+                    )
             
             return all_approved
         except Exception as e:
             logger.error(f"❌ Error ensuring conditional token allowances: {e}", exc_info=True)
+            return False
+    
+    def _set_conditional_token_approval(self, exchange_address: str, exchange_name: str) -> bool:
+        """
+        Set conditional token approval for a specific exchange contract.
+        
+        Args:
+            exchange_address: Exchange contract address to approve
+            exchange_name: Human-readable name for logging
+        
+        Returns:
+            True if approval was set successfully, False otherwise
+        """
+        try:
+            if not self.private_key:
+                logger.error("Cannot set approval: no private key available")
+                return False
+            
+            wallet_address = self.get_address_for_private_key()
+            logger.info(
+                f"🔧 Setting conditional token approval for {exchange_name} "
+                f"({exchange_address[:10]}...{exchange_address[-8:]})"
+            )
+            
+            # Build transaction
+            nonce = self.web3.eth.get_transaction_count(wallet_address)
+            
+            approval_txn = self.ctf.functions.setApprovalForAll(
+                exchange_address, True
+            ).build_transaction({
+                "chainId": self.chain_id,
+                "from": wallet_address,
+                "nonce": nonce,
+                "gas": 100000,  # Reasonable gas limit for setApprovalForAll
+                "gasPrice": self.web3.eth.gas_price
+            })
+            
+            # Sign transaction
+            signed_txn = self.web3.eth.account.sign_transaction(
+                approval_txn, private_key=self.private_key
+            )
+            
+            # Send transaction
+            raw_tx = getattr(signed_txn, 'raw_transaction', None) or getattr(signed_txn, 'rawTransaction', None)
+            if not raw_tx:
+                raise ValueError("Could not extract raw transaction from signed transaction")
+            tx_hash = self.web3.eth.send_raw_transaction(raw_tx)
+            logger.info(f"Transaction sent: {tx_hash.hex()}")
+            logger.info(f"Polygonscan: https://polygonscan.com/tx/{tx_hash.hex()}")
+            
+            # Wait for receipt
+            try:
+                receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+            except Exception as e:
+                logger.warning(f"Timeout waiting for receipt, trying direct fetch: {e}")
+                receipt = self.web3.eth.get_transaction_receipt(tx_hash)
+            
+            if receipt.status == 1:
+                logger.info(
+                    f"✅ Successfully set conditional token approval for {exchange_name}. "
+                    f"Transaction: {tx_hash.hex()}"
+                )
+                return True
+            else:
+                logger.error(
+                    f"❌ Failed to set conditional token approval for {exchange_name}. "
+                    f"Transaction status: {receipt.status}"
+                )
+                return False
+                
+        except Exception as e:
+            logger.error(
+                f"❌ Error setting conditional token approval for {exchange_name}: {e}",
+                exc_info=True
+            )
             return False
     
     def split_position(
