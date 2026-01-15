@@ -1497,7 +1497,9 @@ class Polymarket:
             )
             
             # Build transaction
-            nonce = self.web3.eth.get_transaction_count(wallet_address)
+            # Use 'pending' nonce to include pending transactions and avoid nonce conflicts
+            nonce = self.web3.eth.get_transaction_count(wallet_address, 'pending')
+            logger.debug(f"Using nonce: {nonce} (includes pending transactions)")
             
             split_txn = self.ctf.functions.splitPosition(
                 self.usdc_address,
@@ -1524,29 +1526,118 @@ class Polymarket:
             raw_tx = getattr(signed_txn, 'raw_transaction', None) or getattr(signed_txn, 'rawTransaction', None)
             if not raw_tx:
                 raise ValueError("Could not extract raw transaction from signed transaction")
-            tx_hash = self.web3.eth.send_raw_transaction(raw_tx)
-            logger.info(f"Transaction sent: {tx_hash.hex()}")
+            
+            try:
+                tx_hash = self.web3.eth.send_raw_transaction(raw_tx)
+                logger.info(f"Transaction sent: {tx_hash.hex()}")
+            except Exception as send_error:
+                logger.error(f"❌ Error sending transaction: {send_error}")
+                logger.error(f"   This usually means the transaction was rejected before being broadcast")
+                logger.error(f"   Common causes: nonce too high, gas price too low, or network issue")
+                # Check current nonce
+                try:
+                    current_nonce = self.web3.eth.get_transaction_count(wallet_address, 'pending')
+                    logger.info(f"   Current pending nonce: {current_nonce}, used nonce: {nonce}")
+                    if nonce > current_nonce:
+                        logger.warning(f"   ⚠️ Nonce {nonce} is higher than pending nonce {current_nonce} - transaction may be rejected")
+                except Exception:
+                    pass
+                raise
+            
+            # Verify transaction was actually broadcast (check mempool)
+            logger.info(f"Verifying transaction was broadcast to network...")
+            try:
+                # Wait a moment for transaction to propagate
+                time.sleep(2)
+                tx_check = self.web3.eth.get_transaction(tx_hash)
+                if tx_check:
+                    logger.info(f"✅ Transaction confirmed in mempool/blockchain")
+                    logger.info(f"   From: {tx_check.get('from', 'unknown')}")
+                    logger.info(f"   To: {tx_check.get('to', 'unknown')}")
+                    logger.info(f"   Nonce: {tx_check.get('nonce', 'unknown')}")
+                    logger.info(f"   Gas price: {tx_check.get('gasPrice', 'unknown')}")
+                    block_num = tx_check.get('blockNumber')
+                    if block_num:
+                        logger.info(f"   Block: {block_num} (already mined!)")
+                    else:
+                        logger.info(f"   Status: Pending in mempool")
+                else:
+                    logger.warning(f"⚠️ Transaction hash returned but transaction not found in mempool")
+                    logger.warning(f"   This may indicate a network connectivity issue")
+            except Exception as verify_error:
+                logger.warning(f"⚠️ Could not verify transaction broadcast: {verify_error}")
+                logger.warning(f"   Transaction hash: {tx_hash.hex()}")
+                logger.warning(f"   Will proceed to wait for receipt anyway...")
             
             # Wait for receipt
             logger.info(f"Waiting for transaction receipt (timeout: 300s)...")
             logger.info(f"Transaction hash: {tx_hash.hex()}")
             logger.info(f"Polygonscan: https://polygonscan.com/tx/{tx_hash.hex()}")
             
+            receipt = None
+            max_wait_time = 300  # seconds
+            poll_interval = 5  # seconds
+            start_time = time.time()
+            
             try:
-                receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
-                logger.info(f"✅ Transaction receipt received! Status: {receipt.status}")
+                logger.info(f"⏳ Polling for transaction receipt (checking every {poll_interval}s, max {max_wait_time}s)...")
+                # Poll manually with periodic status updates
+                while (time.time() - start_time) < max_wait_time:
+                    try:
+                        receipt = self.web3.eth.get_transaction_receipt(tx_hash)
+                        if receipt is not None:
+                            logger.info(f"✅ Transaction receipt received! Status: {receipt.status}")
+                            break
+                    except Exception:
+                        # Receipt not available yet, continue polling
+                        pass
+                    
+                    elapsed = time.time() - start_time
+                    if int(elapsed) % 30 == 0:  # Log every 30 seconds
+                        logger.info(f"⏳ Still waiting for receipt... ({int(elapsed)}s elapsed)")
+                    
+                    time.sleep(poll_interval)
+                
+                # If we still don't have a receipt, try wait_for_transaction_receipt as fallback
+                if receipt is None:
+                    logger.warning(f"⚠️ Manual polling didn't find receipt, trying wait_for_transaction_receipt...")
+                    try:
+                        receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+                        logger.info(f"✅ Transaction receipt received via wait_for_transaction_receipt! Status: {receipt.status}")
+                    except Exception as wait_error:
+                        logger.warning(f"⚠️ wait_for_transaction_receipt also failed: {wait_error}")
+                        
             except Exception as receipt_error:
-                logger.error(f"❌ Error waiting for transaction receipt: {receipt_error}")
-                logger.warning(f"⚠️ Attempting to check transaction status directly...")
-                # Try to get receipt directly (might have been mined but wait timed out)
+                logger.warning(f"⚠️ Error waiting for transaction receipt: {receipt_error}")
+                logger.info(f"⚠️ Attempting to check transaction status directly...")
+            
+            # Final attempt to get receipt directly
+            if receipt is None:
                 try:
                     receipt = self.web3.eth.get_transaction_receipt(tx_hash)
                     logger.info(f"✅ Retrieved receipt directly! Status: {receipt.status}")
                 except Exception as get_error:
                     logger.error(f"❌ Could not retrieve receipt: {get_error}")
+                    # Check if transaction is pending
+                    try:
+                        tx = self.web3.eth.get_transaction(tx_hash)
+                        if tx is None:
+                            logger.error(f"❌ Transaction not found in mempool or blockchain")
+                        else:
+                            block_num = tx.get('blockNumber')
+                            if block_num:
+                                logger.warning(f"⚠️ Transaction found in block {block_num} but receipt not available yet")
+                            else:
+                                logger.warning(f"⚠️ Transaction found but still pending in mempool")
+                    except Exception as tx_error:
+                        logger.error(f"❌ Could not check transaction status: {tx_error}")
                     logger.error(f"❌ Split transaction may have failed or is still pending")
                     logger.info(f"💡 Check transaction status manually: https://polygonscan.com/tx/{tx_hash.hex()}")
                     return None
+            
+            if receipt is None:
+                logger.error(f"❌ No receipt available for transaction {tx_hash.hex()}")
+                return None
             
             if receipt.status == 1:
                 logger.info(f"✅✅✅ Split position successful! ✅✅✅")

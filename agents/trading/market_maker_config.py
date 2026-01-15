@@ -6,7 +6,7 @@ Standalone config - only includes fields needed for market maker.
 import json
 import os
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -247,3 +247,16 @@ class MarketMakerConfig:
     def max_iterations_neither_fills(self) -> int:
         """Maximum number of adjustment iterations when neither side fills."""
         return int(self.config.get('max_iterations_neither_fills', 20))
+    
+    @property
+    def merge_transaction_hashes(self) -> Optional[List[str]]:
+        """Optional list of transaction hashes to merge on startup."""
+        value = self.config.get('merge_transaction_hashes')
+        if value is None:
+            return None
+        if isinstance(value, list):
+            return [str(tx_hash).strip() for tx_hash in value if tx_hash]
+        if isinstance(value, str):
+            # Support comma-separated string format
+            return [tx_hash.strip() for tx_hash in value.split(",") if tx_hash.strip()]
+        return None

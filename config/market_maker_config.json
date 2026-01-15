@@ -1,6 +1,6 @@
 {
   "split_amount": 6.0,
-  "offset_above_midpoint": 0.02,
+  "offset_above_midpoint": 0.01,
   "price_step": 0.01,
   "wait_after_fill": 5.0,
   "wait_if_neither_fills": 20.0,
@@ -18,5 +18,6 @@
   "websocket_reconnect_delay": 5.0,
   "use_websocket_order_status": true,
   "websocket_order_status_health_check_timeout": 14.0,
-  "websocket_order_status_reconnect_delay": 5.0
+  "websocket_order_status_reconnect_delay": 5.0,
+  "merge_transaction_hashes": ["0xcf8e99d2d9bbcfe577f5576903ebfe14a6fcb59e003ac3587eda9d3f66d478bf", "0xe712c1813b0b3680c45619353c2ffe6c65d1bbba15730c51a10498ffb02a96bd", "0xf3114c20d11c23a06afb55fc3a7d99c53854d7b092cf829faa82ed1256215fd8"]
 }

@@ -6,7 +6,9 @@ slightly above midpoint. Adjusts prices when one side fills.
 """
 import asyncio
 import logging
+import os
 import uuid
+import httpx
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, Optional, Set, Callable, List
@@ -390,7 +392,7 @@ class MarketMaker:
                             else:
                                 logger.warning(f"   ❌ Failed to merge")
                         else:
-                            logger.debug(
+                            logger.info(
                                 f"   ⏭️ Skipping {db_pos.market_slug}: "
                                 f"YES shares={yes_balance:.2f}, NO shares={no_balance:.2f} "
                                 f"(no equal shares to merge)"
@@ -409,6 +411,343 @@ class MarketMaker:
                 
         except Exception as e:
             logger.error(f"Error merging resolved positions for capital: {e}", exc_info=True)
+    
+    async def _check_polygonscan_for_merge_opportunities(self):
+        """
+        Query Polygonscan API for splitPosition transactions not logged to database.
+        Check wallet balances for those condition IDs and merge if equal YES/NO shares exist.
+        """
+        try:
+            logger.info("=" * 80)
+            logger.info("CHECKING POLYGONSCAN FOR TRANSACTIONS NOT LOGGED TO DATABASE")
+            logger.info("=" * 80)
+            
+            direct_wallet = self.pm.get_address_for_private_key()
+            ctf_address = self.pm.ctf_address
+            
+            logger.info(f"Wallet address: {direct_wallet}")
+            logger.info(f"CTF contract: {ctf_address}")
+            logger.info("")
+            
+            # Query Polygonscan API for transactions to CTF contract
+            # API: https://api.polygonscan.com/api?module=account&action=txlist&address=...
+            polygonscan_api_key = os.getenv("POLYGONSCAN_API_KEY", "")
+            if not polygonscan_api_key:
+                logger.warning("⚠️ POLYGONSCAN_API_KEY not set - skipping Polygonscan check")
+                logger.warning("   Set POLYGONSCAN_API_KEY environment variable to enable this feature")
+                return
+            
+            url = "https://api.polygonscan.com/api"
+            params = {
+                "module": "account",
+                "action": "txlist",
+                "address": direct_wallet,
+                "startblock": 0,
+                "endblock": 99999999,
+                "page": 1,
+                "offset": 100,  # Check last 100 transactions
+                "sort": "desc",
+                "apikey": polygonscan_api_key
+            }
+            
+            logger.info(f"Querying Polygonscan API for transactions...")
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+            
+            if data.get("status") != "1" or not data.get("result"):
+                logger.info(f"No transactions found or API error: {data.get('message', 'Unknown')}")
+                return
+            
+            transactions = data["result"]
+            logger.info(f"Found {len(transactions)} transactions from Polygonscan")
+            
+            # Get all condition IDs from database to filter out already-logged transactions
+            session = self.db.SessionLocal()
+            try:
+                db_positions = session.query(RealMarketMakerPosition).all()
+                logged_tx_hashes = {pos.split_transaction_hash for pos in db_positions if pos.split_transaction_hash}
+                logged_condition_ids = {pos.condition_id for pos in db_positions if pos.condition_id}
+                logger.info(f"Found {len(logged_tx_hashes)} logged transaction hashes in database")
+                logger.info(f"Found {len(logged_condition_ids)} logged condition IDs in database")
+            finally:
+                session.close()
+            
+            # Parse transactions to find splitPosition calls
+            split_position_method_id = "0x3a51cfa2"  # splitPosition function selector (first 4 bytes of keccak256 hash)
+            found_condition_ids = set()
+            
+            for tx in transactions:
+                tx_hash = tx.get("hash", "")
+                to_address = tx.get("to", "").lower()
+                input_data = tx.get("input", "")
+                
+                # Check if transaction is to CTF contract and is a splitPosition call
+                if to_address == ctf_address.lower() and input_data.startswith(split_position_method_id):
+                    if tx_hash in logged_tx_hashes:
+                        logger.debug(f"  ⏭️ Skipping {tx_hash[:10]}... (already logged to database)")
+                        continue
+                    
+                    # Decode transaction input to extract condition ID
+                    try:
+                        # Remove method ID (first 10 chars = 0x + 8 hex chars)
+                        encoded_params = input_data[10:]
+                        
+                        # splitPosition signature: (address, bytes32, bytes32, uint256[], uint256)
+                        # We need the 3rd parameter (conditionId, bytes32 = 64 hex chars)
+                        # Parameters are 32 bytes (64 hex chars) each
+                        # offset 0: address (padded to 32 bytes)
+                        # offset 64: bytes32 parentCollectionId
+                        # offset 128: bytes32 conditionId <- this is what we need
+                        condition_id_hex = "0x" + encoded_params[128:192]  # Extract bytes32 at offset 128
+                        condition_id = condition_id_hex.lower()
+                        
+                        if condition_id not in logged_condition_ids:
+                            found_condition_ids.add(condition_id)
+                            logger.info(f"  ✓ Found unlogged splitPosition: {tx_hash[:16]}... → condition_id: {condition_id}")
+                        else:
+                            logger.debug(f"  ⏭️ Skipping {tx_hash[:10]}... (condition_id already logged)")
+                    except Exception as decode_error:
+                        logger.warning(f"  ⚠️ Could not decode transaction {tx_hash[:16]}...: {decode_error}")
+                        continue
+            
+            logger.info(f"")
+            logger.info(f"Found {len(found_condition_ids)} condition IDs from Polygonscan not in database")
+            
+            if not found_condition_ids:
+                logger.info("No unlogged transactions found - database is up to date")
+                return
+            
+            # Check wallet balances for these condition IDs and merge if equal shares exist
+            merged_count = 0
+            total_usdc_freed = 0.0
+            
+            for condition_id in found_condition_ids:
+                try:
+                    # Get token IDs for this condition
+                    # Use the existing web3 instance from Polymarket
+                    w3 = self.pm.web3
+                    
+                    # Convert condition_id hex string to bytes32
+                    condition_id_bytes = bytes.fromhex(condition_id[2:].zfill(64))
+                    
+                    # YES token ID (outcome 0): keccak256(abi.encodePacked(conditionId, 0))
+                    # NO token ID (outcome 1): keccak256(abi.encodePacked(conditionId, 1))
+                    # Use solidityKeccak which does abi.encodePacked
+                    yes_token_id_raw = w3.solidityKeccak(['bytes32', 'uint256'], [condition_id_bytes, 0])
+                    yes_token_id = str(int.from_bytes(yes_token_id_raw, 'big'))
+                    
+                    no_token_id_raw = w3.solidityKeccak(['bytes32', 'uint256'], [condition_id_bytes, 1])
+                    no_token_id = str(int.from_bytes(no_token_id_raw, 'big'))
+                    
+                    # Check wallet balances
+                    yes_balance = self.pm.get_conditional_token_balance(
+                        yes_token_id,
+                        wallet_address=direct_wallet
+                    )
+                    no_balance = self.pm.get_conditional_token_balance(
+                        no_token_id,
+                        wallet_address=direct_wallet
+                    )
+                    
+                    if yes_balance is None or no_balance is None:
+                        continue
+                    
+                    if yes_balance > 0 and no_balance > 0:
+                        merge_amount = min(yes_balance, no_balance)
+                        logger.info(
+                            f"💰 Found merge opportunity (from Polygonscan): "
+                            f"condition_id={condition_id[:20]}..., "
+                            f"YES={yes_balance:.2f}, NO={no_balance:.2f}, "
+                            f"merging {merge_amount:.2f} shares"
+                        )
+                        
+                        loop = asyncio.get_event_loop()
+                        merge_result = await loop.run_in_executor(
+                            None,
+                            self.pm.merge_positions,
+                            condition_id,
+                            merge_amount
+                        )
+                        
+                        if merge_result:
+                            logger.info(f"   ✅ Successfully merged → ${merge_amount:.2f} USDC freed")
+                            merged_count += 1
+                            total_usdc_freed += merge_amount
+                        else:
+                            logger.warning(f"   ❌ Failed to merge")
+                    
+                except Exception as e:
+                    logger.error(f"Error processing condition_id {condition_id[:20]}...: {e}", exc_info=True)
+                    continue
+            
+            logger.info("=" * 80)
+            logger.info(f"POLYGONSCAN CHECK COMPLETE: Merged {merged_count} positions, freed ${total_usdc_freed:.2f} USDC")
+            logger.info("=" * 80)
+            
+        except Exception as e:
+            logger.error(f"Error checking Polygonscan for merge opportunities: {e}", exc_info=True)
+    
+    async def _merge_from_transaction_hashes(self, tx_hashes: List[str]):
+        """
+        Merge positions from a list of transaction hashes.
+        Fetches transaction details from Polygonscan, extracts condition IDs, and merges if equal YES/NO shares exist.
+        
+        Args:
+            tx_hashes: List of transaction hashes (with or without 0x prefix)
+        """
+        try:
+            if not tx_hashes:
+                return
+            
+            logger.info("=" * 80)
+            logger.info(f"MERGING FROM PROVIDED TRANSACTION HASHES ({len(tx_hashes)} transactions)")
+            logger.info("=" * 80)
+            
+            direct_wallet = self.pm.get_address_for_private_key()
+            ctf_address = self.pm.ctf_address
+            
+            # Normalize transaction hashes (ensure 0x prefix)
+            normalized_hashes = []
+            for tx_hash in tx_hashes:
+                tx_hash = tx_hash.strip()
+                if not tx_hash.startswith("0x"):
+                    tx_hash = "0x" + tx_hash
+                normalized_hashes.append(tx_hash.lower())
+            
+            logger.info(f"Processing {len(normalized_hashes)} transaction hashes...")
+            
+            # Fetch transaction details from blockchain RPC (no API key needed)
+            found_condition_ids = set()
+            split_position_method_id = "0x3a51cfa2"  # splitPosition function selector
+            
+            # Use web3 to fetch transactions directly from blockchain
+            w3 = self.pm.web3
+            
+            for tx_hash in normalized_hashes:
+                try:
+                    # Fetch transaction details from blockchain RPC
+                    loop = asyncio.get_event_loop()
+                    tx_data = await loop.run_in_executor(
+                        None,
+                        w3.eth.get_transaction,
+                        tx_hash
+                    )
+                    
+                    if not tx_data:
+                        logger.warning(f"  ⚠️ Transaction {tx_hash[:16]}... not found on blockchain")
+                        continue
+                    
+                    to_address = tx_data.get("to", "")
+                    if to_address:
+                        to_address = to_address.lower()
+                    input_data = tx_data.get("input", "")
+                    
+                    # Check if transaction is to CTF contract and is a splitPosition call
+                    if to_address != ctf_address.lower():
+                        logger.debug(f"  ⏭️ Skipping {tx_hash[:16]}... (not a CTF contract transaction)")
+                        continue
+                    
+                    if not input_data.startswith(split_position_method_id):
+                        logger.debug(f"  ⏭️ Skipping {tx_hash[:16]}... (not a splitPosition call)")
+                        continue
+                    
+                    # Decode transaction input to extract condition ID
+                    try:
+                        # Remove method ID (first 10 chars = 0x + 8 hex chars)
+                        encoded_params = input_data[10:]
+                        
+                        # splitPosition signature: (address, bytes32, bytes32, uint256[], uint256)
+                        # offset 128: bytes32 conditionId
+                        condition_id_hex = "0x" + encoded_params[128:192]
+                        condition_id = condition_id_hex.lower()
+                        
+                        found_condition_ids.add(condition_id)
+                        logger.info(f"  ✓ Extracted condition_id from {tx_hash[:16]}...: {condition_id}")
+                    except Exception as decode_error:
+                        logger.warning(f"  ⚠️ Could not decode transaction {tx_hash[:16]}...: {decode_error}")
+                        continue
+                    
+                except Exception as fetch_error:
+                    logger.error(f"  ❌ Error fetching transaction {tx_hash[:16]}...: {fetch_error}")
+                    continue
+            
+            logger.info(f"")
+            logger.info(f"Found {len(found_condition_ids)} condition IDs from provided transaction hashes")
+            
+            if not found_condition_ids:
+                logger.info("No valid splitPosition transactions found in provided hashes")
+                return
+            
+            # Check wallet balances and merge if equal shares exist
+            merged_count = 0
+            total_usdc_freed = 0.0
+            
+            for condition_id in found_condition_ids:
+                try:
+                    # Calculate token IDs
+                    w3 = self.pm.web3
+                    condition_id_bytes = bytes.fromhex(condition_id[2:].zfill(64))
+                    
+                    yes_token_id_raw = w3.solidityKeccak(['bytes32', 'uint256'], [condition_id_bytes, 0])
+                    yes_token_id = str(int.from_bytes(yes_token_id_raw, 'big'))
+                    
+                    no_token_id_raw = w3.solidityKeccak(['bytes32', 'uint256'], [condition_id_bytes, 1])
+                    no_token_id = str(int.from_bytes(no_token_id_raw, 'big'))
+                    
+                    # Check wallet balances
+                    yes_balance = self.pm.get_conditional_token_balance(
+                        yes_token_id,
+                        wallet_address=direct_wallet
+                    )
+                    no_balance = self.pm.get_conditional_token_balance(
+                        no_token_id,
+                        wallet_address=direct_wallet
+                    )
+                    
+                    if yes_balance is None or no_balance is None:
+                        continue
+                    
+                    if yes_balance > 0 and no_balance > 0:
+                        merge_amount = min(yes_balance, no_balance)
+                        logger.info(
+                            f"💰 Found merge opportunity (from provided tx hash): "
+                            f"condition_id={condition_id[:20]}..., "
+                            f"YES={yes_balance:.2f}, NO={no_balance:.2f}, "
+                            f"merging {merge_amount:.2f} shares"
+                        )
+                        
+                        loop = asyncio.get_event_loop()
+                        merge_result = await loop.run_in_executor(
+                            None,
+                            self.pm.merge_positions,
+                            condition_id,
+                            merge_amount
+                        )
+                        
+                        if merge_result:
+                            logger.info(f"   ✅ Successfully merged → ${merge_amount:.2f} USDC freed")
+                            merged_count += 1
+                            total_usdc_freed += merge_amount
+                        else:
+                            logger.warning(f"   ❌ Failed to merge")
+                    else:
+                        logger.debug(
+                            f"  ⏭️ No equal shares to merge for condition_id {condition_id[:20]}... "
+                            f"(YES: {yes_balance:.2f}, NO: {no_balance:.2f})"
+                        )
+                    
+                except Exception as e:
+                    logger.error(f"Error processing condition_id {condition_id[:20]}...: {e}", exc_info=True)
+                    continue
+            
+            logger.info("=" * 80)
+            logger.info(f"MERGE FROM TX HASHES COMPLETE: Merged {merged_count} positions, freed ${total_usdc_freed:.2f} USDC")
+            logger.info("=" * 80)
+            
+        except Exception as e:
+            logger.error(f"Error merging from transaction hashes: {e}", exc_info=True)
     
     async def redeem_past_positions(self, condition_ids: Optional[List[str]] = None):
         """
@@ -580,6 +919,24 @@ class MarketMaker:
             logger.error(f"Error scanning wallet for past positions: {e}", exc_info=True)
         logger.info("")
         
+        # Check Polygonscan for transactions not logged to database (one-time on startup)
+        logger.info("Checking Polygonscan for transactions not logged to database...")
+        try:
+            await self._check_polygonscan_for_merge_opportunities()
+        except Exception as e:
+            logger.error(f"Error checking Polygonscan: {e}", exc_info=True)
+        logger.info("")
+        
+        # Merge from transaction hashes in config (if any)
+        merge_tx_hashes = self.config.merge_transaction_hashes
+        if merge_tx_hashes:
+            logger.info(f"Merging from {len(merge_tx_hashes)} transaction hash(es) in config...")
+            try:
+                await self._merge_from_transaction_hashes(merge_tx_hashes)
+            except Exception as e:
+                logger.error(f"Error merging from config transaction hashes: {e}", exc_info=True)
+            logger.info("")
+        
         # Merge most recent positions to free up capital (one-time on startup)
         logger.info("Merging recent positions to free up USDC capital (past 20)...")
         try:
@@ -705,11 +1062,21 @@ class MarketMaker:
                 else:
                     filled_shares = position.yes_shares if side == "YES" else position.no_shares
                 
+                # Extract fill price from WebSocket data
                 fill_price = order_data.get("price") or order_data.get("fillPrice")
+                limit_price = position.yes_order_price if side == "YES" else position.no_order_price
+                
                 if fill_price:
                     fill_price = float(fill_price)
+                    # Validate for sell orders (should never fill below limit price)
+                    if fill_price < limit_price:
+                        logger.warning(
+                            f"⚠️ WebSocket fill price (${fill_price:.4f}) is BELOW limit price (${limit_price:.4f}) "
+                            f"for {side} sell order! Using limit price instead."
+                        )
+                        fill_price = limit_price
                 else:
-                    fill_price = position.yes_order_price if side == "YES" else position.no_order_price
+                    fill_price = limit_price
                 
                 fill_time = datetime.now(timezone.utc)
                 
@@ -960,15 +1327,7 @@ class MarketMaker:
     ) -> bool:
         """Start market making for a new market. Returns True if successful, False otherwise."""
         try:
-            # Split position
-            split_result = await self._split_position(condition_id)
-            
-            if not split_result:
-                logger.error(f"Failed to split position for market {market_slug}")
-                # Mark position as error in database if we created one
-                return False
-            
-            # Create position object
+            # Create position object (before split, so we can track it in DB)
             position = MarketMakerPosition(
                 market_slug=market_slug,
                 market=market,
@@ -978,13 +1337,31 @@ class MarketMaker:
                 split_amount=self.config.split_amount,
                 yes_shares=self.config.split_amount,
                 no_shares=self.config.split_amount,
-                split_transaction_hash=split_result.get("transaction_hash"),
+                split_transaction_hash=None,  # Will be updated after split
             )
             
-            # Save to database
+            # Save to database BEFORE split (so we have a record even if split hangs/fails)
             db_position = self._save_position_to_db(position)
             if db_position:
                 position.db_position_id = db_position.id
+                logger.info(f"📝 Created pending position record in database: ID={db_position.id}")
+            
+            # Split position (this may take time waiting for receipt)
+            split_result = await self._split_position(condition_id)
+            
+            if not split_result:
+                logger.error(f"Failed to split position for market {market_slug}")
+                # Update database record to mark as failed
+                if position.db_position_id:
+                    self._update_split_status_in_db(position.db_position_id, None, "failed")
+                return False
+            
+            # Update position with transaction hash
+            position.split_transaction_hash = split_result.get("transaction_hash")
+            
+            # Update database with transaction hash
+            if position.db_position_id:
+                self._update_split_status_in_db(position.db_position_id, position.split_transaction_hash, "active")
             
             # Place sell orders
             logger.info(f"📤 Placing sell orders for {market_slug}...")
@@ -1085,7 +1462,7 @@ class MarketMaker:
                     split_transaction_hash=position.split_transaction_hash,
                     yes_shares=position.yes_shares,
                     no_shares=position.no_shares,
-                    position_status='active',
+                    position_status='pending',  # Will be updated to 'active' after split completes
                 )
                 
                 session.add(db_position)
@@ -1463,8 +1840,18 @@ class MarketMaker:
         except Exception as e:
             logger.error(f"Error updating fill details in database: {e}", exc_info=True)
     
-    def _extract_fill_price(self, order_status: Dict, fallback_price: Optional[float]) -> float:
-        """Extract fill price from order status, or use fallback."""
+    def _extract_fill_price(self, order_status: Dict, fallback_price: Optional[float], is_sell_order: bool = True) -> float:
+        """
+        Extract fill price from order status, or use fallback.
+        
+        Args:
+            order_status: Order status dictionary from API
+            fallback_price: Original limit order price (used if API doesn't provide fill price)
+            is_sell_order: True if this is a sell order (for validation)
+        
+        Returns:
+            Fill price (validated for sell orders to ensure it's >= limit price)
+        """
         # Try to get fill price from order status
         fill_price = (
             order_status.get("price") or
@@ -1472,21 +1859,40 @@ class MarketMaker:
             order_status.get("fill_price") or
             order_status.get("averageFillPrice") or
             order_status.get("average_fill_price") or
+            order_status.get("avgFillPrice") or
+            order_status.get("avg_fill_price") or
             None
         )
         
+        extracted_price = None
         if fill_price:
             try:
-                return float(fill_price)
+                extracted_price = float(fill_price)
             except (ValueError, TypeError):
                 pass
         
-        # Use fallback price (original order price)
-        if fallback_price:
-            return fallback_price
+        # Use fallback price (original order price) if API didn't provide fill price
+        if extracted_price is None:
+            if fallback_price:
+                logger.debug(f"Using fallback price (limit order price): ${fallback_price:.4f}")
+                return fallback_price
+            else:
+                logger.warning("No fill price found in order status and no fallback price - using default 0.50")
+                return 0.50
         
-        # Default fallback
-        return 0.50
+        # Validate fill price for sell orders (should never be below limit price)
+        if is_sell_order and fallback_price:
+            if extracted_price < fallback_price:
+                logger.warning(
+                    f"⚠️ Fill price (${extracted_price:.4f}) is BELOW limit price (${fallback_price:.4f}) "
+                    f"for sell order! This shouldn't happen. Using limit price instead. "
+                    f"Order status fields: {list(order_status.keys())}"
+                )
+                logger.debug(f"Full order status: {order_status}")
+                # Use limit price instead of the suspicious lower price
+                return fallback_price
+        
+        return extracted_price
     
     def _update_fill_timing_in_db(
         self,
@@ -1593,8 +1999,8 @@ class MarketMaker:
                         position.yes_filled = True
                         position.yes_fill_time = datetime.now(timezone.utc)
                         
-                        # Extract fill price if available
-                        yes_fill_price = self._extract_fill_price(yes_status, position.yes_order_price)
+                        # Extract fill price if available (YES is a sell order)
+                        yes_fill_price = self._extract_fill_price(yes_status, position.yes_order_price, is_sell_order=True)
                         
                         logger.info(
                             f"✅ YES order filled for {market_slug}: "
@@ -1632,8 +2038,8 @@ class MarketMaker:
                         position.no_filled = True
                         position.no_fill_time = datetime.now(timezone.utc)
                         
-                        # Extract fill price if available
-                        no_fill_price = self._extract_fill_price(no_status, position.no_order_price)
+                        # Extract fill price if available (NO is a sell order)
+                        no_fill_price = self._extract_fill_price(no_status, position.no_order_price, is_sell_order=True)
                         
                         logger.info(
                             f"✅ NO order filled for {market_slug}: "
@@ -1784,6 +2190,12 @@ class MarketMaker:
                 yes_price = position.yes_order_price or 0.0
                 no_price = position.no_order_price or 0.0
                 price_sum = yes_price + no_price
+                
+                logger.info(
+                    f"🔍 Neither fills check for {position.market_slug}: "
+                    f"YES price={yes_price:.4f}, NO price={no_price:.4f}, "
+                    f"sum={price_sum:.4f}, threshold={self.config.merge_threshold:.4f}"
+                )
                 
                 # Check if we should merge (price sum <= threshold)
                 if price_sum <= self.config.merge_threshold:
@@ -2026,12 +2438,12 @@ class MarketMaker:
                     if side == "YES":
                         position.yes_filled = True
                         position.yes_fill_time = datetime.now(timezone.utc)
-                        fill_price = self._extract_fill_price(current_status, position.yes_order_price)
+                        fill_price = self._extract_fill_price(current_status, position.yes_order_price, is_sell_order=True)
                         self._update_fill_details_in_db(position, "YES", filled_amount, fill_price)
                     else:
                         position.no_filled = True
                         position.no_fill_time = datetime.now(timezone.utc)
-                        fill_price = self._extract_fill_price(current_status, position.no_order_price)
+                        fill_price = self._extract_fill_price(current_status, position.no_order_price, is_sell_order=True)
                         self._update_fill_details_in_db(position, "NO", filled_amount, fill_price)
                     return
                 
