@@ -1257,7 +1257,11 @@ class Polymarket:
             
             # Send transaction
             logger.info("Sending splitPosition transaction...")
-            tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
+            # Handle both old (rawTransaction) and new (raw_transaction) web3.py versions
+            raw_tx = getattr(signed_txn, 'raw_transaction', None) or getattr(signed_txn, 'rawTransaction', None)
+            if not raw_tx:
+                raise ValueError("Could not extract raw transaction from signed transaction")
+            tx_hash = self.web3.eth.send_raw_transaction(raw_tx)
             logger.info(f"Transaction sent: {tx_hash.hex()}")
             
             # Wait for receipt
