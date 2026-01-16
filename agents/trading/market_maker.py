@@ -67,10 +67,15 @@ class MarketMakerPosition:
     yes_fill_time: Optional[datetime] = None
     no_fill_time: Optional[datetime] = None
     
-    # Adjustment tracking
-    adjustment_count: int = 0
+    # Adjustment tracking (separate for YES and NO sides)
+    yes_adjustment_count: int = 0
+    no_adjustment_count: int = 0
     max_adjustments: int = 10
-    last_adjustment_time: Optional[datetime] = None  # When we last adjusted price
+    yes_last_adjustment_time: Optional[datetime] = None  # When we last adjusted YES price
+    no_last_adjustment_time: Optional[datetime] = None  # When we last adjusted NO price
+    # Legacy field - kept for backward compatibility
+    adjustment_count: int = 0
+    last_adjustment_time: Optional[datetime] = None  # When we last adjusted price (deprecated)
     
     # Neither-fills tracking
     neither_fills_iteration_count: int = 0  # How many times we've adjusted when neither fills
@@ -1093,9 +1098,7 @@ class MarketMaker:
                     position.no_filled = True
                     position.no_fill_time = fill_time
                 
-                # Initialize last_adjustment_time if this is the first side to fill
-                if position.last_adjustment_time is None:
-                    position.last_adjustment_time = fill_time
+                # Note: We no longer initialize last_adjustment_time here - using side-specific times instead
                 
                 # Update database
                 self._update_fill_details_in_db(position, side, filled_shares, fill_price)
@@ -1215,7 +1218,8 @@ class MarketMaker:
                     no_order_price=db_pos.no_order_price,
                     yes_filled=db_pos.yes_order_status == 'filled',
                     no_filled=db_pos.no_order_status == 'filled',
-                    adjustment_count=db_pos.adjustment_count,
+                    yes_adjustment_count=db_pos.yes_adjustment_count or 0,
+                    no_adjustment_count=db_pos.no_adjustment_count or 0,
                     db_position_id=db_pos.id,
                 )
                 
@@ -1845,7 +1849,8 @@ class MarketMaker:
                     db_position.no_order_price = position.no_order_price
                     db_position.yes_order_size = position.yes_shares
                     db_position.no_order_size = position.no_shares
-                    db_position.adjustment_count = position.adjustment_count
+                    db_position.yes_adjustment_count = position.yes_adjustment_count
+                    db_position.no_adjustment_count = position.no_adjustment_count
                     db_position.updated_at = datetime.now(timezone.utc)
                     
                     session.commit()
@@ -2109,9 +2114,7 @@ class MarketMaker:
                             )
                             self._update_fill_timing_in_db(position, "NO", "YES", time_diff)
                         
-                        # Initialize last_adjustment_time if this is the first side to fill
-                        if position.last_adjustment_time is None:
-                            position.last_adjustment_time = position.yes_fill_time
+                        # Note: We no longer initialize last_adjustment_time here - using side-specific times instead
                         
                         # Update database with fill details
                         self._update_fill_details_in_db(position, "YES", yes_filled_amount, yes_fill_price)
@@ -2148,9 +2151,7 @@ class MarketMaker:
                             )
                             self._update_fill_timing_in_db(position, "YES", "NO", time_diff)
                         
-                        # Initialize last_adjustment_time if this is the first side to fill
-                        if position.last_adjustment_time is None:
-                            position.last_adjustment_time = position.no_fill_time
+                        # Note: We no longer initialize last_adjustment_time here - using side-specific times instead
                         
                         # Update database with fill details
                         self._update_fill_details_in_db(position, "NO", no_filled_amount, no_fill_price)
@@ -2195,8 +2196,11 @@ class MarketMaker:
                 # Both filled or neither filled - nothing to do
                 return
             
-            # Use last_adjustment_time if we've already adjusted, otherwise use fill_time
-            reference_time = position.last_adjustment_time if position.last_adjustment_time else fill_time
+            # Use side-specific last_adjustment_time if we've already adjusted, otherwise use fill_time
+            if unfilled_side == "YES":
+                reference_time = position.yes_last_adjustment_time if position.yes_last_adjustment_time else fill_time
+            else:
+                reference_time = position.no_last_adjustment_time if position.no_last_adjustment_time else fill_time
             
             if reference_time is None:
                 return
@@ -2204,8 +2208,16 @@ class MarketMaker:
             # Calculate time since last adjustment (or first fill)
             time_since_reference = (datetime.now(timezone.utc) - reference_time).total_seconds()
             
-            # Check if wait_after_fill time has passed
-            if time_since_reference >= self.config.wait_after_fill:
+            # Calculate exponential backoff wait time based on side-specific adjustment count
+            # Formula: base_wait * (multiplier ^ adjustment_count)
+            # This means each subsequent adjustment waits exponentially longer
+            backoff_multiplier = self.config.exponential_backoff_multiplier
+            # Use side-specific adjustment count
+            side_adjustment_count = position.yes_adjustment_count if unfilled_side == "YES" else position.no_adjustment_count
+            exponential_wait_time = self.config.wait_after_fill * (backoff_multiplier ** side_adjustment_count)
+            
+            # Check if exponential wait time has passed
+            if time_since_reference >= exponential_wait_time:
                 # Check if other side filled (double-check before adjusting)
                 other_order_id = position.no_order_id if unfilled_side == "NO" else position.yes_order_id
                 
@@ -2243,9 +2255,11 @@ class MarketMaker:
                             return
                 
                 # Other side still didn't fill - adjust price
+                side_adjustment_count = position.yes_adjustment_count if unfilled_side == "YES" else position.no_adjustment_count
                 logger.info(
                     f"{unfilled_side} side did not fill after {time_since_reference:.1f}s "
-                    f"(wait_after_fill={self.config.wait_after_fill:.1f}s), "
+                    f"(exponential wait={exponential_wait_time:.1f}s, base={self.config.wait_after_fill:.1f}s, "
+                    f"{unfilled_side.lower()}_adjustment_count={side_adjustment_count}, multiplier={backoff_multiplier:.2f}), "
                     f"adjusting price by -{self.config.price_step:.4f}"
                 )
                 
@@ -2269,12 +2283,27 @@ class MarketMaker:
                 )
                 return
             
-            # Calculate time since orders were placed (or last adjustment)
-            reference_time = position.last_adjustment_time if position.last_adjustment_time else position.orders_placed_time
+            # Calculate time since orders were placed (or last adjustment for either side)
+            # For "neither fills", we use the most recent adjustment time from either side, or orders_placed_time
+            reference_time = position.orders_placed_time
+            if position.yes_last_adjustment_time and (not reference_time or position.yes_last_adjustment_time > reference_time):
+                reference_time = position.yes_last_adjustment_time
+            if position.no_last_adjustment_time and (not reference_time or position.no_last_adjustment_time > reference_time):
+                reference_time = position.no_last_adjustment_time
+            
+            if reference_time is None:
+                return
+            
             time_since_reference = (datetime.now(timezone.utc) - reference_time).total_seconds()
             
-            # Check if wait_if_neither_fills time has passed
-            if time_since_reference >= self.config.wait_if_neither_fills:
+            # Calculate exponential backoff wait time based on iteration count
+            # Formula: base_wait * (multiplier ^ iteration_count)
+            # This means each subsequent adjustment waits exponentially longer
+            backoff_multiplier = self.config.exponential_backoff_multiplier
+            exponential_wait_time = self.config.wait_if_neither_fills * (backoff_multiplier ** position.neither_fills_iteration_count)
+            
+            # Check if exponential wait time has passed
+            if time_since_reference >= exponential_wait_time:
                 # Check current prices
                 yes_price = position.yes_order_price or 0.0
                 no_price = position.no_order_price or 0.0
@@ -2297,7 +2326,8 @@ class MarketMaker:
                     # Adjust both prices down by price_step
                     logger.info(
                         f"Neither side filled after {time_since_reference:.1f}s "
-                        f"(wait_if_neither_fills={self.config.wait_if_neither_fills:.1f}s). "
+                        f"(exponential wait={exponential_wait_time:.1f}s, base={self.config.wait_if_neither_fills:.1f}s, "
+                        f"iteration_count={position.neither_fills_iteration_count}, multiplier={backoff_multiplier:.2f}). "
                         f"Adjusting both prices by -{self.config.price_step:.4f}"
                     )
                     await self._adjust_both_prices(position)
@@ -2325,7 +2355,9 @@ class MarketMaker:
                 position.merged_waiting_resplit = False
                 position.merged_at = None
                 position.neither_fills_iteration_count = 0
-                position.last_adjustment_time = None
+                # Reset side-specific adjustment times
+                position.yes_last_adjustment_time = None
+                position.no_last_adjustment_time = None
                 
                 # Re-split
                 split_result = await self._split_position(position.condition_id)
@@ -2384,11 +2416,89 @@ class MarketMaker:
             )
             
             if cancel_result:
-                logger.info(f"✅ Batch cancelled both orders for {position.market_slug}")
+                logger.info(f"✅ Batch cancel request sent for both orders for {position.market_slug}")
             else:
                 logger.error(f"❌ Batch cancel failed for {position.market_slug} - cancel_result is None or empty")
                 logger.warning(f"⚠️ Cannot proceed with price adjustment - orders may still be active")
                 return
+            
+            # Immediately verify cancel status (no arbitrary wait)
+            logger.info(f"🔍 Verifying both orders are cancelled...")
+            max_verify_attempts = 3
+            verify_attempt = 0
+            yes_cancelled = False
+            no_cancelled = False
+            
+            while verify_attempt < max_verify_attempts and (not yes_cancelled or not no_cancelled):
+                # Check YES order if not already confirmed
+                if not yes_cancelled and position.yes_order_id:
+                    yes_status = self.pm.get_order_status(position.yes_order_id)
+                    if yes_status:
+                        yes_status_str, yes_filled_amount, yes_total_amount = parse_order_status(yes_status)
+                        if is_order_cancelled(yes_status_str):
+                            logger.info(f"✅ YES order {position.yes_order_id} confirmed cancelled")
+                            yes_cancelled = True
+                        elif is_order_filled(yes_status_str, yes_filled_amount, yes_total_amount):
+                            logger.info(f"✅ YES order filled while verifying cancel")
+                            position.yes_filled = True
+                            position.yes_fill_time = datetime.now(timezone.utc)
+                            fill_price = self._extract_fill_price(yes_status, position.yes_order_price, is_sell_order=True)
+                            self._update_fill_details_in_db(position, "YES", yes_filled_amount, fill_price)
+                            yes_cancelled = True  # Treat filled as "cancelled" for our purposes
+                    else:
+                        logger.warning(f"⚠️ Could not verify YES order cancel status (attempt {verify_attempt + 1})")
+                
+                # Check NO order if not already confirmed
+                if not no_cancelled and position.no_order_id:
+                    no_status = self.pm.get_order_status(position.no_order_id)
+                    if no_status:
+                        no_status_str, no_filled_amount, no_total_amount = parse_order_status(no_status)
+                        if is_order_cancelled(no_status_str):
+                            logger.info(f"✅ NO order {position.no_order_id} confirmed cancelled")
+                            no_cancelled = True
+                        elif is_order_filled(no_status_str, no_filled_amount, no_total_amount):
+                            logger.info(f"✅ NO order filled while verifying cancel")
+                            position.no_filled = True
+                            position.no_fill_time = datetime.now(timezone.utc)
+                            fill_price = self._extract_fill_price(no_status, position.no_order_price, is_sell_order=True)
+                            self._update_fill_details_in_db(position, "NO", no_filled_amount, fill_price)
+                            no_cancelled = True  # Treat filled as "cancelled" for our purposes
+                    else:
+                        logger.warning(f"⚠️ Could not verify NO order cancel status (attempt {verify_attempt + 1})")
+                
+                # If both are confirmed, break immediately
+                if yes_cancelled and no_cancelled:
+                    break
+                
+                # If not confirmed yet, wait briefly before retry
+                verify_attempt += 1
+                if verify_attempt < max_verify_attempts and (not yes_cancelled or not no_cancelled):
+                    logger.info(
+                        f"⏳ Still verifying cancels (attempt {verify_attempt}/{max_verify_attempts}). "
+                        f"YES: {'✓' if yes_cancelled else 'pending'}, NO: {'✓' if no_cancelled else 'pending'}. "
+                        f"Waiting 1 second..."
+                    )
+                    await asyncio.sleep(1.0)
+                else:
+                    # Give up after max attempts
+                    if not yes_cancelled:
+                        logger.warning(f"⚠️ YES order still not confirmed cancelled after {max_verify_attempts} attempts - proceeding anyway")
+                        yes_cancelled = True  # Proceed anyway
+                    if not no_cancelled:
+                        logger.warning(f"⚠️ NO order still not confirmed cancelled after {max_verify_attempts} attempts - proceeding anyway")
+                        no_cancelled = True  # Proceed anyway
+            
+            # Check if either side filled - if so, handle accordingly
+            if position.yes_filled and position.no_filled:
+                logger.info(f"✅ Both orders filled while verifying cancel - no need to place new orders")
+                await self._handle_both_filled(position)
+                return
+            elif position.yes_filled:
+                logger.info(f"✅ YES order filled - will only place new NO order")
+            elif position.no_filled:
+                logger.info(f"✅ NO order filled - will only place new YES order")
+            
+            logger.info(f"✅ Cancel verification complete - proceeding with new order placement")
             
             # Batch place new orders at adjusted prices
             orders_to_place = [
@@ -2448,8 +2558,11 @@ class MarketMaker:
             
             # Update tracking
             position.neither_fills_iteration_count += 1
-            position.last_adjustment_time = datetime.now(timezone.utc)
-            position.orders_placed_time = datetime.now(timezone.utc)  # Reset timer
+            # Update both side adjustment times since we adjusted both prices
+            now = datetime.now(timezone.utc)
+            position.yes_last_adjustment_time = now
+            position.no_last_adjustment_time = now
+            position.orders_placed_time = now  # Reset timer
             
             # Update database
             self._update_position_in_db(position)
@@ -2504,9 +2617,11 @@ class MarketMaker:
     async def _adjust_unfilled_side(self, position: MarketMakerPosition, side: str):
         """Cancel unfilled order and place new order at lower price."""
         try:
-            if position.adjustment_count >= position.max_adjustments:
+            # Check side-specific adjustment count
+            side_adjustment_count = position.yes_adjustment_count if side == "YES" else position.no_adjustment_count
+            if side_adjustment_count >= position.max_adjustments:
                 logger.warning(
-                    f"Max adjustments ({position.max_adjustments}) reached for {position.market_slug}, "
+                    f"Max adjustments ({position.max_adjustments}) reached for {side} side of {position.market_slug}, "
                     f"stopping adjustments"
                 )
                 return
@@ -2559,7 +2674,7 @@ class MarketMaker:
                 cancel_result = self.pm.cancel_order(order_id)
                 
                 if cancel_result:
-                    logger.info(f"✅ Cancelled {side} order")
+                    logger.info(f"✅ Cancel request sent for {side} order {order_id}")
                     # Update status - use order size as total_amount
                     total_shares = position.yes_shares if side == "YES" else position.no_shares
                     self._update_order_status_in_db(position, side, "cancelled", 0, total_shares, None)
@@ -2575,6 +2690,57 @@ class MarketMaker:
                     f"Will attempt to place new order anyway (order may already be cancelled/filled)."
                 )
                 # Continue anyway - might be a transient error
+            
+            # Immediately verify cancel status (no arbitrary wait)
+            logger.info(f"🔍 Verifying {side} order {order_id} is cancelled...")
+            max_verify_attempts = 3
+            verify_attempt = 0
+            order_confirmed_cancelled_or_filled = False
+            
+            while verify_attempt < max_verify_attempts and not order_confirmed_cancelled_or_filled:
+                verify_status = self.pm.get_order_status(order_id)
+                if verify_status:
+                    status_str, filled_amount, total_amount = parse_order_status(verify_status)
+                    if is_order_cancelled(status_str):
+                        logger.info(f"✅ Order {order_id} confirmed cancelled")
+                        order_confirmed_cancelled_or_filled = True
+                        break
+                    elif is_order_filled(status_str, filled_amount, total_amount):
+                        logger.info(f"✅ Order {order_id} filled - no need to place new order")
+                        if side == "YES":
+                            position.yes_filled = True
+                            position.yes_fill_time = datetime.now(timezone.utc)
+                            fill_price = self._extract_fill_price(verify_status, position.yes_order_price, is_sell_order=True)
+                            self._update_fill_details_in_db(position, "YES", filled_amount, fill_price)
+                        else:
+                            position.no_filled = True
+                            position.no_fill_time = datetime.now(timezone.utc)
+                            fill_price = self._extract_fill_price(verify_status, position.no_order_price, is_sell_order=True)
+                            self._update_fill_details_in_db(position, "NO", filled_amount, fill_price)
+                        return
+                    else:
+                        # Order still active - wait briefly and retry
+                        verify_attempt += 1
+                        if verify_attempt < max_verify_attempts:
+                            logger.info(
+                                f"⏳ Order {order_id} still {status_str} (attempt {verify_attempt}/{max_verify_attempts}). "
+                                f"Waiting 1 second before retry..."
+                            )
+                            await asyncio.sleep(1.0)
+                        else:
+                            logger.warning(
+                                f"⚠️ Order {order_id} still {status_str} after {max_verify_attempts} checks. "
+                                f"Proceeding with new order placement anyway (may fail if shares are locked)."
+                            )
+                            order_confirmed_cancelled_or_filled = True  # Give up and proceed
+                else:
+                    logger.warning(f"⚠️ Could not verify cancel status for {order_id} (attempt {verify_attempt + 1})")
+                    verify_attempt += 1
+                    if verify_attempt < max_verify_attempts:
+                        await asyncio.sleep(0.5)  # Brief wait before retry
+                    else:
+                        logger.warning(f"⚠️ Could not verify cancel status after {max_verify_attempts} attempts - proceeding anyway")
+                        break
             
             # Calculate new price
             new_price = current_price - self.config.price_step
@@ -2645,13 +2811,15 @@ class MarketMaker:
                     if side == "YES":
                         position.yes_order_id = new_order_id
                         position.yes_order_price = new_price
+                        position.yes_adjustment_count += 1
+                        position.yes_last_adjustment_time = datetime.now(timezone.utc)
+                        logger.info(f"✅ Placed new {side} order: {new_order_id} (adjustment #{position.yes_adjustment_count})")
                     else:
                         position.no_order_id = new_order_id
                         position.no_order_price = new_price
-                    
-                    position.adjustment_count += 1
-                    position.last_adjustment_time = datetime.now(timezone.utc)  # Update adjustment time
-                    logger.info(f"✅ Placed new {side} order: {new_order_id} (adjustment #{position.adjustment_count})")
+                        position.no_adjustment_count += 1
+                        position.no_last_adjustment_time = datetime.now(timezone.utc)
+                        logger.info(f"✅ Placed new {side} order: {new_order_id} (adjustment #{position.no_adjustment_count})")
                     self._update_position_in_db(position)
             
         except Exception as e:

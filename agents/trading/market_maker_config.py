@@ -144,6 +144,11 @@ class MarketMakerConfig:
         if not isinstance(midpoint_depth_levels, int) or midpoint_depth_levels < 1:
             raise ValueError(f"midpoint_depth_levels must be a positive integer, got {midpoint_depth_levels}")
         
+        # Validate exponential backoff multiplier (optional, defaults to 2.0)
+        exponential_backoff_multiplier = self.config.get('exponential_backoff_multiplier', 2.0)
+        if not isinstance(exponential_backoff_multiplier, (int, float)) or exponential_backoff_multiplier <= 1.0:
+            raise ValueError(f"exponential_backoff_multiplier must be a float > 1.0, got {exponential_backoff_multiplier}")
+        
         logger.info("✓ Market maker config validation passed")
     
     @property
@@ -260,3 +265,8 @@ class MarketMakerConfig:
             # Support comma-separated string format
             return [tx_hash.strip() for tx_hash in value.split(",") if tx_hash.strip()]
         return None
+    
+    @property
+    def exponential_backoff_multiplier(self) -> float:
+        """Multiplier for exponential backoff of wait times (e.g., 2.0 means double each time)."""
+        return float(self.config.get('exponential_backoff_multiplier', 2.0))

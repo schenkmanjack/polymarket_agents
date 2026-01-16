@@ -147,9 +147,12 @@ class RealMarketMakerPosition(Base):
     first_fill_side = Column(String, nullable=True)  # 'YES' or 'NO' - which side filled first
     second_fill_side = Column(String, nullable=True)  # 'YES' or 'NO' - which side filled second (if both filled)
     
-    # Adjustment tracking
-    adjustment_count = Column(Integer, nullable=False, default=0)
+    # Adjustment tracking (separate for YES and NO sides)
+    yes_adjustment_count = Column(Integer, nullable=False, default=0)
+    no_adjustment_count = Column(Integer, nullable=False, default=0)
     max_adjustments = Column(Integer, nullable=False, default=10)
+    # Legacy field - kept for backward compatibility but not used
+    adjustment_count = Column(Integer, nullable=True, default=0)
     
     # Status tracking
     position_status = Column(String, nullable=False, default='active')  # 'active', 'both_filled', 'closed', 'error'
