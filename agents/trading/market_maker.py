@@ -1332,15 +1332,15 @@ class MarketMaker:
                 logger.debug(f"Already have active position for {market_slug}, skipping")
                 return True
             
-            # Check database for recent active/pending positions for this market
+            # Check database for recent positions for this market (including failed ones)
             # Only skip if:
-            # 1. Position is from current deployment (same deployment_id), OR
+            # 1. Position is from current deployment (same deployment_id) AND is active/pending with orders, OR
             # 2. Position is from previous deployment but has orders (actually active, not just failed pending)
             session = self.db.SessionLocal()
             try:
                 existing = session.query(RealMarketMakerPosition).filter(
                     RealMarketMakerPosition.market_slug == market_slug,
-                    RealMarketMakerPosition.position_status.in_(['active', 'pending'])
+                    RealMarketMakerPosition.position_status.in_(['active', 'pending', 'failed'])
                 ).order_by(RealMarketMakerPosition.id.desc()).first()
                 
                 if existing:
@@ -1350,12 +1350,35 @@ class MarketMaker:
                     # Check if it has actual orders (meaning it's truly active, not just a failed pending)
                     has_orders = (existing.yes_order_id is not None) or (existing.no_order_id is not None)
                     
+                    # Check if it's a failed pending position (no transaction hash or status is "failed")
+                    # Also check if transaction hash exists but position is still pending (might be stuck)
+                    is_failed_pending = (
+                        existing.position_status == "pending" and 
+                        existing.split_transaction_hash is None
+                    ) or existing.position_status == "failed"
+                    
+                    # Check if there's a transaction hash but position is still pending (transaction might be stuck)
+                    has_tx_hash_but_pending = (
+                        existing.position_status == "pending" and 
+                        existing.split_transaction_hash is not None and
+                        not has_orders  # No orders means split likely didn't complete
+                    )
+                    
                     if is_current_deployment:
-                        logger.info(
-                            f"Found existing {existing.position_status} position for {market_slug} "
-                            f"(ID: {existing.id}, current deployment). Skipping duplicate split."
-                        )
-                        return True
+                        if is_failed_pending or has_tx_hash_but_pending:
+                            # Failed pending from current deployment - allow retry
+                            logger.info(
+                                f"Found failed/stuck pending position for {market_slug} "
+                                f"(ID: {existing.id}, current deployment, "
+                                f"status={existing.position_status}, tx_hash={existing.split_transaction_hash is not None}, "
+                                f"has_orders={has_orders}). Allowing retry."
+                            )
+                        else:
+                            logger.info(
+                                f"Found existing {existing.position_status} position for {market_slug} "
+                                f"(ID: {existing.id}, current deployment). Skipping duplicate split."
+                            )
+                            return True
                     elif has_orders:
                         logger.info(
                             f"Found existing {existing.position_status} position for {market_slug} "

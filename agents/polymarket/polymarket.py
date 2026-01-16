@@ -1501,6 +1501,11 @@ class Polymarket:
             nonce = self.web3.eth.get_transaction_count(wallet_address, 'pending')
             logger.debug(f"Using nonce: {nonce} (includes pending transactions)")
             
+            # Use current gas price (Polygon is usually fast enough)
+            # Note: Polygon blocks are ~2 seconds, so transactions confirm quickly
+            gas_price = self.web3.eth.gas_price
+            logger.debug(f"Gas price: {gas_price / 1e9:.2f} gwei")
+            
             split_txn = self.ctf.functions.splitPosition(
                 self.usdc_address,
                 parent_collection_id,
@@ -1512,7 +1517,7 @@ class Polymarket:
                 "from": wallet_address,
                 "nonce": nonce,
                 "gas": 500000,  # Reasonable gas limit for splitPosition
-                "gasPrice": self.web3.eth.gas_price
+                "gasPrice": gas_price
             })
             
             # Sign transaction
@@ -1576,24 +1581,32 @@ class Polymarket:
             
             receipt = None
             max_wait_time = 300  # seconds
-            poll_interval = 5  # seconds
+            # Use faster polling: 1s for first 30s, then 2s after that
             start_time = time.time()
             
             try:
-                logger.info(f"⏳ Polling for transaction receipt (checking every {poll_interval}s, max {max_wait_time}s)...")
+                logger.info(f"⏳ Polling for transaction receipt (checking every 1-2s, max {max_wait_time}s)...")
                 # Poll manually with periodic status updates
                 while (time.time() - start_time) < max_wait_time:
+                    elapsed = time.time() - start_time
+                    
+                    # Use faster polling interval initially (1s), then slower (2s) after 30s
+                    poll_interval = 1.0 if elapsed < 30 else 2.0
+                    
                     try:
                         receipt = self.web3.eth.get_transaction_receipt(tx_hash)
                         if receipt is not None:
-                            logger.info(f"✅ Transaction receipt received! Status: {receipt.status}")
+                            logger.info(f"✅ Transaction receipt received! Status: {receipt.status} (after {elapsed:.1f}s)")
                             break
                     except Exception:
                         # Receipt not available yet, continue polling
                         pass
                     
-                    elapsed = time.time() - start_time
-                    if int(elapsed) % 30 == 0:  # Log every 30 seconds
+                    # Log progress more frequently initially
+                    if elapsed < 30:
+                        if int(elapsed) % 5 == 0:  # Every 5 seconds for first 30s
+                            logger.info(f"⏳ Still waiting for receipt... ({int(elapsed)}s elapsed)")
+                    elif int(elapsed) % 15 == 0:  # Every 15 seconds after 30s
                         logger.info(f"⏳ Still waiting for receipt... ({int(elapsed)}s elapsed)")
                     
                     time.sleep(poll_interval)
