@@ -156,6 +156,10 @@ class LimitBuyConfig:
         return float(self.config['cancel_threshold_minutes'])
     
     @property
+    def convert_limit_sell_to_market(self) -> bool:
+        return bool(self.config.get('convert_limit_sell_to_market', False))
+    
+    @property
     def order_status_check_interval(self) -> float:
         return float(self.config.get('order_status_check_interval', 1.0))
     
@@ -745,8 +749,10 @@ class LimitBuyTrader:
                         logger.warning(f"  ⚠️ Error checking balance: {e}. Will attempt sell order anyway.")
                 
                 # Check conditional token allowances (critical for selling)
-                if attempt == 0:  # Only check on first attempt
-                    logger.info("  🔍 Checking conditional token allowances...")
+                # Check on first attempt, and also check again if we got an allowance error on previous attempt
+                should_check_allowances = (attempt == 0) or (attempt > 0 and "allowance" in str(getattr(self, '_last_sell_error', '')))
+                if should_check_allowances:
+                    logger.info(f"  🔍 Checking conditional token allowances (attempt {attempt + 1})...")
                     if hasattr(self.pm, 'ensure_conditional_token_allowances'):
                         try:
                             allowances_ok = self.pm.ensure_conditional_token_allowances()
@@ -755,6 +761,10 @@ class LimitBuyTrader:
                                     "  ⚠️ Conditional token allowances may not be set. "
                                     "This could cause 'not enough balance / allowance' errors."
                                 )
+                                # Wait a bit for approvals to propagate if they were just set
+                                if attempt > 0:
+                                    logger.info("  ⏳ Waiting 5 seconds for approvals to propagate on blockchain...")
+                                    await asyncio.sleep(5.0)
                             else:
                                 logger.info("  ✅ Conditional token allowances verified")
                         except Exception as e:
@@ -950,29 +960,36 @@ class LimitBuyTrader:
             
             # Check if we should convert to market order
             if minutes_remaining <= self.config.cancel_threshold_minutes:
-                logger.info(
-                    f"⏰ Cancel threshold reached for sell order {sell_order_id} (market {trade.market_slug}): "
-                    f"{minutes_remaining:.2f} minutes <= {self.config.cancel_threshold_minutes:.1f} minutes. "
-                    f"Converting limit sell to market sell."
-                )
-                
-                # Cancel the limit sell order
-                cancel_response = self.pm.cancel_order(sell_order_id)
-                if cancel_response:
-                    logger.info(f"✅ Cancelled limit sell order {sell_order_id}")
-                    self.db.update_limit_buy_sell_order(
-                        trade_id=trade_id,
-                        sell_order_id=sell_order_id,
-                        sell_order_price=trade.sell_order_price or 0.0,
-                        sell_order_size=trade.sell_order_size or 0.0,
-                        sell_order_status="cancelled",
+                if self.config.convert_limit_sell_to_market:
+                    logger.info(
+                        f"⏰ Cancel threshold reached for sell order {sell_order_id} (market {trade.market_slug}): "
+                        f"{minutes_remaining:.2f} minutes <= {self.config.cancel_threshold_minutes:.1f} minutes. "
+                        f"Converting limit sell to market sell (convert_limit_sell_to_market=true)."
                     )
-                    self.open_sell_orders.pop(sell_order_id, None)
                     
-                    # Place market sell order
-                    await self._place_market_sell_order(trade_id)
+                    # Cancel the limit sell order
+                    cancel_response = self.pm.cancel_order(sell_order_id)
+                    if cancel_response:
+                        logger.info(f"✅ Cancelled limit sell order {sell_order_id}")
+                        self.db.update_limit_buy_sell_order(
+                            trade_id=trade_id,
+                            sell_order_id=sell_order_id,
+                            sell_order_price=trade.sell_order_price or 0.0,
+                            sell_order_size=trade.sell_order_size or 0.0,
+                            sell_order_status="cancelled",
+                        )
+                        self.open_sell_orders.pop(sell_order_id, None)
+                        
+                        # Place market sell order
+                        await self._place_market_sell_order(trade_id)
+                    else:
+                        logger.warning(f"⚠️ Failed to cancel limit sell order {sell_order_id}")
                 else:
-                    logger.warning(f"⚠️ Failed to cancel limit sell order {sell_order_id}")
+                    logger.info(
+                        f"⏰ Cancel threshold reached for sell order {sell_order_id} (market {trade.market_slug}): "
+                        f"{minutes_remaining:.2f} minutes <= {self.config.cancel_threshold_minutes:.1f} minutes. "
+                        f"Keeping limit sell order open (convert_limit_sell_to_market=false)."
+                    )
     
     async def _place_market_sell_order(self, trade_id: int):
         """Place a market sell order (FOK) at best bid price."""
