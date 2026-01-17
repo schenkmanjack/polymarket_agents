@@ -35,6 +35,7 @@ if proxy_url:
 from agents.trading.trade_db import TradeDatabase, RealTradeLimitBuy
 from agents.polymarket.polymarket import Polymarket
 from py_clob_client.order_builder.constants import SELL, BUY
+from py_clob_client.clob_types import OrderType
 from agents.polymarket.btc_market_detector import (
     get_latest_btc_15m_market_proactive,
     get_latest_btc_1h_market_proactive,
@@ -567,6 +568,7 @@ class LimitBuyTrader:
             try:
                 await self._check_order_statuses()
                 await self._check_cancel_thresholds()
+                await self._check_sell_orders_for_market_conversion()
             except Exception as e:
                 logger.error(f"Error checking order status: {e}", exc_info=True)
             
@@ -915,6 +917,131 @@ class LimitBuyTrader:
                 
                 # Remove from active orders
                 self.active_orders.pop(market_slug, None)
+    
+    async def _check_sell_orders_for_market_conversion(self):
+        """Convert limit sell orders to market orders if cancel_threshold_minutes reached."""
+        import time
+        
+        for sell_order_id, trade_id in list(self.open_sell_orders.items()):
+            trade = self.db.get_limit_buy_trade_by_id(trade_id)
+            if not trade:
+                continue
+            
+            # Use cached market data if available and fresh
+            current_time = time.time()
+            market = None
+            
+            if trade.market_slug in self.market_cache:
+                cache_age = current_time - self.market_cache_timestamps.get(trade.market_slug, 0)
+                if cache_age < self.market_cache_ttl:
+                    market = self.market_cache[trade.market_slug]
+            
+            if not market:
+                market = get_market_by_slug(trade.market_slug)
+                if market:
+                    self.market_cache[trade.market_slug] = market
+                    self.market_cache_timestamps[trade.market_slug] = current_time
+                else:
+                    continue
+            
+            minutes_remaining = get_minutes_until_resolution(market)
+            if minutes_remaining is None:
+                continue
+            
+            # Check if we should convert to market order
+            if minutes_remaining <= self.config.cancel_threshold_minutes:
+                logger.info(
+                    f"⏰ Cancel threshold reached for sell order {sell_order_id} (market {trade.market_slug}): "
+                    f"{minutes_remaining:.2f} minutes <= {self.config.cancel_threshold_minutes:.1f} minutes. "
+                    f"Converting limit sell to market sell."
+                )
+                
+                # Cancel the limit sell order
+                cancel_response = self.pm.cancel_order(sell_order_id)
+                if cancel_response:
+                    logger.info(f"✅ Cancelled limit sell order {sell_order_id}")
+                    self.db.update_limit_buy_sell_order(
+                        trade_id=trade_id,
+                        sell_order_id=sell_order_id,
+                        sell_order_price=trade.sell_order_price or 0.0,
+                        sell_order_size=trade.sell_order_size or 0.0,
+                        sell_order_status="cancelled",
+                    )
+                    self.open_sell_orders.pop(sell_order_id, None)
+                    
+                    # Place market sell order
+                    await self._place_market_sell_order(trade_id)
+                else:
+                    logger.warning(f"⚠️ Failed to cancel limit sell order {sell_order_id}")
+    
+    async def _place_market_sell_order(self, trade_id: int):
+        """Place a market sell order (FOK) at best bid price."""
+        trade = self.db.get_limit_buy_trade_by_id(trade_id)
+        if not trade:
+            logger.error(f"Trade {trade_id} not found")
+            return
+        
+        if not trade.filled_shares or trade.filled_shares <= 0:
+            logger.warning(f"Trade {trade_id} has no filled shares")
+            return
+        
+        if not trade.token_id:
+            logger.error(f"Trade {trade_id} has no token_id")
+            return
+        
+        try:
+            # Get orderbook to find best bid price
+            orderbook = fetch_orderbook(trade.token_id)
+            if not orderbook:
+                logger.error(f"Could not fetch orderbook for token {trade.token_id[:20]}...")
+                return
+            
+            best_bid = get_highest_bid(orderbook)
+            if best_bid is None or best_bid <= 0:
+                logger.error(f"No valid best bid found in orderbook")
+                return
+            
+            # Use best bid price for market sell (will fill immediately)
+            market_price = best_bid
+            
+            # Round down to integer shares
+            import math
+            sell_size = max(1, math.floor(trade.filled_shares))
+            
+            logger.info(
+                f"Placing MARKET sell order: price=${market_price:.4f} (best bid), "
+                f"size={sell_size} shares (trade_id={trade_id})"
+            )
+            
+            # Place market order using FOK (Fill or Kill) - fills immediately or cancels
+            market_order_response = self.pm.execute_order(
+                price=market_price,
+                size=sell_size,
+                side=SELL,
+                token_id=trade.token_id,
+                order_type=OrderType.FOK,  # Market order - Fill or Kill
+            )
+            
+            if market_order_response:
+                market_order_id = self.pm.extract_order_id(market_order_response)
+                if market_order_id:
+                    # Update trade with market sell order info
+                    self.db.update_limit_buy_sell_order(
+                        trade_id=trade_id,
+                        sell_order_id=market_order_id,
+                        sell_order_price=market_price,
+                        sell_order_size=sell_size,
+                        sell_order_status="filled",  # FOK orders fill immediately or fail
+                    )
+                    self.open_sell_orders[market_order_id] = trade_id
+                    logger.info(f"✅ Market sell order placed: {market_order_id}")
+                else:
+                    logger.error(f"❌ Could not extract market order ID from response: {market_order_response}")
+            else:
+                logger.error(f"❌ Market sell order placement failed: no response")
+        
+        except Exception as e:
+            logger.error(f"❌ Error placing market sell order: {e}", exc_info=True)
     
     def _handle_websocket_order_update(self, order_id: str, order_data: Dict):
         """Handle WebSocket order status update."""
