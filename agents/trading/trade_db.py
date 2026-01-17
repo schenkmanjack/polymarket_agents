@@ -94,6 +94,76 @@ class RealTradeThreshold(Base):
     )
 
 
+class RealTradeLimitBuy(Base):
+    """Database model for storing limit buy strategy trades."""
+    __tablename__ = "real_trades_limit_buy"
+    
+    # Primary key
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    
+    # Deployment tracking
+    deployment_id = Column(String, nullable=False, index=True)  # UUID generated at script startup
+    
+    # Config parameters
+    yes_buy_price = Column(Float, nullable=False)
+    no_buy_price = Column(Float, nullable=False)
+    sell_price = Column(Float, nullable=False)
+    order_size = Column(Float, nullable=False)
+    market_type = Column(String, nullable=False)  # '15m' or '1h'
+    
+    # Market information
+    market_id = Column(String, nullable=False, index=True)
+    market_slug = Column(String, nullable=False, index=True)
+    token_id = Column(String, nullable=False)  # YES or NO token ID
+    winning_side = Column(String, nullable=True)  # 'YES' or 'NO' after resolution
+    
+    # Order information
+    order_id = Column(String, nullable=True, index=True)
+    order_price = Column(Float, nullable=False)
+    order_size_ordered = Column(Float, nullable=False)  # Number of shares ordered
+    order_side = Column(String, nullable=False)  # 'YES' or 'NO'
+    order_status = Column(String, nullable=True)  # 'open', 'filled', 'cancelled', 'partial'
+    
+    # Fill information
+    filled_shares = Column(Float, nullable=True)  # Actual shares received (after fees)
+    fill_price = Column(Float, nullable=True)  # Weighted average fill price
+    dollars_spent = Column(Float, nullable=True)
+    fee = Column(Float, nullable=True)
+    
+    # Sell order information (for claiming proceeds)
+    sell_order_id = Column(String, nullable=True, index=True)
+    sell_order_price = Column(Float, nullable=True)
+    sell_order_size = Column(Float, nullable=True)  # Number of shares to sell
+    sell_shares_filled = Column(Float, nullable=True)  # Number of shares actually filled (may be partial)
+    sell_order_status = Column(String, nullable=True)  # 'open', 'filled', 'cancelled', 'partial'
+    sell_order_placed_at = Column(DateTime, nullable=True)
+    sell_order_filled_at = Column(DateTime, nullable=True)
+    sell_dollars_received = Column(Float, nullable=True)  # Amount received from selling
+    sell_fee = Column(Float, nullable=True)  # Fee paid on sell
+    
+    # Outcome information
+    outcome_price = Column(Float, nullable=True)  # Final outcome price (0.0 or 1.0)
+    payout = Column(Float, nullable=True)  # Total payout received
+    net_payout = Column(Float, nullable=True)  # payout - dollars_spent - fee
+    roi = Column(Float, nullable=True)  # Return on investment
+    is_win = Column(Boolean, nullable=True)  # True if roi > 0
+    
+    # Timestamps
+    order_placed_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    order_filled_at = Column(DateTime, nullable=True)
+    market_resolved_at = Column(DateTime, nullable=True)
+    
+    # Error tracking
+    error_message = Column(String, nullable=True)  # If order placement or resolution failed
+    
+    __table_args__ = (
+        Index('idx_lb_market_slug', 'market_slug'),
+        Index('idx_lb_order_id', 'order_id'),
+        Index('idx_lb_deployment_id', 'deployment_id'),
+        Index('idx_lb_order_status', 'order_status'),
+    )
+
+
 class RealMarketMakerPosition(Base):
     """Database model for storing market maker positions."""
     __tablename__ = "real_market_maker_positions"
@@ -229,6 +299,7 @@ class TradeDatabase:
         # Migrate existing tables to add new columns if they don't exist
         self._migrate_table()
         self._migrate_market_maker_table()
+        # Note: Limit buy table is new, so no migration needed
         
         SessionLocal = sessionmaker(bind=self.engine)
         self.SessionLocal = SessionLocal
@@ -807,5 +878,299 @@ class TradeDatabase:
         session = self.SessionLocal()
         try:
             return session.query(RealTradeThreshold).filter_by(deployment_id=deployment_id).all()
+        finally:
+            session.close()
+    
+    # ========== Limit Buy Strategy Methods ==========
+    
+    def create_limit_buy_trade(
+        self,
+        deployment_id: str,
+        yes_buy_price: float,
+        no_buy_price: float,
+        sell_price: float,
+        order_size: float,
+        market_type: str,
+        market_id: str,
+        market_slug: str,
+        token_id: str,
+        order_id: Optional[str],
+        order_price: float,
+        order_size_ordered: float,
+        order_side: str,
+        order_status: str = "open",
+        error_message: Optional[str] = None,
+    ) -> int:
+        """
+        Create a new limit buy trade record.
+        
+        Returns:
+            Trade ID
+        """
+        session = self.SessionLocal()
+        try:
+            trade = RealTradeLimitBuy(
+                deployment_id=deployment_id,
+                yes_buy_price=yes_buy_price,
+                no_buy_price=no_buy_price,
+                sell_price=sell_price,
+                order_size=order_size,
+                market_type=market_type,
+                market_id=market_id,
+                market_slug=market_slug,
+                token_id=token_id,
+                order_id=order_id,
+                order_price=order_price,
+                order_size_ordered=order_size_ordered,
+                order_side=order_side,
+                order_status=order_status,
+                error_message=error_message,
+            )
+            session.add(trade)
+            session.commit()
+            trade_id = trade.id
+            session.refresh(trade)
+            return trade_id
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error creating limit buy trade: {e}")
+            raise
+        finally:
+            session.close()
+    
+    def update_limit_buy_trade_fill(
+        self,
+        trade_id: int,
+        filled_shares: float,
+        fill_price: float,
+        dollars_spent: float,
+        fee: float,
+        order_status: str = "filled",
+    ):
+        """Update limit buy trade with fill information."""
+        session = self.SessionLocal()
+        try:
+            trade = session.query(RealTradeLimitBuy).filter_by(id=trade_id).first()
+            if trade:
+                trade.filled_shares = filled_shares
+                trade.fill_price = fill_price
+                trade.dollars_spent = dollars_spent
+                trade.fee = fee
+                trade.order_status = order_status
+                trade.order_filled_at = datetime.now(timezone.utc)
+                session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error updating limit buy trade fill: {e}")
+            raise
+        finally:
+            session.close()
+    
+    def update_limit_buy_order_status(
+        self,
+        trade_id: int,
+        order_status: str,
+        order_id: Optional[str] = None,
+        error_message: Optional[str] = None,
+    ):
+        """Update limit buy order status."""
+        session = self.SessionLocal()
+        try:
+            trade = session.query(RealTradeLimitBuy).filter_by(id=trade_id).first()
+            if trade:
+                trade.order_status = order_status
+                if order_id:
+                    trade.order_id = order_id
+                if error_message:
+                    trade.error_message = error_message
+                session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error updating limit buy order status: {e}")
+            raise
+        finally:
+            session.close()
+    
+    def update_limit_buy_sell_order(
+        self,
+        trade_id: int,
+        sell_order_id: str,
+        sell_order_price: float,
+        sell_order_size: float,
+        sell_order_status: str = "open",
+    ):
+        """Update limit buy trade with sell order information."""
+        session = self.SessionLocal()
+        try:
+            trade = session.query(RealTradeLimitBuy).filter_by(id=trade_id).first()
+            if trade:
+                trade.sell_order_id = sell_order_id
+                trade.sell_order_price = sell_order_price
+                trade.sell_order_size = sell_order_size
+                trade.sell_order_status = sell_order_status
+                trade.sell_order_placed_at = datetime.now(timezone.utc)
+                session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error updating limit buy sell order: {e}")
+            raise
+        finally:
+            session.close()
+    
+    def update_limit_buy_sell_order_fill(
+        self,
+        trade_id: int,
+        sell_order_status: str,
+        sell_shares_filled: Optional[float] = None,
+        sell_dollars_received: Optional[float] = None,
+        sell_fee: Optional[float] = None,
+    ):
+        """Update limit buy sell order with fill information."""
+        session = self.SessionLocal()
+        try:
+            trade = session.query(RealTradeLimitBuy).filter_by(id=trade_id).first()
+            if trade:
+                trade.sell_order_status = sell_order_status
+                if sell_shares_filled is not None:
+                    trade.sell_shares_filled = sell_shares_filled
+                if sell_dollars_received is not None:
+                    trade.sell_dollars_received = sell_dollars_received
+                if sell_fee is not None:
+                    trade.sell_fee = sell_fee
+                if sell_order_status == "filled":
+                    trade.sell_order_filled_at = datetime.now(timezone.utc)
+                session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error updating limit buy sell order fill: {e}")
+            raise
+        finally:
+            session.close()
+    
+    def update_limit_buy_trade_outcome(
+        self,
+        trade_id: int,
+        outcome_price: float,
+        payout: float,
+        net_payout: float,
+        roi: float,
+        is_win: Optional[bool],
+        winning_side: Optional[str] = None,
+    ):
+        """Update limit buy trade with outcome information."""
+        session = self.SessionLocal()
+        try:
+            trade = session.query(RealTradeLimitBuy).filter_by(id=trade_id).first()
+            if trade:
+                trade.outcome_price = outcome_price
+                trade.payout = payout
+                trade.net_payout = net_payout
+                trade.roi = roi
+                trade.is_win = is_win
+                trade.market_resolved_at = datetime.now(timezone.utc)
+                if winning_side:
+                    trade.winning_side = winning_side
+                session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error updating limit buy trade outcome: {e}")
+            raise
+        finally:
+            session.close()
+    
+    def get_limit_buy_trade_by_id(self, trade_id: int) -> Optional[RealTradeLimitBuy]:
+        """Get limit buy trade by ID."""
+        session = self.SessionLocal()
+        try:
+            return session.query(RealTradeLimitBuy).filter_by(id=trade_id).first()
+        finally:
+            session.close()
+    
+    def get_open_limit_buy_trades(self, deployment_id: Optional[str] = None) -> List[RealTradeLimitBuy]:
+        """
+        Get all limit buy trades with open buy orders.
+        
+        Args:
+            deployment_id: Optional deployment ID to filter by. If provided, only returns
+                          trades from that deployment. If None, returns all open trades.
+        """
+        session = self.SessionLocal()
+        try:
+            query = session.query(RealTradeLimitBuy).filter(
+                RealTradeLimitBuy.order_status.in_(["open", "partial"])
+            )
+            
+            if deployment_id is not None:
+                query = query.filter(RealTradeLimitBuy.deployment_id == deployment_id)
+            
+            return query.all()
+        finally:
+            session.close()
+    
+    def get_open_limit_buy_sell_orders(self, deployment_id: Optional[str] = None) -> List[RealTradeLimitBuy]:
+        """
+        Get all limit buy trades with open sell orders.
+        
+        Args:
+            deployment_id: Optional deployment ID to filter by. If provided, only returns
+                          trades from that deployment. If None, returns all open sell orders.
+        """
+        session = self.SessionLocal()
+        try:
+            query = session.query(RealTradeLimitBuy).filter(
+                RealTradeLimitBuy.sell_order_status.in_(["open", "partial"]),
+                RealTradeLimitBuy.sell_order_id.isnot(None),
+            )
+            
+            if deployment_id is not None:
+                query = query.filter(RealTradeLimitBuy.deployment_id == deployment_id)
+            
+            return query.all()
+        finally:
+            session.close()
+    
+    def get_unresolved_limit_buy_trades(self, deployment_id: Optional[str] = None) -> List[RealTradeLimitBuy]:
+        """
+        Get all limit buy trades where market hasn't resolved yet.
+        
+        Args:
+            deployment_id: Optional deployment ID to filter by. If provided, only returns
+                          trades from that deployment. If None, returns all unresolved trades.
+        """
+        session = self.SessionLocal()
+        try:
+            query = session.query(RealTradeLimitBuy).filter(
+                RealTradeLimitBuy.market_resolved_at.is_(None),
+                RealTradeLimitBuy.order_id.isnot(None),
+                RealTradeLimitBuy.order_status.notin_(["cancelled", "failed"]),
+            )
+            
+            if deployment_id is not None:
+                query = query.filter(RealTradeLimitBuy.deployment_id == deployment_id)
+            
+            return query.all()
+        finally:
+            session.close()
+    
+    def has_limit_buy_bet_on_market(self, market_slug: str) -> bool:
+        """
+        Check if ANY deployment has already bet on this market using limit buy strategy.
+        
+        Args:
+            market_slug: Market slug to check
+        
+        Returns:
+            True if there's ANY limit buy trade (active or resolved) in this market
+        """
+        session = self.SessionLocal()
+        try:
+            query = session.query(RealTradeLimitBuy).filter(
+                RealTradeLimitBuy.market_slug == market_slug,
+                RealTradeLimitBuy.order_id.isnot(None),
+                RealTradeLimitBuy.order_status.notin_(["cancelled", "failed"]),
+            )
+            
+            count = query.count()
+            return count > 0
         finally:
             session.close()

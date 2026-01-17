@@ -3,14 +3,17 @@ Master script to run both monitoring and trading services concurrently.
 
 This script runs:
 1. BTC markets monitoring (monitor_btc_markets.py) - optional
-2. Trading strategy (threshold strategy or market maker)
+2. Trading strategy (threshold strategy, limit buy, or market maker)
 
 Usage:
     # Run threshold strategy:
     python scripts/python/run_all_services.py --config config/trading_config.json --strategy threshold
     
-    # Run market maker:
-    python scripts/python/run_all_services.py --config config/market_maker_config.json --strategy market_maker
+    # Run limit buy strategy:
+    python scripts/python/run_all_services.py --config config/limit_buy_config.json --strategy limit_buy
+    
+    # Run market maker (currently commented out):
+    # python scripts/python/run_all_services.py --config config/market_maker_config.json --strategy market_maker
     
     # Run with monitoring:
     python scripts/python/run_all_services.py --config config/trading_config.json --strategy threshold --enable-monitoring
@@ -52,15 +55,23 @@ spec = importlib.util.spec_from_file_location("trade_threshold_strategy", trade_
 trade_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(trade_module)
 
+# Import trade_limit_buy_strategy
+limit_buy_path = os.path.join(os.path.dirname(__file__), "trade_limit_buy_strategy.py")
+spec = importlib.util.spec_from_file_location("trade_limit_buy_strategy", limit_buy_path)
+limit_buy_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(limit_buy_module)
+
 # Import trade_market_maker (this will import MarketMaker from agents.trading.market_maker)
-market_maker_path = os.path.join(os.path.dirname(__file__), "trade_market_maker.py")
-spec = importlib.util.spec_from_file_location("trade_market_maker", market_maker_path)
-market_maker_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(market_maker_module)
+# COMMENTED OUT FOR NOW
+# market_maker_path = os.path.join(os.path.dirname(__file__), "trade_market_maker.py")
+# spec = importlib.util.spec_from_file_location("trade_market_maker", market_maker_path)
+# market_maker_module = importlib.util.module_from_spec(spec)
+# spec.loader.exec_module(market_maker_module)
 
 monitor_main = monitor_module.main
 ThresholdTrader = trade_module.ThresholdTrader
-MarketMaker = market_maker_module.MarketMaker  # Available after module import
+LimitBuyTrader = limit_buy_module.LimitBuyTrader
+# MarketMaker = market_maker_module.MarketMaker  # Available after module import - COMMENTED OUT
 
 
 async def run_monitoring():
@@ -88,22 +99,36 @@ async def run_threshold_strategy(config_path: str):
         raise
 
 
-async def run_market_maker(config_path: str):
-    """Run the market maker trading service."""
+async def run_limit_buy_strategy(config_path: str):
+    """Run the limit buy strategy trading service."""
     logger.info("=" * 80)
-    logger.info("STARTING MARKET MAKER TRADING SERVICE")
+    logger.info("STARTING LIMIT BUY STRATEGY TRADING SERVICE")
     logger.info("=" * 80)
     try:
-        # MarketMaker needs proxy_url, get it from proxy_config
-        from agents.utils.proxy_config import configure_proxy, get_proxy
-        configure_proxy(auto_detect=True)
-        proxy_url = get_proxy()
-        
-        market_maker = MarketMaker(config_path, proxy_url=proxy_url)
-        await market_maker.start()
+        trader = LimitBuyTrader(config_path)
+        await trader.start()
     except Exception as e:
-        logger.error(f"Market maker error: {e}", exc_info=True)
+        logger.error(f"Limit buy strategy error: {e}", exc_info=True)
         raise
+
+
+# COMMENTED OUT FOR NOW
+# async def run_market_maker(config_path: str):
+#     """Run the market maker trading service."""
+#     logger.info("=" * 80)
+#     logger.info("STARTING MARKET MAKER TRADING SERVICE")
+#     logger.info("=" * 80)
+#     try:
+#         # MarketMaker needs proxy_url, get it from proxy_config
+#         from agents.utils.proxy_config import configure_proxy, get_proxy
+#         configure_proxy(auto_detect=True)
+#         proxy_url = get_proxy()
+#         
+#         market_maker = MarketMaker(config_path, proxy_url=proxy_url)
+#         await market_maker.start()
+#     except Exception as e:
+#         logger.error(f"Market maker error: {e}", exc_info=True)
+#         raise
 
 
 async def run_all(config_path: str, strategy: str = "threshold", enable_monitoring: bool = False):
@@ -120,12 +145,14 @@ async def run_all(config_path: str, strategy: str = "threshold", enable_monitori
     logger.info("=" * 80)
     
     # Select trading function based on strategy
-    if strategy == "market_maker":
-        trading_func = lambda: run_market_maker(config_path)
-    elif strategy == "threshold":
+    if strategy == "threshold":
         trading_func = lambda: run_threshold_strategy(config_path)
+    elif strategy == "limit_buy":
+        trading_func = lambda: run_limit_buy_strategy(config_path)
+    # elif strategy == "market_maker":  # COMMENTED OUT FOR NOW
+    #     trading_func = lambda: run_market_maker(config_path)
     else:
-        raise ValueError(f"Unknown strategy: {strategy}. Must be 'threshold' or 'market_maker'")
+        raise ValueError(f"Unknown strategy: {strategy}. Must be 'threshold' or 'limit_buy'")
     
     # Run services
     try:
@@ -157,7 +184,7 @@ def main():
     parser.add_argument(
         "--strategy",
         type=str,
-        choices=["threshold", "market_maker"],
+        choices=["threshold", "limit_buy"],  # "market_maker" commented out for now
         default="threshold",
         help="Trading strategy to run (default: threshold)",
     )
