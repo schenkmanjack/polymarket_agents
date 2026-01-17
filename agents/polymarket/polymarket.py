@@ -1155,7 +1155,7 @@ class Polymarket:
             
             logger.info(
                 f"🔍 Checking conditional token allowances for wallet "
-                f"{wallet_address[:10]}...{wallet_address[-8:]} "
+                f"{address_to_check[:10]}...{address_to_check[-8:]} "
                 f"(proxy_wallet={self.proxy_wallet_address is not None}, "
                 f"signature_type={getattr(self.client, 'signature_type', 'unknown')})"
             )
@@ -1164,7 +1164,7 @@ class Polymarket:
             approval_results = []
             
             for exchange_addr, exchange_name in exchange_addresses:
-                is_approved = self.check_conditional_token_allowance(exchange_addr, wallet_address)
+                is_approved = self.check_conditional_token_allowance(exchange_addr, address_to_check)
                 if is_approved is None:
                     logger.warning(f"  ⚠️ Could not check allowance for {exchange_name} ({exchange_addr[:10]}...)")
                     approval_results.append((exchange_name, exchange_addr, None))

@@ -214,6 +214,11 @@ class LimitBuyTrader:
         # Track orderbook prices before resolution for markets with open sell orders
         self.last_orderbook_prices: Dict[str, Dict] = {}  # market_slug -> {"yes_highest_bid": float, "no_highest_bid": float}
         
+        # Cache market data to avoid repeated API calls
+        self.market_cache: Dict[str, Dict] = {}  # market_slug -> market dict
+        self.market_cache_timestamps: Dict[str, float] = {}  # market_slug -> timestamp when cached
+        self.market_cache_ttl: float = 30.0  # Cache for 30 seconds
+        
         self.running = False
         
         # Initialize WebSocket order status service if enabled
@@ -843,6 +848,8 @@ class LimitBuyTrader:
     
     async def _check_cancel_thresholds(self):
         """Cancel orders if cancel_threshold_minutes reached and neither has filled."""
+        import time
+        
         for market_slug, order_info in list(self.active_orders.items()):
             yes_order_id = order_info.get("yes_order_id")
             no_order_id = order_info.get("no_order_id")
@@ -851,10 +858,24 @@ class LimitBuyTrader:
             if not yes_order_id and not no_order_id:
                 continue
             
-            # Get market to check time remaining
-            market = get_market_by_slug(market_slug)
+            # Use cached market data if available and fresh, otherwise fetch
+            current_time = time.time()
+            market = None
+            
+            if market_slug in self.market_cache:
+                cache_age = current_time - self.market_cache_timestamps.get(market_slug, 0)
+                if cache_age < self.market_cache_ttl:
+                    market = self.market_cache[market_slug]
+                    logger.debug(f"Using cached market data for {market_slug} (age: {cache_age:.1f}s)")
+            
             if not market:
-                continue
+                # Fetch fresh market data
+                market = get_market_by_slug(market_slug)
+                if market:
+                    self.market_cache[market_slug] = market
+                    self.market_cache_timestamps[market_slug] = current_time
+                else:
+                    continue
             
             minutes_remaining = get_minutes_until_resolution(market)
             if minutes_remaining is None:
@@ -991,14 +1012,29 @@ class LimitBuyTrader:
     
     async def _track_orderbook_prices_near_resolution(self):
         """Track orderbook prices for markets with open sell orders."""
+        import time
+        
         for sell_order_id, trade_id in list(self.open_sell_orders.items()):
             trade = self.db.get_limit_buy_trade_by_id(trade_id)
             if not trade:
                 continue
             
-            market = get_market_by_slug(trade.market_slug)
+            # Use cached market data if available and fresh
+            current_time = time.time()
+            market = None
+            
+            if trade.market_slug in self.market_cache:
+                cache_age = current_time - self.market_cache_timestamps.get(trade.market_slug, 0)
+                if cache_age < self.market_cache_ttl:
+                    market = self.market_cache[trade.market_slug]
+            
             if not market:
-                continue
+                market = get_market_by_slug(trade.market_slug)
+                if market:
+                    self.market_cache[trade.market_slug] = market
+                    self.market_cache_timestamps[trade.market_slug] = current_time
+                else:
+                    continue
             
             minutes_remaining = get_minutes_until_resolution(market)
             if minutes_remaining is None or minutes_remaining > 2.0:  # Only track within 2 minutes
@@ -1031,14 +1067,29 @@ class LimitBuyTrader:
     
     async def _check_market_resolutions(self):
         """Check if markets with open sell orders have resolved."""
+        import time
+        
         for sell_order_id, trade_id in list(self.open_sell_orders.items()):
             trade = self.db.get_limit_buy_trade_by_id(trade_id)
             if not trade:
                 continue
             
-            market = get_market_by_slug(trade.market_slug)
+            # Use cached market data if available and fresh
+            current_time = time.time()
+            market = None
+            
+            if trade.market_slug in self.market_cache:
+                cache_age = current_time - self.market_cache_timestamps.get(trade.market_slug, 0)
+                if cache_age < self.market_cache_ttl:
+                    market = self.market_cache[trade.market_slug]
+            
             if not market:
-                continue
+                market = get_market_by_slug(trade.market_slug)
+                if market:
+                    self.market_cache[trade.market_slug] = market
+                    self.market_cache_timestamps[trade.market_slug] = current_time
+                else:
+                    continue
             
             # Check if market is still active
             if is_market_active(market):
