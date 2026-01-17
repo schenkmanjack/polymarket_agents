@@ -668,7 +668,10 @@ class LimitBuyTrader:
             logger.error(f"Error checking order {order_id}: {e}", exc_info=True)
     
     async def _place_sell_order(self, trade_id: int, side: str):
-        """Place limit sell order after buy order fills."""
+        """Place limit sell order after buy order fills.
+        
+        Retries with delays to handle share settlement delays after buy order fills.
+        """
         trade = self.db.get_limit_buy_trade_by_id(trade_id)
         if not trade:
             logger.error(f"Trade {trade_id} not found")
@@ -678,45 +681,165 @@ class LimitBuyTrader:
             logger.warning(f"Trade {trade_id} has no filled shares")
             return
         
-        # Wait a bit for shares to settle
-        await asyncio.sleep(5.0)
+        if not trade.token_id:
+            logger.error(f"Trade {trade_id} has no token_id, cannot place sell order")
+            return
         
-        # Round down to integer shares
-        import math
-        sell_size = max(1, math.floor(trade.filled_shares))
+        max_retries = 5
+        initial_delay = 5.0  # Wait 5 seconds before first attempt (shares need to settle)
+        retry_delays = [10.0, 20.0, 30.0, 60.0]  # Increasing delays for retries
         
-        try:
-            logger.info(
-                f"Placing limit sell order: price=${self.config.sell_price:.4f}, "
-                f"size={sell_size} shares (trade_id={trade_id})"
-            )
-            
-            sell_order_response = self.pm.execute_order(
-                price=self.config.sell_price,
-                size=sell_size,
-                side=SELL,
-                token_id=trade.token_id,
-            )
-            
-            if sell_order_response:
-                sell_order_id = self.pm.extract_order_id(sell_order_response)
-                if sell_order_id:
-                    self.db.update_limit_buy_sell_order(
-                        trade_id=trade_id,
-                        sell_order_id=sell_order_id,
-                        sell_order_price=self.config.sell_price,
-                        sell_order_size=sell_size,
-                        sell_order_status="open",
+        logger.info(
+            f"Waiting {initial_delay}s for shares to settle before placing sell order "
+            f"at ${self.config.sell_price:.4f} for {trade.filled_shares} shares (trade {trade_id})"
+        )
+        await asyncio.sleep(initial_delay)
+        
+        # Retry loop for placing sell order
+        for attempt in range(max_retries):
+            try:
+                logger.info(
+                    f"Attempt {attempt + 1}/{max_retries}: Placing limit sell order at ${self.config.sell_price:.4f} "
+                    f"for {trade.filled_shares} shares (trade {trade_id}, token_id={trade.token_id[:20]}...)"
+                )
+                
+                # Reload trade to ensure we have latest data
+                trade = self.db.get_limit_buy_trade_by_id(trade_id)
+                if not trade:
+                    logger.error(f"Trade {trade_id} not found during retry")
+                    return
+                
+                # Check again if sell order was already placed
+                if trade.sell_order_id:
+                    logger.info(f"Trade {trade_id} already has sell order {trade.sell_order_id}, skipping")
+                    return
+                
+                # Check conditional token balance before attempting to sell
+                balance = None
+                if hasattr(self.pm, 'get_conditional_token_balance'):
+                    logger.info(f"  🔍 Checking conditional token balance for token_id={trade.token_id[:20]}...")
+                    try:
+                        balance = self.pm.get_conditional_token_balance(trade.token_id)
+                        if balance is not None:
+                            logger.info(
+                                f"  📊 Balance: {balance:.6f} shares available "
+                                f"(need {trade.filled_shares} shares)"
+                            )
+                            if balance < trade.filled_shares:
+                                shortfall = trade.filled_shares - balance
+                                logger.warning(
+                                    f"  ⚠️ INSUFFICIENT BALANCE: have {balance:.6f}, need {trade.filled_shares}. "
+                                    f"Shortfall: {shortfall:.6f} shares. "
+                                    f"Shares may still be settling..."
+                                )
+                            else:
+                                logger.info(f"  ✅ Sufficient balance available")
+                    except Exception as e:
+                        logger.warning(f"  ⚠️ Error checking balance: {e}. Will attempt sell order anyway.")
+                
+                # Check conditional token allowances (critical for selling)
+                if attempt == 0:  # Only check on first attempt
+                    logger.info("  🔍 Checking conditional token allowances...")
+                    if hasattr(self.pm, 'ensure_conditional_token_allowances'):
+                        try:
+                            allowances_ok = self.pm.ensure_conditional_token_allowances()
+                            if not allowances_ok:
+                                logger.warning(
+                                    "  ⚠️ Conditional token allowances may not be set. "
+                                    "This could cause 'not enough balance / allowance' errors."
+                                )
+                            else:
+                                logger.info("  ✅ Conditional token allowances verified")
+                        except Exception as e:
+                            logger.warning(f"  ⚠️ Could not check allowances: {e}. Will attempt sell order anyway.")
+                
+                # Determine sell size: use actual balance if available, otherwise use filled_shares
+                sell_size = trade.filled_shares
+                if balance is not None and balance > 0:
+                    sell_size = min(balance, trade.filled_shares)
+                    if sell_size < trade.filled_shares:
+                        logger.warning(
+                            f"  ⚠️ Adjusting sell size from {trade.filled_shares} to {sell_size:.6f} "
+                            f"shares (actual balance)"
+                        )
+                
+                # Round down to integer shares
+                import math
+                sell_size_int = max(1, math.floor(sell_size))
+                
+                if sell_size_int < sell_size:
+                    logger.warning(
+                        f"  ⚠️ Rounding sell size down from {sell_size:.6f} to {sell_size_int} shares"
                     )
-                    self.open_sell_orders[sell_order_id] = trade_id
-                    logger.info(f"✅ Sell order placed: {sell_order_id}")
+                
+                # Final balance check
+                if balance is not None and sell_size_int > balance:
+                    logger.error(
+                        f"  ❌ Cannot place sell order: sell_size_int ({sell_size_int}) > balance ({balance:.6f})"
+                    )
+                    if attempt < max_retries - 1:
+                        delay = retry_delays[min(attempt, len(retry_delays) - 1)]
+                        logger.info(f"  Waiting {delay}s before retry...")
+                        await asyncio.sleep(delay)
+                        continue
+                    else:
+                        logger.error(f"  ❌ Failed after {max_retries} attempts - insufficient balance")
+                        return
+                
+                # Place sell order
+                logger.info(
+                    f"  📤 Placing SELL order: price=${self.config.sell_price:.4f}, "
+                    f"size={sell_size_int} shares (filled_shares={trade.filled_shares}, balance={balance if balance is not None else 'N/A'})"
+                )
+                
+                sell_order_response = self.pm.execute_order(
+                    price=self.config.sell_price,
+                    size=sell_size_int,
+                    side=SELL,
+                    token_id=trade.token_id,
+                )
+                
+                if sell_order_response:
+                    sell_order_id = self.pm.extract_order_id(sell_order_response)
+                    if sell_order_id:
+                        self.db.update_limit_buy_sell_order(
+                            trade_id=trade_id,
+                            sell_order_id=sell_order_id,
+                            sell_order_price=self.config.sell_price,
+                            sell_order_size=sell_size_int,
+                            sell_order_status="open",
+                        )
+                        self.open_sell_orders[sell_order_id] = trade_id
+                        logger.info(f"✅ Sell order placed: {sell_order_id}")
+                        return  # Success!
+                    else:
+                        logger.error(f"❌ Could not extract sell order ID from response: {sell_order_response}")
                 else:
-                    logger.error(f"❌ Could not extract sell order ID from response: {sell_order_response}")
-            else:
-                logger.error(f"❌ Sell order placement failed: no response")
+                    logger.error(f"❌ Sell order placement failed: no response")
+            
+            except Exception as e:
+                error_msg = str(e).lower()
+                logger.error(f"❌ Error placing sell order (attempt {attempt + 1}/{max_retries}): {e}")
+                
+                # Check if it's a balance/allowance error
+                if "not enough balance" in error_msg or "allowance" in error_msg:
+                    if attempt < max_retries - 1:
+                        delay = retry_delays[min(attempt, len(retry_delays) - 1)]
+                        logger.info(
+                            f"  ⚠️ Balance/allowance error detected. "
+                            f"Waiting {delay}s before retry (shares may still be settling)..."
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    else:
+                        logger.error(f"  ❌ Failed after {max_retries} attempts due to balance/allowance issues")
+                        return
+                else:
+                    # Other error - don't retry
+                    logger.error(f"  ❌ Non-retryable error, aborting sell order placement")
+                    return
         
-        except Exception as e:
-            logger.error(f"❌ Error placing sell order: {e}", exc_info=True)
+        logger.error(f"❌ Failed to place sell order after {max_retries} attempts")
     
     async def _check_cancel_thresholds(self):
         """Cancel orders if cancel_threshold_minutes reached and neither has filled."""
