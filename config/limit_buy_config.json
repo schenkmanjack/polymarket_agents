@@ -4,7 +4,7 @@
   "sell_price": 0.4,
   "order_size": 5.2,
   "market_type": "15m",
-  "min_minutes_before_resolution": 3.0,
+  "min_minutes_before_resolution": 2.0,
   "cancel_threshold_minutes": 1.0,
   "order_status_check_interval": 1.0,
   "use_websocket_order_status": true,
