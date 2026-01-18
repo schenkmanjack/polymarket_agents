@@ -1,6 +1,6 @@
 {
-  "yes_buy_price": 0.2,
-  "no_buy_price": 0.2,
+  "yes_buy_price": 0.12,
+  "no_buy_price": 0.12,
   "sell_price": 0.99,
   "order_size": 20.2,
   "market_type": "15m",
