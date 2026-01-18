@@ -699,12 +699,28 @@ class LimitBuyTrader:
         max_retries = 5
         initial_delay = 5.0  # Wait 5 seconds before first attempt (shares need to settle)
         retry_delays = [10.0, 20.0, 30.0, 60.0]  # Increasing delays for retries
+        last_error_was_allowance = False  # Track if last error was allowance-related
         
         logger.info(
             f"Waiting {initial_delay}s for shares to settle before placing sell order "
             f"at ${self.config.sell_price:.4f} for {trade.filled_shares} shares (trade {trade_id})"
         )
         await asyncio.sleep(initial_delay)
+        
+        # Check allowances BEFORE starting retry loop (one-time check)
+        # This matches the threshold strategy approach - check once before attempting orders
+        logger.info("🔍 Pre-flight check: Verifying conditional token allowances before placing sell order...")
+        if hasattr(self.pm, 'ensure_conditional_token_allowances'):
+            try:
+                allowances_ok = self.pm.ensure_conditional_token_allowances()
+                if allowances_ok:
+                    logger.info("✅ Conditional token allowances verified - ready to place sell order")
+                else:
+                    logger.warning("⚠️ Conditional token allowances may not be set - sell order may fail")
+            except Exception as e:
+                logger.error(f"❌ Error checking allowances in pre-flight check: {e}", exc_info=True)
+        else:
+            logger.warning("⚠️ ensure_conditional_token_allowances method not available")
         
         # Retry loop for placing sell order
         for attempt in range(max_retries):
@@ -749,13 +765,16 @@ class LimitBuyTrader:
                         logger.warning(f"  ⚠️ Error checking balance: {e}. Will attempt sell order anyway.")
                 
                 # Check conditional token allowances (critical for selling)
-                # Check on first attempt, and also check again if we got an allowance error on previous attempt
-                should_check_allowances = (attempt == 0) or (attempt > 0 and "allowance" in str(getattr(self, '_last_sell_error', '')))
+                # Always check on first attempt, and ALWAYS check again if we got an allowance error on previous attempt
+                should_check_allowances = (attempt == 0) or last_error_was_allowance
                 if should_check_allowances:
                     logger.info(f"  🔍 Checking conditional token allowances (attempt {attempt + 1})...")
+                    logger.info(f"  📋 Last error was allowance-related: {last_error_was_allowance}")
                     if hasattr(self.pm, 'ensure_conditional_token_allowances'):
                         try:
+                            logger.info(f"  🔧 Calling ensure_conditional_token_allowances()...")
                             allowances_ok = self.pm.ensure_conditional_token_allowances()
+                            logger.info(f"  📊 ensure_conditional_token_allowances() returned: {allowances_ok}")
                             if not allowances_ok:
                                 logger.warning(
                                     "  ⚠️ Conditional token allowances may not be set. "
@@ -766,9 +785,14 @@ class LimitBuyTrader:
                                     logger.info("  ⏳ Waiting 5 seconds for approvals to propagate on blockchain...")
                                     await asyncio.sleep(5.0)
                             else:
-                                logger.info("  ✅ Conditional token allowances verified")
+                                logger.info("  ✅ Conditional token allowances verified and set")
                         except Exception as e:
-                            logger.warning(f"  ⚠️ Could not check allowances: {e}. Will attempt sell order anyway.")
+                            logger.error(f"  ❌ Error checking/setting allowances: {e}", exc_info=True)
+                            logger.warning("  ⚠️ Will attempt sell order anyway, but it may fail if allowances are not set.")
+                    else:
+                        logger.warning("  ⚠️ ensure_conditional_token_allowances method not available")
+                else:
+                    logger.debug(f"  ⏭️ Skipping allowance check (attempt {attempt + 1}, last_error_was_allowance={last_error_was_allowance})")
                 
                 # Determine sell size: use actual balance if available, otherwise use filled_shares
                 sell_size = trade.filled_shares
@@ -839,20 +863,25 @@ class LimitBuyTrader:
                 logger.error(f"❌ Error placing sell order (attempt {attempt + 1}/{max_retries}): {e}")
                 
                 # Check if it's a balance/allowance error
-                if "not enough balance" in error_msg or "allowance" in error_msg:
+                is_allowance_error = "not enough balance" in error_msg or "allowance" in error_msg
+                if is_allowance_error:
+                    last_error_was_allowance = True  # Set flag for next attempt
                     if attempt < max_retries - 1:
                         delay = retry_delays[min(attempt, len(retry_delays) - 1)]
                         logger.info(
                             f"  ⚠️ Balance/allowance error detected. "
-                            f"Waiting {delay}s before retry (shares may still be settling)..."
+                            f"Will check and set allowances on next attempt. "
+                            f"Waiting {delay}s before retry..."
                         )
                         await asyncio.sleep(delay)
                         continue
                     else:
                         logger.error(f"  ❌ Failed after {max_retries} attempts due to balance/allowance issues")
+                        logger.error(f"  💡 Suggestion: Check if conditional token allowances are set for exchange contracts")
                         return
                 else:
                     # Other error - don't retry
+                    last_error_was_allowance = False
                     logger.error(f"  ❌ Non-retryable error, aborting sell order placement")
                     return
         
