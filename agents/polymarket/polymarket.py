@@ -422,8 +422,10 @@ class Polymarket:
         """
         Get the appropriate CLOB client for placing an order.
         
-        For SELL orders of conditional tokens (from split), use direct wallet client
-        because shares are in direct wallet, not proxy wallet.
+        For SELL orders of conditional tokens:
+        - If shares are in direct wallet (from split), use direct wallet client
+        - If shares are in proxy wallet (from CLOB buy), use proxy wallet client
+        - By default, check both wallets and use the one with shares
         
         For other orders, use proxy wallet client if available (gasless trading).
         
@@ -434,13 +436,36 @@ class Polymarket:
         Returns:
             ClobClient instance to use for this order
         """
-        # For SELL orders, use direct wallet client if available
-        # (conditional tokens from split are in direct wallet)
-        if side == "SELL" and self.direct_wallet_client:
-            # Check if this is a conditional token (very long numeric token_id)
-            # Conditional tokens typically have token IDs that are very long numbers
-            if token_id and len(token_id) > 30:  # Conditional tokens have long numeric IDs
-                logger.debug(f"Using direct wallet client for SELL order (conditional token)")
+        # For SELL orders of conditional tokens, check where shares actually are
+        if side == "SELL" and token_id and len(token_id) > 30:  # Conditional tokens have long numeric IDs
+            # Check both wallets to see where shares are
+            direct_wallet = self.get_address_for_private_key()
+            direct_balance = None
+            proxy_balance = None
+            
+            try:
+                direct_balance = self.get_conditional_token_balance(token_id, wallet_address=direct_wallet)
+            except Exception:
+                pass
+            
+            if self.proxy_wallet_address:
+                try:
+                    proxy_balance = self.get_conditional_token_balance(token_id, wallet_address=self.proxy_wallet_address)
+                except Exception:
+                    pass
+            
+            # Use the wallet that has shares (prefer direct wallet if both have shares)
+            if direct_balance and direct_balance > 0:
+                if self.direct_wallet_client:
+                    logger.debug(f"Using direct wallet client for SELL order (shares in direct wallet: {direct_balance:.6f})")
+                    return self.direct_wallet_client
+            elif proxy_balance and proxy_balance > 0:
+                logger.debug(f"Using proxy wallet client for SELL order (shares in proxy wallet: {proxy_balance:.6f})")
+                return self.client  # Proxy wallet client
+            
+            # If no shares found in either wallet, default to direct wallet client (for split-based strategies)
+            if self.direct_wallet_client:
+                logger.debug(f"Using direct wallet client for SELL order (default, no shares detected)")
                 return self.direct_wallet_client
         
         # For all other orders, use the default client (proxy wallet if available)

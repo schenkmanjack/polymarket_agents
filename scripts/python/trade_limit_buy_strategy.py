@@ -742,14 +742,34 @@ class LimitBuyTrader:
                     return
                 
                 # Check conditional token balance before attempting to sell
+                # IMPORTANT: Shares from CLOB buy orders may be in proxy wallet OR direct wallet
+                # But execute_order uses direct_wallet_client for SELL, so we should check direct wallet
+                # However, if shares are actually in proxy wallet, we need to check there too
                 balance = None
                 if hasattr(self.pm, 'get_conditional_token_balance'):
                     logger.info(f"  🔍 Checking conditional token balance for token_id={trade.token_id[:20]}...")
                     try:
-                        balance = self.pm.get_conditional_token_balance(trade.token_id)
+                        # First check direct wallet (where execute_order expects shares for SELL)
+                        direct_wallet = self.pm.get_address_for_private_key()
+                        balance = self.pm.get_conditional_token_balance(trade.token_id, wallet_address=direct_wallet)
+                        logger.info(f"  📊 Direct wallet balance: {balance:.6f} shares" if balance is not None else "  📊 Direct wallet balance: None")
+                        
+                        # If no balance in direct wallet and proxy wallet exists, check proxy wallet too
+                        if (balance is None or balance == 0) and self.pm.proxy_wallet_address:
+                            logger.info(f"  🔍 No balance in direct wallet, checking proxy wallet...")
+                            proxy_balance = self.pm.get_conditional_token_balance(trade.token_id, wallet_address=self.pm.proxy_wallet_address)
+                            logger.info(f"  📊 Proxy wallet balance: {proxy_balance:.6f} shares" if proxy_balance is not None else "  📊 Proxy wallet balance: None")
+                            if proxy_balance and proxy_balance > 0:
+                                logger.warning(
+                                    f"  ⚠️ Shares are in PROXY wallet ({proxy_balance:.6f} shares) but execute_order "
+                                    f"will use DIRECT wallet client. This may cause 'not enough balance' errors!"
+                                )
+                                # Use proxy balance for now, but this indicates a mismatch
+                                balance = proxy_balance
+                        
                         if balance is not None:
                             logger.info(
-                                f"  📊 Balance: {balance:.6f} shares available "
+                                f"  📊 Final balance: {balance:.6f} shares available "
                                 f"(need {trade.filled_shares} shares)"
                             )
                             if balance < trade.filled_shares:
@@ -762,7 +782,7 @@ class LimitBuyTrader:
                             else:
                                 logger.info(f"  ✅ Sufficient balance available")
                     except Exception as e:
-                        logger.warning(f"  ⚠️ Error checking balance: {e}. Will attempt sell order anyway.")
+                        logger.warning(f"  ⚠️ Error checking balance: {e}. Will attempt sell order anyway.", exc_info=True)
                 
                 # Check conditional token allowances (critical for selling)
                 # Always check on first attempt, and ALWAYS check again if we got an allowance error on previous attempt
