@@ -1187,7 +1187,19 @@ class LimitBuyTrader:
                     return
                 
                 # Use best bid price for market sell (will fill immediately)
-                market_price = best_bid
+                # Ensure price is within Polymarket's valid range [0.01, 0.99]
+                market_price = max(0.01, min(0.99, best_bid))
+                
+                if best_bid < 0.01:
+                    logger.warning(
+                        f"⚠️ Best bid ({best_bid:.6f}) is below minimum price (0.01). "
+                        f"Using minimum price (0.01) for market sell order."
+                    )
+                elif best_bid > 0.99:
+                    logger.warning(
+                        f"⚠️ Best bid ({best_bid:.6f}) exceeds maximum price (0.99). "
+                        f"Using maximum price (0.99) for market sell order."
+                    )
                 
                 # Round down to integer shares
                 import math
