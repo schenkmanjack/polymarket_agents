@@ -439,33 +439,57 @@ class Polymarket:
         # For SELL orders of conditional tokens, check where shares actually are
         if side == "SELL" and token_id and len(token_id) > 30:  # Conditional tokens have long numeric IDs
             # Check both wallets to see where shares are
+            # Use retry_on_rate_limit=False to avoid long delays during order placement
+            # If rate limited, we'll default based on which wallet typically has shares
             direct_wallet = self.get_address_for_private_key()
             direct_balance = None
             proxy_balance = None
             
             try:
-                direct_balance = self.get_conditional_token_balance(token_id, wallet_address=direct_wallet)
-            except Exception:
-                pass
+                # Try direct wallet first (no retries to avoid delay)
+                direct_balance = self.get_conditional_token_balance(
+                    token_id, 
+                    wallet_address=direct_wallet,
+                    retry_on_rate_limit=False  # Don't retry here - too slow for order placement
+                )
+            except Exception as e:
+                logger.debug(f"Could not check direct wallet balance: {e}")
+                direct_balance = None
             
             if self.proxy_wallet_address:
                 try:
-                    proxy_balance = self.get_conditional_token_balance(token_id, wallet_address=self.proxy_wallet_address)
-                except Exception:
-                    pass
+                    # Try proxy wallet (no retries to avoid delay)
+                    proxy_balance = self.get_conditional_token_balance(
+                        token_id, 
+                        wallet_address=self.proxy_wallet_address,
+                        retry_on_rate_limit=False  # Don't retry here - too slow for order placement
+                    )
+                except Exception as e:
+                    logger.debug(f"Could not check proxy wallet balance: {e}")
+                    proxy_balance = None
             
             # Use the wallet that has shares (prefer direct wallet if both have shares)
             if direct_balance and direct_balance > 0:
                 if self.direct_wallet_client:
-                    logger.debug(f"Using direct wallet client for SELL order (shares in direct wallet: {direct_balance:.6f})")
+                    logger.info(f"Using direct wallet client for SELL order (shares in direct wallet: {direct_balance:.6f})")
                     return self.direct_wallet_client
             elif proxy_balance and proxy_balance > 0:
-                logger.debug(f"Using proxy wallet client for SELL order (shares in proxy wallet: {proxy_balance:.6f})")
+                logger.info(f"Using proxy wallet client for SELL order (shares in proxy wallet: {proxy_balance:.6f})")
                 return self.client  # Proxy wallet client
             
-            # If no shares found in either wallet, default to direct wallet client (for split-based strategies)
+            # If both checks failed (rate limited or no shares), default to proxy wallet client
+            # because CLOB buy orders typically put shares in proxy wallet
+            # (This is safer than defaulting to direct wallet when we're not sure)
+            if self.proxy_wallet_address:
+                logger.warning(
+                    f"Could not determine wallet with shares (rate limited or no shares). "
+                    f"Defaulting to proxy wallet client (typical for CLOB buy orders)."
+                )
+                return self.client  # Proxy wallet client
+            
+            # Fallback to direct wallet if no proxy wallet
             if self.direct_wallet_client:
-                logger.debug(f"Using direct wallet client for SELL order (default, no shares detected)")
+                logger.warning(f"Using direct wallet client for SELL order (fallback, no proxy wallet)")
                 return self.direct_wallet_client
         
         # For all other orders, use the default client (proxy wallet if available)
@@ -1066,41 +1090,41 @@ class Polymarket:
         retry_delays = [10.0, 20.0, 30.0]  # Wait times for rate limit retries
         
         for attempt in range(max_retries):
-            try:
-                # Determine which address to check
-                if wallet_address:
-                    address_to_check = wallet_address
-                elif self.proxy_wallet_address:
-                    address_to_check = self.proxy_wallet_address
-                else:
-                    address_to_check = self.get_address_for_private_key()
-                
-                logger.debug(
+        try:
+            # Determine which address to check
+            if wallet_address:
+                address_to_check = wallet_address
+            elif self.proxy_wallet_address:
+                address_to_check = self.proxy_wallet_address
+            else:
+                address_to_check = self.get_address_for_private_key()
+            
+            logger.debug(
                     f"🔍 Checking conditional token balance (attempt {attempt + 1}/{max_retries}): "
                     f"token_id={token_id[:20]}..., "
-                    f"wallet={address_to_check[:10]}...{address_to_check[-8:]}, "
-                    f"ctf_contract={self.ctf_address[:10]}...{self.ctf_address[-8:]}"
-                )
-                
-                # Convert token_id to int (it's a uint256)
-                token_id_int = int(token_id)
-                
-                # Call balanceOf(address, uint256) on ERC1155 contract
-                balance_raw = self.ctf.functions.balanceOf(address_to_check, token_id_int).call()
-                
-                logger.debug(f"  Raw balance from contract: {balance_raw} (uint256)")
-                
-                # ERC1155 conditional tokens on Polymarket use 1e6 (6 decimals), not 1e18
-                # Example: raw balance 1978900 = 1.9789 shares (with 6 decimals)
-                # This is different from ERC20 tokens which typically use 1e18
-                balance_float = float(balance_raw) / 1e6
-                
-                logger.info(
-                    f"  ✓ Conditional token balance: {balance_float:.6f} shares "
-                    f"(raw: {balance_raw}, token_id: {token_id[:20]}...)"
-                )
-                
-                return balance_float
+                f"wallet={address_to_check[:10]}...{address_to_check[-8:]}, "
+                f"ctf_contract={self.ctf_address[:10]}...{self.ctf_address[-8:]}"
+            )
+            
+            # Convert token_id to int (it's a uint256)
+            token_id_int = int(token_id)
+            
+            # Call balanceOf(address, uint256) on ERC1155 contract
+            balance_raw = self.ctf.functions.balanceOf(address_to_check, token_id_int).call()
+            
+            logger.debug(f"  Raw balance from contract: {balance_raw} (uint256)")
+            
+            # ERC1155 conditional tokens on Polymarket use 1e6 (6 decimals), not 1e18
+            # Example: raw balance 1978900 = 1.9789 shares (with 6 decimals)
+            # This is different from ERC20 tokens which typically use 1e18
+            balance_float = float(balance_raw) / 1e6
+            
+            logger.info(
+                f"  ✓ Conditional token balance: {balance_float:.6f} shares "
+                f"(raw: {balance_raw}, token_id: {token_id[:20]}...)"
+            )
+            
+            return balance_float
             except ValueError as e:
                 error_str = str(e)
                 # Check if it's a rate limit error
@@ -1121,14 +1145,14 @@ class Polymarket:
                 else:
                     # Not a rate limit error, re-raise
                     raise
-            except Exception as e:
-                logger.error(
-                    f"❌ Error checking conditional token balance for token_id {token_id}: {e}",
-                    exc_info=True
-                )
+        except Exception as e:
+            logger.error(
+                f"❌ Error checking conditional token balance for token_id {token_id}: {e}",
+                exc_info=True
+            )
                 return None
         
-        return None
+            return None
     
     def check_conditional_token_allowance(self, exchange_address: str, wallet_address: Optional[str] = None) -> Optional[bool]:
         """
