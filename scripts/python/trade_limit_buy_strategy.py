@@ -1081,7 +1081,17 @@ class LimitBuyTrader:
                             await asyncio.sleep(3.0)
                             await self._place_market_sell_order(trade_id)
                     else:
-                        logger.warning(f"⚠️ Failed to cancel limit sell order {sell_order_id}")
+                        logger.warning(
+                            f"⚠️ Failed to cancel limit sell order {sell_order_id}. "
+                            f"Order may have already filled or been cancelled. "
+                            f"Will still attempt market sell..."
+                        )
+                        # Still attempt market sell - order might have already filled or been cancelled
+                        # If shares are locked, the market sell will fail with balance error and retry
+                        if self.config.convert_limit_sell_to_market:
+                            logger.info("⏳ Waiting 3 seconds before attempting market sell (order may still be settling)...")
+                            await asyncio.sleep(3.0)
+                            await self._place_market_sell_order(trade_id)
                 else:
                     logger.info(
                         f"⏰ Cancel threshold reached for sell order {sell_order_id} (market {trade.market_slug}): "
