@@ -568,6 +568,7 @@ class LimitBuyTrader:
     
     async def _order_status_loop(self):
         """Check order status periodically."""
+        logger.info(f"🔄 Order status loop started (check interval: {self.config.order_status_check_interval}s)")
         while self.running:
             try:
                 await self._check_order_statuses()
@@ -580,11 +581,22 @@ class LimitBuyTrader:
     
     async def _check_order_statuses(self):
         """Check status of all active buy orders."""
+        if not self.active_orders:
+            logger.debug("No active orders to check")
+            return
+        
+        logger.info(f"🔍 Checking order statuses for {len(self.active_orders)} market(s)")
         for market_slug, order_info in list(self.active_orders.items()):
             yes_order_id = order_info.get("yes_order_id")
             no_order_id = order_info.get("no_order_id")
             yes_trade_id = order_info.get("yes_trade_id")
             no_trade_id = order_info.get("no_trade_id")
+            
+            logger.info(
+                f"  📋 Market {market_slug}: "
+                f"YES={yes_order_id[:10] if yes_order_id else 'None'}..., "
+                f"NO={no_order_id[:10] if no_order_id else 'None'}..."
+            )
             
             # Check YES order
             if yes_order_id:
@@ -609,12 +621,19 @@ class LimitBuyTrader:
     ):
         """Check if order is filled and handle accordingly."""
         try:
+            logger.info(f"  🔍 Checking {side} order {order_id[:10]}... for market {market_slug} (trade_id={trade_id})")
             order_status = self.pm.get_order_status(order_id)
             if not order_status:
+                logger.warning(f"  ⚠️ No order status returned for {side} order {order_id[:10]}... (order may not exist or API error)")
                 return
             
             status, filled_amount, total_amount = parse_order_status(order_status)
             is_filled = is_order_filled(status, filled_amount, total_amount)
+            
+            logger.info(
+                f"  📊 {side} order {order_id[:10]}... status: {status}, "
+                f"filled={filled_amount}, total={total_amount}, is_filled={is_filled}"
+            )
             
             if is_filled and trade_id:
                 # Order filled - update trade and handle
