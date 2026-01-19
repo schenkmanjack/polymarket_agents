@@ -1048,57 +1048,87 @@ class Polymarket:
             logger.error(f"Error approving USDC for CTF contract: {e}", exc_info=True)
             return None
     
-    def get_conditional_token_balance(self, token_id: str, wallet_address: Optional[str] = None) -> Optional[float]:
+    def get_conditional_token_balance(self, token_id: str, wallet_address: Optional[str] = None, retry_on_rate_limit: bool = True) -> Optional[float]:
         """
         Get balance of conditional tokens (ERC1155) for a specific token_id.
         
         Args:
             token_id: CLOB token ID (uint256)
             wallet_address: Optional wallet address. If not provided, uses proxy wallet or direct wallet.
+            retry_on_rate_limit: If True, retry with exponential backoff on rate limit errors (default: True)
         
         Returns:
             Balance as float (number of shares), or None if unavailable
         """
-        try:
-            # Determine which address to check
-            if wallet_address:
-                address_to_check = wallet_address
-            elif self.proxy_wallet_address:
-                address_to_check = self.proxy_wallet_address
-            else:
-                address_to_check = self.get_address_for_private_key()
-            
-            logger.debug(
-                f"🔍 Checking conditional token balance: token_id={token_id[:20]}..., "
-                f"wallet={address_to_check[:10]}...{address_to_check[-8:]}, "
-                f"ctf_contract={self.ctf_address[:10]}...{self.ctf_address[-8:]}"
-            )
-            
-            # Convert token_id to int (it's a uint256)
-            token_id_int = int(token_id)
-            
-            # Call balanceOf(address, uint256) on ERC1155 contract
-            balance_raw = self.ctf.functions.balanceOf(address_to_check, token_id_int).call()
-            
-            logger.debug(f"  Raw balance from contract: {balance_raw} (uint256)")
-            
-            # ERC1155 conditional tokens on Polymarket use 1e6 (6 decimals), not 1e18
-            # Example: raw balance 1978900 = 1.9789 shares (with 6 decimals)
-            # This is different from ERC20 tokens which typically use 1e18
-            balance_float = float(balance_raw) / 1e6
-            
-            logger.info(
-                f"  ✓ Conditional token balance: {balance_float:.6f} shares "
-                f"(raw: {balance_raw}, token_id: {token_id[:20]}...)"
-            )
-            
-            return balance_float
-        except Exception as e:
-            logger.error(
-                f"❌ Error checking conditional token balance for token_id {token_id}: {e}",
-                exc_info=True
-            )
-            return None
+        import time
+        
+        max_retries = 3 if retry_on_rate_limit else 1
+        retry_delays = [10.0, 20.0, 30.0]  # Wait times for rate limit retries
+        
+        for attempt in range(max_retries):
+            try:
+                # Determine which address to check
+                if wallet_address:
+                    address_to_check = wallet_address
+                elif self.proxy_wallet_address:
+                    address_to_check = self.proxy_wallet_address
+                else:
+                    address_to_check = self.get_address_for_private_key()
+                
+                logger.debug(
+                    f"🔍 Checking conditional token balance (attempt {attempt + 1}/{max_retries}): "
+                    f"token_id={token_id[:20]}..., "
+                    f"wallet={address_to_check[:10]}...{address_to_check[-8:]}, "
+                    f"ctf_contract={self.ctf_address[:10]}...{self.ctf_address[-8:]}"
+                )
+                
+                # Convert token_id to int (it's a uint256)
+                token_id_int = int(token_id)
+                
+                # Call balanceOf(address, uint256) on ERC1155 contract
+                balance_raw = self.ctf.functions.balanceOf(address_to_check, token_id_int).call()
+                
+                logger.debug(f"  Raw balance from contract: {balance_raw} (uint256)")
+                
+                # ERC1155 conditional tokens on Polymarket use 1e6 (6 decimals), not 1e18
+                # Example: raw balance 1978900 = 1.9789 shares (with 6 decimals)
+                # This is different from ERC20 tokens which typically use 1e18
+                balance_float = float(balance_raw) / 1e6
+                
+                logger.info(
+                    f"  ✓ Conditional token balance: {balance_float:.6f} shares "
+                    f"(raw: {balance_raw}, token_id: {token_id[:20]}...)"
+                )
+                
+                return balance_float
+            except ValueError as e:
+                error_str = str(e)
+                # Check if it's a rate limit error
+                if 'rate limit' in error_str.lower() or '-32090' in error_str:
+                    if attempt < max_retries - 1:
+                        delay = retry_delays[min(attempt, len(retry_delays) - 1)]
+                        logger.warning(
+                            f"  ⚠️ Rate limit error checking balance (attempt {attempt + 1}/{max_retries}). "
+                            f"Waiting {delay}s before retry..."
+                        )
+                        time.sleep(delay)
+                        continue
+                    else:
+                        logger.error(
+                            f"❌ Rate limit error checking conditional token balance after {max_retries} attempts: {e}"
+                        )
+                        return None
+                else:
+                    # Not a rate limit error, re-raise
+                    raise
+            except Exception as e:
+                logger.error(
+                    f"❌ Error checking conditional token balance for token_id {token_id}: {e}",
+                    exc_info=True
+                )
+                return None
+        
+        return None
     
     def check_conditional_token_allowance(self, exchange_address: str, wallet_address: Optional[str] = None) -> Optional[bool]:
         """

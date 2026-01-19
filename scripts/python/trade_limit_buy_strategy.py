@@ -852,8 +852,26 @@ class LimitBuyTrader:
                         f"  ⚠️ Rounding sell size down from {sell_size:.6f} to {sell_size_int} shares"
                     )
                 
-                # Final balance check
-                if balance is not None and sell_size_int > balance:
+                # Final balance check - if balance is 0 or None, don't try to place order
+                if balance is None:
+                    logger.warning(
+                        f"  ⚠️ Could not check balance (may be rate limited). "
+                        f"Will attempt sell order anyway, but it may fail."
+                    )
+                elif balance == 0:
+                    logger.error(
+                        f"  ❌ Cannot place sell order: balance is 0.0 shares. "
+                        f"Shares may not have settled yet or may be in a different wallet."
+                    )
+                    if attempt < max_retries - 1:
+                        delay = retry_delays[min(attempt, len(retry_delays) - 1)]
+                        logger.info(f"  Waiting {delay}s before retry (shares may still be settling)...")
+                        await asyncio.sleep(delay)
+                        continue
+                    else:
+                        logger.error(f"  ❌ Failed after {max_retries} attempts - balance is still 0")
+                        return
+                elif sell_size_int > balance:
                     logger.error(
                         f"  ❌ Cannot place sell order: sell_size_int ({sell_size_int}) > balance ({balance:.6f})"
                     )
@@ -867,10 +885,19 @@ class LimitBuyTrader:
                         return
                 
                 # Place sell order
-                logger.info(
-                    f"  📤 Placing SELL order: price=${self.config.sell_price:.4f}, "
-                    f"size={sell_size_int} shares (filled_shares={trade.filled_shares}, balance={balance if balance is not None else 'N/A'})"
-                )
+                balance_info = f"balance={balance:.6f}" if balance is not None else "balance=N/A"
+                if balance is not None:
+                    # Add warning if balance is from proxy wallet but we're using direct wallet client
+                    # (This will be handled by _get_client_for_order, but log it for debugging)
+                    logger.info(
+                        f"  📤 Placing SELL order: price=${self.config.sell_price:.4f}, "
+                        f"size={sell_size_int} shares (filled_shares={trade.filled_shares}, {balance_info})"
+                    )
+                else:
+                    logger.info(
+                        f"  📤 Placing SELL order: price=${self.config.sell_price:.4f}, "
+                        f"size={sell_size_int} shares (filled_shares={trade.filled_shares}, {balance_info})"
+                    )
                 
                 sell_order_response = self.pm.execute_order(
                     price=self.config.sell_price,
