@@ -1029,8 +1029,11 @@ class LimitBuyTrader:
                         )
                         self.open_sell_orders.pop(sell_order_id, None)
                         
-                        # Place market sell order
-                        await self._place_market_sell_order(trade_id)
+                        # Wait a moment for cancelled order to settle before placing market sell
+                        if self.config.convert_limit_sell_to_market:
+                            logger.info("⏳ Waiting 3 seconds for cancelled order to settle before placing market sell...")
+                            await asyncio.sleep(3.0)
+                            await self._place_market_sell_order(trade_id)
                     else:
                         logger.warning(f"⚠️ Failed to cancel limit sell order {sell_order_id}")
                 else:
@@ -1055,59 +1058,163 @@ class LimitBuyTrader:
             logger.error(f"Trade {trade_id} has no token_id")
             return
         
-        try:
-            # Get orderbook to find best bid price
-            orderbook = fetch_orderbook(trade.token_id)
-            if not orderbook:
-                logger.error(f"Could not fetch orderbook for token {trade.token_id[:20]}...")
-                return
-            
-            best_bid = get_highest_bid(orderbook)
-            if best_bid is None or best_bid <= 0:
-                logger.error(f"No valid best bid found in orderbook")
-                return
-            
-            # Use best bid price for market sell (will fill immediately)
-            market_price = best_bid
-            
-            # Round down to integer shares
-            import math
-            sell_size = max(1, math.floor(trade.filled_shares))
-            
-            logger.info(
-                f"Placing MARKET sell order: price=${market_price:.4f} (best bid), "
-                f"size={sell_size} shares (trade_id={trade_id})"
-            )
-            
-            # Place market order using FOK (Fill or Kill) - fills immediately or cancels
-            market_order_response = self.pm.execute_order(
-                price=market_price,
-                size=sell_size,
-                side=SELL,
-                token_id=trade.token_id,
-                order_type=OrderType.FOK,  # Market order - Fill or Kill
-            )
-            
-            if market_order_response:
-                market_order_id = self.pm.extract_order_id(market_order_response)
-                if market_order_id:
-                    # Update trade with market sell order info
-                    self.db.update_limit_buy_sell_order(
-                        trade_id=trade_id,
-                        sell_order_id=market_order_id,
-                        sell_order_price=market_price,
-                        sell_order_size=sell_size,
-                        sell_order_status="filled",  # FOK orders fill immediately or fail
-                    )
-                    self.open_sell_orders[market_order_id] = trade_id
-                    logger.info(f"✅ Market sell order placed: {market_order_id}")
-                else:
-                    logger.error(f"❌ Could not extract market order ID from response: {market_order_response}")
-            else:
-                logger.error(f"❌ Market sell order placement failed: no response")
+        # Retry logic for market sell orders (similar to limit sell)
+        max_retries = 3
+        retry_delays = [2.0, 5.0, 10.0]  # Shorter delays for market orders (time-sensitive)
         
-        except Exception as e:
-            logger.error(f"❌ Error placing market sell order: {e}", exc_info=True)
+        for attempt in range(max_retries):
+            try:
+                # Reload trade to ensure we have latest data
+                trade = self.db.get_limit_buy_trade_by_id(trade_id)
+                if not trade:
+                    logger.error(f"Trade {trade_id} not found during retry")
+                    return
+                
+                # Check conditional token balance before attempting to sell
+                balance = None
+                if hasattr(self.pm, 'get_conditional_token_balance'):
+                    logger.info(f"  🔍 Checking conditional token balance for market sell (attempt {attempt + 1}/{max_retries})...")
+                    try:
+                        # Check direct wallet first (where execute_order expects shares for SELL)
+                        direct_wallet = self.pm.get_address_for_private_key()
+                        balance = self.pm.get_conditional_token_balance(trade.token_id, wallet_address=direct_wallet)
+                        
+                        # If no balance in direct wallet and proxy wallet exists, check proxy wallet too
+                        if (balance is None or balance == 0) and self.pm.proxy_wallet_address:
+                            logger.info(f"  🔍 No balance in direct wallet, checking proxy wallet...")
+                            proxy_balance = self.pm.get_conditional_token_balance(trade.token_id, wallet_address=self.pm.proxy_wallet_address)
+                            if proxy_balance and proxy_balance > 0:
+                                logger.warning(
+                                    f"  ⚠️ Shares are in PROXY wallet ({proxy_balance:.6f} shares) but execute_order "
+                                    f"will use DIRECT wallet client. This may cause 'not enough balance' errors!"
+                                )
+                                balance = proxy_balance
+                        
+                        if balance is not None:
+                            logger.info(f"  📊 Balance: {balance:.6f} shares available (need {trade.filled_shares} shares)")
+                            if balance < trade.filled_shares:
+                                logger.warning(
+                                    f"  ⚠️ INSUFFICIENT BALANCE: have {balance:.6f}, need {trade.filled_shares}. "
+                                    f"Shares may still be settling after order cancellation..."
+                                )
+                    except Exception as e:
+                        logger.warning(f"  ⚠️ Error checking balance: {e}. Will attempt market sell order anyway.", exc_info=True)
+                
+                # Check conditional token allowances (critical for selling)
+                if attempt == 0:  # Check on first attempt
+                    logger.info("  🔍 Checking conditional token allowances before market sell...")
+                    if hasattr(self.pm, 'ensure_conditional_token_allowances'):
+                        try:
+                            allowances_ok = self.pm.ensure_conditional_token_allowances()
+                            if allowances_ok:
+                                logger.info("  ✅ Conditional token allowances verified")
+                            else:
+                                logger.warning("  ⚠️ Conditional token allowances may not be set")
+                        except Exception as e:
+                            logger.error(f"  ❌ Error checking allowances: {e}", exc_info=True)
+                
+                # Get orderbook to find best bid price
+                orderbook = fetch_orderbook(trade.token_id)
+                if not orderbook:
+                    logger.error(f"Could not fetch orderbook for token {trade.token_id[:20]}...")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(retry_delays[min(attempt, len(retry_delays) - 1)])
+                        continue
+                    return
+                
+                best_bid = get_highest_bid(orderbook)
+                if best_bid is None or best_bid <= 0:
+                    logger.error(f"No valid best bid found in orderbook")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(retry_delays[min(attempt, len(retry_delays) - 1)])
+                        continue
+                    return
+                
+                # Use best bid price for market sell (will fill immediately)
+                market_price = best_bid
+                
+                # Round down to integer shares
+                import math
+                sell_size = max(1, math.floor(trade.filled_shares))
+                
+                # Final balance check
+                if balance is not None and sell_size > balance:
+                    logger.warning(
+                        f"  ⚠️ sell_size ({sell_size}) exceeds balance ({balance:.6f}). "
+                        f"Adjusting to floor of balance."
+                    )
+                    sell_size = max(1, math.floor(balance))
+                
+                logger.info(
+                    f"Placing MARKET sell order (attempt {attempt + 1}/{max_retries}): "
+                    f"price=${market_price:.4f} (best bid), "
+                    f"size={sell_size} shares (trade_id={trade_id}, balance={balance if balance is not None else 'N/A'})"
+                )
+                
+                # Place market order using FOK (Fill or Kill) - fills immediately or cancels
+                try:
+                    market_order_response = self.pm.execute_order(
+                        price=market_price,
+                        size=sell_size,
+                        side=SELL,
+                        token_id=trade.token_id,
+                        order_type=OrderType.FOK,  # Market order - Fill or Kill
+                    )
+                    
+                    if market_order_response:
+                        market_order_id = self.pm.extract_order_id(market_order_response)
+                        if market_order_id:
+                            # Update trade with market sell order info
+                            self.db.update_limit_buy_sell_order(
+                                trade_id=trade_id,
+                                sell_order_id=market_order_id,
+                                sell_order_price=market_price,
+                                sell_order_size=sell_size,
+                                sell_order_status="filled",  # FOK orders fill immediately or fail
+                            )
+                            self.open_sell_orders[market_order_id] = trade_id
+                            logger.info(f"✅ Market sell order placed: {market_order_id}")
+                            return  # Success - exit retry loop
+                        else:
+                            logger.error(f"❌ Could not extract market order ID from response: {market_order_response}")
+                    else:
+                        logger.error(f"❌ Market sell order placement failed: no response")
+                
+                except Exception as order_error:
+                    error_str = str(order_error).lower()
+                    is_balance_error = 'not enough balance' in error_str or 'allowance' in error_str
+                    
+                    if is_balance_error:
+                        logger.error(
+                            f"❌ Error placing market sell order (attempt {attempt + 1}/{max_retries}): {order_error}"
+                        )
+                        logger.info(
+                            f"⚠️ Balance/allowance error detected. "
+                            f"Shares may still be settling after order cancellation..."
+                        )
+                        
+                        if attempt < max_retries - 1:
+                            delay = retry_delays[min(attempt, len(retry_delays) - 1)]
+                            logger.info(f"  ⏳ Waiting {delay}s before retry...")
+                            await asyncio.sleep(delay)
+                            continue  # Retry
+                        else:
+                            logger.error(f"❌ Failed after {max_retries} attempts due to balance/allowance issues")
+                            return  # Give up
+                    else:
+                        # Non-balance error - log and re-raise
+                        logger.error(f"❌ Error placing market sell order: {order_error}", exc_info=True)
+                        raise  # Re-raise to be caught by outer except
+            
+            except Exception as e:
+                logger.error(f"❌ Unexpected error in market sell retry loop: {e}", exc_info=True)
+                if attempt < max_retries - 1:
+                    delay = retry_delays[min(attempt, len(retry_delays) - 1)]
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    logger.error(f"❌ Failed after {max_retries} attempts")
+                    return
     
     def _handle_websocket_order_update(self, order_id: str, order_data: Dict):
         """Handle WebSocket order status update."""
