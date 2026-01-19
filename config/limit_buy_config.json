@@ -6,7 +6,7 @@
   "market_type": "15m",
   "min_minutes_before_resolution": 4.0,
   "cancel_threshold_minutes": 2.0,
-  "convert_limit_sell_to_market": true,
+  "best_bid_margin": 0.02,
   "order_status_check_interval": 1.0,
   "use_websocket_order_status": true,
   "websocket_order_status_reconnect_delay": 5.0,

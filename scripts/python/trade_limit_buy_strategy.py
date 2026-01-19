@@ -156,8 +156,9 @@ class LimitBuyConfig:
         return float(self.config['cancel_threshold_minutes'])
     
     @property
-    def convert_limit_sell_to_market(self) -> bool:
-        return bool(self.config.get('convert_limit_sell_to_market', False))
+    def best_bid_margin(self) -> float:
+        """Margin below best bid for limit sell (e.g., 0.01 = 1 cent below best bid)"""
+        return float(self.config.get('best_bid_margin', 0.0))
     
     @property
     def order_status_check_interval(self) -> float:
@@ -1053,54 +1054,46 @@ class LimitBuyTrader:
             if minutes_remaining is None:
                 continue
             
-            # Check if we should convert to market order
+            # When cancel threshold is reached, cancel the original high-priced sell
+            # and place a new limit sell at best bid minus margin
             if minutes_remaining <= self.config.cancel_threshold_minutes:
-                if self.config.convert_limit_sell_to_market:
-                    logger.info(
-                        f"⏰ Cancel threshold reached for sell order {sell_order_id} (market {trade.market_slug}): "
-                        f"{minutes_remaining:.2f} minutes <= {self.config.cancel_threshold_minutes:.1f} minutes. "
-                        f"Converting limit sell to market sell (convert_limit_sell_to_market=true)."
+                logger.info(
+                    f"⏰ Cancel threshold reached for sell order {sell_order_id} (market {trade.market_slug}): "
+                    f"{minutes_remaining:.2f} minutes <= {self.config.cancel_threshold_minutes:.1f} minutes. "
+                    f"Cancelling original sell order and placing new limit sell at best bid minus margin."
+                )
+                
+                # Cancel the original limit sell order
+                cancel_response = self.pm.cancel_order(sell_order_id)
+                if cancel_response:
+                    logger.info(f"✅ Cancelled original limit sell order {sell_order_id}")
+                    self.db.update_limit_buy_sell_order(
+                        trade_id=trade_id,
+                        sell_order_id=sell_order_id,
+                        sell_order_price=trade.sell_order_price or 0.0,
+                        sell_order_size=trade.sell_order_size or 0.0,
+                        sell_order_status="cancelled",
                     )
+                    self.open_sell_orders.pop(sell_order_id, None)
                     
-                    # Cancel the limit sell order
-                    cancel_response = self.pm.cancel_order(sell_order_id)
-                    if cancel_response:
-                        logger.info(f"✅ Cancelled limit sell order {sell_order_id}")
-                        self.db.update_limit_buy_sell_order(
-                            trade_id=trade_id,
-                            sell_order_id=sell_order_id,
-                            sell_order_price=trade.sell_order_price or 0.0,
-                            sell_order_size=trade.sell_order_size or 0.0,
-                            sell_order_status="cancelled",
-                        )
-                        self.open_sell_orders.pop(sell_order_id, None)
-                        
-                        # Wait a moment for cancelled order to settle before placing market sell
-                        if self.config.convert_limit_sell_to_market:
-                            logger.info("⏳ Waiting 3 seconds for cancelled order to settle before placing market sell...")
-                            await asyncio.sleep(3.0)
-                            await self._place_market_sell_order(trade_id)
-                    else:
-                        logger.warning(
-                            f"⚠️ Failed to cancel limit sell order {sell_order_id}. "
-                            f"Order may have already filled or been cancelled. "
-                            f"Will still attempt market sell..."
-                        )
-                        # Still attempt market sell - order might have already filled or been cancelled
-                        # If shares are locked, the market sell will fail with balance error and retry
-                        if self.config.convert_limit_sell_to_market:
-                            logger.info("⏳ Waiting 3 seconds before attempting market sell (order may still be settling)...")
-                            await asyncio.sleep(3.0)
-                            await self._place_market_sell_order(trade_id)
+                    # Wait a moment for cancelled order to settle before placing new sell
+                    logger.info("⏳ Waiting 3 seconds for cancelled order to settle before placing new limit sell at best bid...")
+                    await asyncio.sleep(3.0)
+                    await self._place_market_sell_order(trade_id)
                 else:
-                    logger.info(
-                        f"⏰ Cancel threshold reached for sell order {sell_order_id} (market {trade.market_slug}): "
-                        f"{minutes_remaining:.2f} minutes <= {self.config.cancel_threshold_minutes:.1f} minutes. "
-                        f"Keeping limit sell order open (convert_limit_sell_to_market=false)."
+                    logger.warning(
+                        f"⚠️ Failed to cancel limit sell order {sell_order_id}. "
+                        f"Order may have already filled or been cancelled. "
+                        f"Will still attempt to place new limit sell at best bid..."
                     )
+                    # Still attempt to place new sell - order might have already filled or been cancelled
+                    # If shares are locked, the new sell will fail with balance error and retry
+                    logger.info("⏳ Waiting 3 seconds before attempting new limit sell (order may still be settling)...")
+                    await asyncio.sleep(3.0)
+                    await self._place_market_sell_order(trade_id)
     
     async def _place_market_sell_order(self, trade_id: int):
-        """Place a market sell order (FOK) at best bid price."""
+        """Place a limit sell order at best bid minus margin."""
         trade = self.db.get_limit_buy_trade_by_id(trade_id)
         if not trade:
             logger.error(f"Trade {trade_id} not found")
@@ -1154,11 +1147,11 @@ class LimitBuyTrader:
                                     f"Shares may still be settling after order cancellation..."
                                 )
                     except Exception as e:
-                        logger.warning(f"  ⚠️ Error checking balance: {e}. Will attempt market sell order anyway.", exc_info=True)
+                        logger.warning(f"  ⚠️ Error checking balance: {e}. Will attempt limit sell order anyway.", exc_info=True)
                 
                 # Check conditional token allowances (critical for selling)
                 if attempt == 0:  # Check on first attempt
-                    logger.info("  🔍 Checking conditional token allowances before market sell...")
+                    logger.info("  🔍 Checking conditional token allowances before limit sell...")
                     if hasattr(self.pm, 'ensure_conditional_token_allowances'):
                         try:
                             allowances_ok = self.pm.ensure_conditional_token_allowances()
@@ -1186,19 +1179,33 @@ class LimitBuyTrader:
                         continue
                     return
                 
-                # Use best bid price for market sell (will fill immediately)
+                # Calculate limit sell price: best bid minus margin
+                margin = self.config.best_bid_margin
+                sell_price = best_bid - margin
+                
+                logger.info(
+                    f"Calculating limit sell price: best_bid=${best_bid:.4f}, "
+                    f"margin=${margin:.4f}, sell_price=${sell_price:.4f}"
+                )
+                
                 # Ensure price is within Polymarket's valid range [0.01, 0.99]
-                market_price = max(0.01, min(0.99, best_bid))
+                sell_price = max(0.01, min(0.99, sell_price))
                 
                 if best_bid < 0.01:
                     logger.warning(
                         f"⚠️ Best bid ({best_bid:.6f}) is below minimum price (0.01). "
-                        f"Using minimum price (0.01) for market sell order."
+                        f"Using minimum price (0.01) for sell order."
                     )
                 elif best_bid > 0.99:
                     logger.warning(
                         f"⚠️ Best bid ({best_bid:.6f}) exceeds maximum price (0.99). "
-                        f"Using maximum price (0.99) for market sell order."
+                        f"Using maximum price (0.99) for sell order."
+                    )
+                
+                if sell_price < best_bid:
+                    logger.info(
+                        f"📊 Limit sell price (${sell_price:.4f}) is ${best_bid - sell_price:.4f} "
+                        f"below best bid (${best_bid:.4f}). Order will fill when price reaches ${sell_price:.4f}."
                     )
                 
                 # Round down to integer shares
@@ -1214,39 +1221,39 @@ class LimitBuyTrader:
                     sell_size = max(1, math.floor(balance))
                 
                 logger.info(
-                    f"Placing MARKET sell order (attempt {attempt + 1}/{max_retries}): "
-                    f"price=${market_price:.4f} (best bid), "
+                    f"Placing LIMIT sell order (attempt {attempt + 1}/{max_retries}): "
+                    f"price=${sell_price:.4f} (best_bid=${best_bid:.4f}, margin=${margin:.4f}), "
                     f"size={sell_size} shares (trade_id={trade_id}, balance={balance if balance is not None else 'N/A'})"
                 )
                 
-                # Place market order using FOK (Fill or Kill) - fills immediately or cancels
+                # Place limit sell order (GTC)
                 try:
-                    market_order_response = self.pm.execute_order(
-                        price=market_price,
+                    order_response = self.pm.execute_order(
+                        price=sell_price,
                         size=sell_size,
                         side=SELL,
                         token_id=trade.token_id,
-                        order_type=OrderType.FOK,  # Market order - Fill or Kill
+                        order_type=OrderType.GTC,
                     )
                     
-                    if market_order_response:
-                        market_order_id = self.pm.extract_order_id(market_order_response)
-                        if market_order_id:
-                            # Update trade with market sell order info
+                    if order_response:
+                        order_id = self.pm.extract_order_id(order_response)
+                        if order_id:
+                            # Update trade with sell order info
                             self.db.update_limit_buy_sell_order(
                                 trade_id=trade_id,
-                                sell_order_id=market_order_id,
-                                sell_order_price=market_price,
+                                sell_order_id=order_id,
+                                sell_order_price=sell_price,
                                 sell_order_size=sell_size,
-                                sell_order_status="filled",  # FOK orders fill immediately or fail
+                                sell_order_status="open",
                             )
-                            self.open_sell_orders[market_order_id] = trade_id
-                            logger.info(f"✅ Market sell order placed: {market_order_id}")
+                            self.open_sell_orders[order_id] = trade_id
+                            logger.info(f"✅ LIMIT sell order placed: {order_id} (status=open)")
                             return  # Success - exit retry loop
                         else:
-                            logger.error(f"❌ Could not extract market order ID from response: {market_order_response}")
+                            logger.error(f"❌ Could not extract order ID from response: {order_response}")
                     else:
-                        logger.error(f"❌ Market sell order placement failed: no response")
+                        logger.error(f"❌ LIMIT sell order placement failed: no response")
                 
                 except Exception as order_error:
                     error_str = str(order_error).lower()
@@ -1254,7 +1261,7 @@ class LimitBuyTrader:
                     
                     if is_balance_error:
                         logger.error(
-                            f"❌ Error placing market sell order (attempt {attempt + 1}/{max_retries}): {order_error}"
+                            f"❌ Error placing {order_type_str} sell order (attempt {attempt + 1}/{max_retries}): {order_error}"
                         )
                         logger.info(
                             f"⚠️ Balance/allowance error detected. "
@@ -1271,11 +1278,11 @@ class LimitBuyTrader:
                             return  # Give up
                     else:
                         # Non-balance error - log and re-raise
-                        logger.error(f"❌ Error placing market sell order: {order_error}", exc_info=True)
+                        logger.error(f"❌ Error placing LIMIT sell order: {order_error}", exc_info=True)
                         raise  # Re-raise to be caught by outer except
             
             except Exception as e:
-                logger.error(f"❌ Unexpected error in market sell retry loop: {e}", exc_info=True)
+                logger.error(f"❌ Unexpected error in LIMIT sell retry loop: {e}", exc_info=True)
                 if attempt < max_retries - 1:
                     delay = retry_delays[min(attempt, len(retry_delays) - 1)]
                     await asyncio.sleep(delay)
