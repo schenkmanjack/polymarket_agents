@@ -1090,41 +1090,41 @@ class Polymarket:
         retry_delays = [10.0, 20.0, 30.0]  # Wait times for rate limit retries
         
         for attempt in range(max_retries):
-        try:
-            # Determine which address to check
-            if wallet_address:
-                address_to_check = wallet_address
-            elif self.proxy_wallet_address:
-                address_to_check = self.proxy_wallet_address
-            else:
-                address_to_check = self.get_address_for_private_key()
-            
-            logger.debug(
+            try:
+                # Determine which address to check
+                if wallet_address:
+                    address_to_check = wallet_address
+                elif self.proxy_wallet_address:
+                    address_to_check = self.proxy_wallet_address
+                else:
+                    address_to_check = self.get_address_for_private_key()
+                
+                logger.debug(
                     f"🔍 Checking conditional token balance (attempt {attempt + 1}/{max_retries}): "
                     f"token_id={token_id[:20]}..., "
-                f"wallet={address_to_check[:10]}...{address_to_check[-8:]}, "
-                f"ctf_contract={self.ctf_address[:10]}...{self.ctf_address[-8:]}"
-            )
-            
-            # Convert token_id to int (it's a uint256)
-            token_id_int = int(token_id)
-            
-            # Call balanceOf(address, uint256) on ERC1155 contract
-            balance_raw = self.ctf.functions.balanceOf(address_to_check, token_id_int).call()
-            
-            logger.debug(f"  Raw balance from contract: {balance_raw} (uint256)")
-            
-            # ERC1155 conditional tokens on Polymarket use 1e6 (6 decimals), not 1e18
-            # Example: raw balance 1978900 = 1.9789 shares (with 6 decimals)
-            # This is different from ERC20 tokens which typically use 1e18
-            balance_float = float(balance_raw) / 1e6
-            
-            logger.info(
-                f"  ✓ Conditional token balance: {balance_float:.6f} shares "
-                f"(raw: {balance_raw}, token_id: {token_id[:20]}...)"
-            )
-            
-            return balance_float
+                    f"wallet={address_to_check[:10]}...{address_to_check[-8:]}, "
+                    f"ctf_contract={self.ctf_address[:10]}...{self.ctf_address[-8:]}"
+                )
+                
+                # Convert token_id to int (it's a uint256)
+                token_id_int = int(token_id)
+                
+                # Call balanceOf(address, uint256) on ERC1155 contract
+                balance_raw = self.ctf.functions.balanceOf(address_to_check, token_id_int).call()
+                
+                logger.debug(f"  Raw balance from contract: {balance_raw} (uint256)")
+                
+                # ERC1155 conditional tokens on Polymarket use 1e6 (6 decimals), not 1e18
+                # Example: raw balance 1978900 = 1.9789 shares (with 6 decimals)
+                # This is different from ERC20 tokens which typically use 1e18
+                balance_float = float(balance_raw) / 1e6
+                
+                logger.info(
+                    f"  ✓ Conditional token balance: {balance_float:.6f} shares "
+                    f"(raw: {balance_raw}, token_id: {token_id[:20]}...)"
+                )
+                
+                return balance_float
             except ValueError as e:
                 error_str = str(e)
                 # Check if it's a rate limit error
@@ -1145,11 +1145,11 @@ class Polymarket:
                 else:
                     # Not a rate limit error, re-raise
                     raise
-        except Exception as e:
-            logger.error(
-                f"❌ Error checking conditional token balance for token_id {token_id}: {e}",
-                exc_info=True
-            )
+            except Exception as e:
+                logger.error(
+                    f"❌ Error checking conditional token balance for token_id {token_id}: {e}",
+                    exc_info=True
+                )
                 return None
         
             return None
