@@ -1164,62 +1164,62 @@ class LimitBuyTrader:
                             f"{minutes_remaining:.2f} minutes <= {self.config.cancel_threshold_minutes:.1f} minutes. "
                             f"Cancelling original sell order and placing new limit sell at best bid minus margin."
                         )
-                
-                # Cancel the original limit sell order
-                cancel_response = self.pm.cancel_order(sell_order_id)
-                if cancel_response:
-                    logger.info(f"✅ Cancelled original limit sell order {sell_order_id}")
-                    self.db.update_limit_buy_sell_order(
-                        trade_id=trade_id,
-                        sell_order_id=sell_order_id,
-                        sell_order_price=trade.sell_order_price or 0.0,
-                        sell_order_size=trade.sell_order_size or 0.0,
-                        sell_order_status="cancelled",
-                    )
-                    # DON'T remove from open_sell_orders yet - wait until new sell is successfully placed
                     
-                    # Wait a moment for cancelled order to settle before placing new sell
-                    # Skip wait if market has already ended (time is critical)
-                    if not market_ended:
-                        logger.info("⏳ Waiting 3 seconds for cancelled order to settle before placing new limit sell at best bid...")
+                    # Cancel the original limit sell order
+                    cancel_response = self.pm.cancel_order(sell_order_id)
+                    if cancel_response:
+                        logger.info(f"✅ Cancelled original limit sell order {sell_order_id}")
+                        self.db.update_limit_buy_sell_order(
+                            trade_id=trade_id,
+                            sell_order_id=sell_order_id,
+                            sell_order_price=trade.sell_order_price or 0.0,
+                            sell_order_size=trade.sell_order_size or 0.0,
+                            sell_order_status="cancelled",
+                        )
+                        # DON'T remove from open_sell_orders yet - wait until new sell is successfully placed
+                        
+                        # Wait a moment for cancelled order to settle before placing new sell
+                        # Skip wait if market has already ended (time is critical)
+                        if not market_ended:
+                            logger.info("⏳ Waiting 3 seconds for cancelled order to settle before placing new limit sell at best bid...")
+                            await asyncio.sleep(3.0)
+                        else:
+                            logger.warning("⚠️ Market has ended - skipping settlement wait and placing new sell immediately!")
+                            await asyncio.sleep(0.5)  # Minimal wait for cancellation to propagate
+                        
+                        # Place new sell order - only remove from tracking if successful
+                        new_sell_placed = await self._place_market_sell_order(trade_id)
+                        if new_sell_placed:
+                            # New sell order successfully placed - remove old order from tracking
+                            self.open_sell_orders.pop(sell_order_id, None)
+                        else:
+                            logger.error(
+                                f"❌ Failed to place new limit sell order after cancelling {sell_order_id}. "
+                                f"Will retry on next check iteration (minutes_remaining: {minutes_remaining:.2f})"
+                            )
+                            # Keep in open_sell_orders so it gets checked again
+                    else:
+                        logger.warning(
+                            f"⚠️ Failed to cancel limit sell order {sell_order_id}. "
+                            f"Order may have already filled or been cancelled. "
+                            f"Will still attempt to place new limit sell at best bid..."
+                        )
+                        # Still attempt to place new sell - order might have already filled or been cancelled
+                        # If shares are locked, the new sell will fail with balance error and retry
+                        logger.info("⏳ Waiting 3 seconds before attempting new limit sell (order may still be settling)...")
                         await asyncio.sleep(3.0)
-                    else:
-                        logger.warning("⚠️ Market has ended - skipping settlement wait and placing new sell immediately!")
-                        await asyncio.sleep(0.5)  # Minimal wait for cancellation to propagate
-                    
-                    # Place new sell order - only remove from tracking if successful
-                    new_sell_placed = await self._place_market_sell_order(trade_id)
-                    if new_sell_placed:
-                        # New sell order successfully placed - remove old order from tracking
-                        self.open_sell_orders.pop(sell_order_id, None)
-                    else:
-                        logger.error(
-                            f"❌ Failed to place new limit sell order after cancelling {sell_order_id}. "
-                            f"Will retry on next check iteration (minutes_remaining: {minutes_remaining:.2f})"
-                        )
-                        # Keep in open_sell_orders so it gets checked again
-                else:
-                    logger.warning(
-                        f"⚠️ Failed to cancel limit sell order {sell_order_id}. "
-                        f"Order may have already filled or been cancelled. "
-                        f"Will still attempt to place new limit sell at best bid..."
-                    )
-                    # Still attempt to place new sell - order might have already filled or been cancelled
-                    # If shares are locked, the new sell will fail with balance error and retry
-                    logger.info("⏳ Waiting 3 seconds before attempting new limit sell (order may still be settling)...")
-                    await asyncio.sleep(3.0)
-                    
-                    # Place new sell order - only remove from tracking if successful
-                    new_sell_placed = await self._place_market_sell_order(trade_id)
-                    if new_sell_placed:
-                        # New sell order successfully placed - remove old order from tracking
-                        self.open_sell_orders.pop(sell_order_id, None)
-                    else:
-                        logger.error(
-                            f"❌ Failed to place new limit sell order. "
-                            f"Will retry on next check iteration (minutes_remaining: {minutes_remaining:.2f})"
-                        )
-                        # Keep in open_sell_orders so it gets checked again
+                        
+                        # Place new sell order - only remove from tracking if successful
+                        new_sell_placed = await self._place_market_sell_order(trade_id)
+                        if new_sell_placed:
+                            # New sell order successfully placed - remove old order from tracking
+                            self.open_sell_orders.pop(sell_order_id, None)
+                        else:
+                            logger.error(
+                                f"❌ Failed to place new limit sell order. "
+                                f"Will retry on next check iteration (minutes_remaining: {minutes_remaining:.2f})"
+                            )
+                            # Keep in open_sell_orders so it gets checked again
                 else:
                     # Threshold not reached yet - log for debugging (only log occasionally to avoid spam)
                     if int(minutes_remaining * 10) % 10 == 0:  # Log every 0.1 minutes (6 seconds)
