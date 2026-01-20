@@ -644,10 +644,11 @@ class LimitBuyTrader:
                 
                 status, filled_amount, total_amount = parse_order_status(order_status)
                 is_filled = is_order_filled(status, filled_amount, total_amount)
+                is_cancelled = is_order_cancelled(status) or "CANCELED" in status.upper() or "CANCELLED" in status.upper()
                 
                 logger.info(
                     f"  📊 Sell order {sell_order_id[:10]}... status: {status}, "
-                    f"filled={filled_amount}, total={total_amount}, is_filled={is_filled}"
+                    f"filled={filled_amount}, total={total_amount}, is_filled={is_filled}, is_cancelled={is_cancelled}"
                 )
                 
                 if is_filled:
@@ -672,6 +673,12 @@ class LimitBuyTrader:
                     logger.info(
                         f"✅ Sell order {sell_order_id[:10]}... filled via HTTP polling "
                         f"(trade_id={trade_id}, price=${sell_price:.4f}, shares={filled_shares:.2f})"
+                    )
+                elif is_cancelled:
+                    # Order cancelled (e.g., CANCELED_MARKET_RESOLVED) - remove from tracking
+                    self.open_sell_orders.pop(sell_order_id, None)
+                    logger.info(
+                        f"🗑️ Sell order {sell_order_id[:10]}... cancelled (status: {status}) - removed from tracking"
                     )
             except Exception as e:
                 logger.error(f"Error checking sell order {sell_order_id[:10]}... status: {e}", exc_info=True)
@@ -1107,7 +1114,24 @@ class LimitBuyTrader:
                 trade = self.db.get_limit_buy_trade_by_id(trade_id)
                 if not trade:
                     logger.warning(f"Trade {trade_id} not found for sell order {sell_order_id[:10]}...")
+                    self.open_sell_orders.pop(sell_order_id, None)  # Remove orphaned order
                     continue
+                
+                # Quick status check - skip if already filled
+                # For cancelled orders, we'll still try to place a new sell if threshold reached
+                # (cancellation might have happened externally, but we still hold shares)
+                order_status = self.pm.get_order_status(sell_order_id)
+                if order_status:
+                    status, filled_amount, total_amount = parse_order_status(order_status)
+                    is_filled = is_order_filled(status, filled_amount, total_amount)
+                    
+                    if is_filled:
+                        logger.info(
+                            f"  ⏭️ Skipping sell order {sell_order_id[:10]}... - already filled "
+                            f"(removing from tracking)"
+                        )
+                        self.open_sell_orders.pop(sell_order_id, None)
+                        continue
                 
                 logger.debug(f"  📋 Checking sell order {sell_order_id[:10]}... for market {trade.market_slug}")
                 
@@ -1134,9 +1158,10 @@ class LimitBuyTrader:
                 
                 minutes_remaining = get_minutes_until_resolution(market)
                 
+                minutes_str = f"{minutes_remaining:.2f}" if minutes_remaining is not None else "None"
                 logger.info(
                     f"  ⏱️  Sell order {sell_order_id[:10]}... (market {trade.market_slug}): "
-                    f"minutes_remaining={minutes_remaining:.2f if minutes_remaining is not None else 'None'}, "
+                    f"minutes_remaining={minutes_str}, "
                     f"threshold={self.config.cancel_threshold_minutes:.1f}"
                 )
                 
@@ -1343,10 +1368,11 @@ class LimitBuyTrader:
                     # Get minutes remaining for context
                     market = get_market_by_slug(trade.market_slug)
                     minutes_remaining = get_minutes_until_resolution(market) if market else None
+                    minutes_str = f"{minutes_remaining:.2f}" if minutes_remaining else "unknown"
                     logger.error(
                         f"🚨 CRITICAL: Forced to sell at minimum price (0.01) because "
                         f"best_bid (${best_bid:.4f}) - margin (${margin:.4f}) = ${original_sell_price:.4f} < 0.01. "
-                        f"Minutes remaining: {minutes_remaining:.2f if minutes_remaining else 'unknown'}. "
+                        f"Minutes remaining: {minutes_str}. "
                         f"This is very bad - consider adjusting best_bid_margin or cancel_threshold_minutes!"
                     )
                 elif best_bid < 0.01:
