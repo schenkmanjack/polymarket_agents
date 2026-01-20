@@ -691,22 +691,51 @@ class LimitBuyTrader:
             logger.info(f"✅ Synced {synced_count} open sell order(s) from database (deployment={self.deployment_id}, market={current_market_slug}). Total tracked: {len(self.open_sell_orders)}")
     
     async def _check_sell_order_statuses(self):
-        """Check status of all open sell orders via HTTP polling (backup to WebSocket)."""
+        """Check status of all open sell orders via HTTP polling (backup to WebSocket).
+        
+        Only checks orders for the CURRENT market. Removes orders from resolved/ended markets.
+        """
+        # Get current market - only check orders for this market
+        if self.config.market_type == "15m":
+            latest_market = get_latest_btc_15m_market_proactive()
+        else:
+            latest_market = get_latest_btc_1h_market_proactive()
+        
+        current_market_slug = None
+        if latest_market:
+            current_market_slug = latest_market.get("_event_slug", "")
+        
         # CRITICAL: First, sync with database to ensure we're tracking all open sell orders
-        # This catches cases where sell orders were placed but not added to open_sell_orders
-        # (e.g., due to order ID extraction failure or exceptions)
-        self._sync_open_sell_orders_from_db()
+        # Only syncs orders from current deployment AND current market
+        if current_market_slug:
+            self._sync_open_sell_orders_from_db(current_market_slug)
+        
+        # Remove orders from other markets (they're from old/resolved markets)
+        if current_market_slug:
+            for sell_order_id, trade_id in list(self.open_sell_orders.items()):
+                trade = self.db.get_limit_buy_trade_by_id(trade_id)
+                if trade and trade.market_slug != current_market_slug:
+                    logger.debug(
+                        f"  🗑️ Removing sell order {sell_order_id[:10]}... from tracking "
+                        f"(not for current market: {trade.market_slug} != {current_market_slug})"
+                    )
+                    self.open_sell_orders.pop(sell_order_id, None)
         
         if not self.open_sell_orders:
             logger.debug("No open sell orders to check (open_sell_orders is empty)")
             return
         
-        logger.info(f"🔍 Checking sell order statuses for {len(self.open_sell_orders)} order(s): {list(self.open_sell_orders.keys())[:3]}...")
+        logger.info(f"🔍 Checking sell order statuses for {len(self.open_sell_orders)} order(s) (current market: {current_market_slug}): {list(self.open_sell_orders.keys())[:3]}...")
         for sell_order_id, trade_id in list(self.open_sell_orders.items()):
             try:
                 trade = self.db.get_limit_buy_trade_by_id(trade_id)
                 if not trade:
                     logger.warning(f"Trade {trade_id} not found for sell order {sell_order_id[:10]}...")
+                    continue
+                
+                # Only check orders for current market (should already be filtered, but double-check)
+                if current_market_slug and trade.market_slug != current_market_slug:
+                    logger.debug(f"  ⏭️ Skipping sell order {sell_order_id[:10]}... - not for current market ({trade.market_slug} != {current_market_slug})")
                     continue
                 
                 logger.debug(f"  🔍 Checking sell order {sell_order_id[:10]}... (trade_id={trade_id})")
@@ -1174,17 +1203,35 @@ class LimitBuyTrader:
                 self.active_orders.pop(market_slug, None)
     
     async def _check_sell_orders_for_market_conversion(self):
-        """Convert limit sell orders to market orders if cancel_threshold_minutes reached."""
+        """Convert limit sell orders to market orders if cancel_threshold_minutes reached.
+        
+        Only processes sell orders for the CURRENT market. Skips orders from resolved/ended markets.
+        """
         import time
         
+        # Get current market - only process orders for this market
+        if self.config.market_type == "15m":
+            latest_market = get_latest_btc_15m_market_proactive()
+        else:
+            latest_market = get_latest_btc_1h_market_proactive()
+        
+        current_market_slug = None
+        if latest_market:
+            current_market_slug = latest_market.get("_event_slug", "")
+        
+        if not current_market_slug:
+            logger.debug("No current market found - skipping conversion check")
+            return
+        
         # CRITICAL: Sync with database first to ensure we're tracking all open sell orders
-        self._sync_open_sell_orders_from_db()
+        # Only syncs orders from current deployment AND current market
+        self._sync_open_sell_orders_from_db(current_market_slug)
         
         if not self.open_sell_orders:
             logger.debug("No open sell orders to check for conversion (open_sell_orders is empty)")
             return
         
-        logger.info(f"🔄 Checking {len(self.open_sell_orders)} sell order(s) for conversion threshold: {list(self.open_sell_orders.keys())[:3]}...")
+        logger.info(f"🔄 Checking {len(self.open_sell_orders)} sell order(s) for conversion threshold (current market: {current_market_slug}): {list(self.open_sell_orders.keys())[:3]}...")
         
         for sell_order_id, trade_id in list(self.open_sell_orders.items()):
             try:
@@ -1192,6 +1239,16 @@ class LimitBuyTrader:
                 if not trade:
                     logger.warning(f"Trade {trade_id} not found for sell order {sell_order_id[:10]}...")
                     self.open_sell_orders.pop(sell_order_id, None)  # Remove orphaned order
+                    continue
+                
+                # CRITICAL: Only process orders for the current market
+                if trade.market_slug != current_market_slug:
+                    # Remove orders from other markets (they're from old markets or different markets)
+                    logger.debug(
+                        f"  ⏭️ Skipping sell order {sell_order_id[:10]}... - not for current market "
+                        f"(order market: {trade.market_slug}, current market: {current_market_slug})"
+                    )
+                    self.open_sell_orders.pop(sell_order_id, None)
                     continue
                 
                 # Quick status check - skip if already filled
@@ -1368,18 +1425,28 @@ class LimitBuyTrader:
                     return False
                 
                 # Check conditional token balance before attempting to sell
+                # Use retry_on_rate_limit=False for time-sensitive market sell orders
+                # (the outer retry loop will handle retries, avoiding nested retry delays)
                 balance = None
                 if hasattr(self.pm, 'get_conditional_token_balance'):
                     logger.info(f"  🔍 Checking conditional token balance for market sell (attempt {attempt + 1}/{max_retries})...")
                     try:
                         # Check direct wallet first (where execute_order expects shares for SELL)
                         direct_wallet = self.pm.get_address_for_private_key()
-                        balance = self.pm.get_conditional_token_balance(trade.token_id, wallet_address=direct_wallet)
+                        balance = self.pm.get_conditional_token_balance(
+                            trade.token_id, 
+                            wallet_address=direct_wallet,
+                            retry_on_rate_limit=False  # Disable retries - outer loop handles retries
+                        )
                         
                         # If no balance in direct wallet and proxy wallet exists, check proxy wallet too
                         if (balance is None or balance == 0) and self.pm.proxy_wallet_address:
                             logger.info(f"  🔍 No balance in direct wallet, checking proxy wallet...")
-                            proxy_balance = self.pm.get_conditional_token_balance(trade.token_id, wallet_address=self.pm.proxy_wallet_address)
+                            proxy_balance = self.pm.get_conditional_token_balance(
+                                trade.token_id, 
+                                wallet_address=self.pm.proxy_wallet_address,
+                                retry_on_rate_limit=False  # Disable retries - outer loop handles retries
+                            )
                             if proxy_balance and proxy_balance > 0:
                                 logger.warning(
                                     f"  ⚠️ Shares are in PROXY wallet ({proxy_balance:.6f} shares) but execute_order "
