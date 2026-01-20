@@ -570,8 +570,18 @@ class LimitBuyTrader:
     async def _order_status_loop(self):
         """Check order status periodically."""
         logger.info(f"🔄 Order status loop started (check interval: {self.config.order_status_check_interval}s)")
+        iteration = 0
         while self.running:
             try:
+                iteration += 1
+                # Log heartbeat every 60 iterations (every ~60 seconds with 1s interval) to confirm loop is running
+                if iteration % 60 == 0:
+                    logger.info(
+                        f"🔄 Order status loop heartbeat (iteration {iteration}): "
+                        f"active_orders={len(self.active_orders)}, "
+                        f"open_sell_orders={len(self.open_sell_orders)}"
+                    )
+                
                 await self._check_order_statuses()
                 await self._check_sell_order_statuses()  # Check sell orders via HTTP polling
                 await self._check_cancel_thresholds()
@@ -615,9 +625,10 @@ class LimitBuyTrader:
     async def _check_sell_order_statuses(self):
         """Check status of all open sell orders via HTTP polling (backup to WebSocket)."""
         if not self.open_sell_orders:
+            logger.debug("No open sell orders to check (open_sell_orders is empty)")
             return
         
-        logger.debug(f"🔍 Checking sell order statuses for {len(self.open_sell_orders)} order(s)")
+        logger.info(f"🔍 Checking sell order statuses for {len(self.open_sell_orders)} order(s): {list(self.open_sell_orders.keys())[:3]}...")
         for sell_order_id, trade_id in list(self.open_sell_orders.items()):
             try:
                 trade = self.db.get_limit_buy_trade_by_id(trade_id)
@@ -634,7 +645,7 @@ class LimitBuyTrader:
                 status, filled_amount, total_amount = parse_order_status(order_status)
                 is_filled = is_order_filled(status, filled_amount, total_amount)
                 
-                logger.debug(
+                logger.info(
                     f"  📊 Sell order {sell_order_id[:10]}... status: {status}, "
                     f"filled={filled_amount}, total={total_amount}, is_filled={is_filled}"
                 )
@@ -972,7 +983,10 @@ class LimitBuyTrader:
                             sell_order_status="open",
                         )
                         self.open_sell_orders[sell_order_id] = trade_id
-                        logger.info(f"✅ Sell order placed: {sell_order_id}")
+                        logger.info(
+                            f"✅ Sell order placed: {sell_order_id} "
+                            f"(now tracking {len(self.open_sell_orders)} sell order(s) in open_sell_orders)"
+                        )
                         return  # Success!
                     else:
                         logger.error(f"❌ Could not extract sell order ID from response: {sell_order_response}")
@@ -1082,40 +1096,74 @@ class LimitBuyTrader:
         """Convert limit sell orders to market orders if cancel_threshold_minutes reached."""
         import time
         
+        if not self.open_sell_orders:
+            logger.debug("No open sell orders to check for conversion (open_sell_orders is empty)")
+            return
+        
+        logger.info(f"🔄 Checking {len(self.open_sell_orders)} sell order(s) for conversion threshold: {list(self.open_sell_orders.keys())[:3]}...")
+        
         for sell_order_id, trade_id in list(self.open_sell_orders.items()):
-            trade = self.db.get_limit_buy_trade_by_id(trade_id)
-            if not trade:
-                continue
-            
-            # Use cached market data if available and fresh
-            current_time = time.time()
-            market = None
-            
-            if trade.market_slug in self.market_cache:
-                cache_age = current_time - self.market_cache_timestamps.get(trade.market_slug, 0)
-                if cache_age < self.market_cache_ttl:
-                    market = self.market_cache[trade.market_slug]
-            
-            if not market:
-                market = get_market_by_slug(trade.market_slug)
-                if market:
-                    self.market_cache[trade.market_slug] = market
-                    self.market_cache_timestamps[trade.market_slug] = current_time
-                else:
+            try:
+                trade = self.db.get_limit_buy_trade_by_id(trade_id)
+                if not trade:
+                    logger.warning(f"Trade {trade_id} not found for sell order {sell_order_id[:10]}...")
                     continue
-            
-            minutes_remaining = get_minutes_until_resolution(market)
-            if minutes_remaining is None:
-                continue
-            
-            # When cancel threshold is reached, cancel the original high-priced sell
-            # and place a new limit sell at best bid minus margin
-            if minutes_remaining <= self.config.cancel_threshold_minutes:
+                
+                logger.debug(f"  📋 Checking sell order {sell_order_id[:10]}... for market {trade.market_slug}")
+                
+                # Use cached market data if available and fresh
+                current_time = time.time()
+                market = None
+                
+                if trade.market_slug in self.market_cache:
+                    cache_age = current_time - self.market_cache_timestamps.get(trade.market_slug, 0)
+                    if cache_age < self.market_cache_ttl:
+                        market = self.market_cache[trade.market_slug]
+                        logger.debug(f"  ✓ Using cached market data (age: {cache_age:.1f}s)")
+                
+                if not market:
+                    logger.debug(f"  🔍 Fetching fresh market data for {trade.market_slug}...")
+                    market = get_market_by_slug(trade.market_slug)
+                    if market:
+                        self.market_cache[trade.market_slug] = market
+                        self.market_cache_timestamps[trade.market_slug] = current_time
+                        logger.debug(f"  ✓ Market data fetched and cached")
+                    else:
+                        logger.warning(f"  ⚠️ Could not fetch market data for {trade.market_slug}, skipping conversion check")
+                        continue
+                
+                minutes_remaining = get_minutes_until_resolution(market)
+                
                 logger.info(
-                    f"⏰ Cancel threshold reached for sell order {sell_order_id} (market {trade.market_slug}): "
-                    f"{minutes_remaining:.2f} minutes <= {self.config.cancel_threshold_minutes:.1f} minutes. "
-                    f"Cancelling original sell order and placing new limit sell at best bid minus margin."
+                    f"  ⏱️  Sell order {sell_order_id[:10]}... (market {trade.market_slug}): "
+                    f"minutes_remaining={minutes_remaining:.2f if minutes_remaining is not None else 'None'}, "
+                    f"threshold={self.config.cancel_threshold_minutes:.1f}"
                 )
+                
+                # Handle cases where we can't determine time or market has ended
+                if minutes_remaining is None:
+                    # Can't determine time - skip this iteration but log for debugging
+                    logger.warning(f"  ⚠️ Could not determine minutes_remaining for market {trade.market_slug}, skipping conversion check")
+                    continue
+                
+                # If market has ended (negative minutes), we should still try to convert if we haven't already
+                # This handles the case where the market ended between check intervals
+                market_ended = minutes_remaining < 0
+                
+                # When cancel threshold is reached (or market has ended), cancel the original high-priced sell
+                # and place a new limit sell at best bid minus margin
+                if minutes_remaining <= self.config.cancel_threshold_minutes or market_ended:
+                    if market_ended:
+                        logger.warning(
+                            f"⚠️ Market has ended (minutes_remaining={minutes_remaining:.2f}) but sell order {sell_order_id[:10]}... "
+                            f"has not filled. Converting to lower limit sell immediately!"
+                        )
+                    else:
+                        logger.info(
+                            f"⏰ Cancel threshold reached for sell order {sell_order_id[:10]}... (market {trade.market_slug}): "
+                            f"{minutes_remaining:.2f} minutes <= {self.config.cancel_threshold_minutes:.1f} minutes. "
+                            f"Cancelling original sell order and placing new limit sell at best bid minus margin."
+                        )
                 
                 # Cancel the original limit sell order
                 cancel_response = self.pm.cancel_order(sell_order_id)
@@ -1131,8 +1179,13 @@ class LimitBuyTrader:
                     # DON'T remove from open_sell_orders yet - wait until new sell is successfully placed
                     
                     # Wait a moment for cancelled order to settle before placing new sell
-                    logger.info("⏳ Waiting 3 seconds for cancelled order to settle before placing new limit sell at best bid...")
-                    await asyncio.sleep(3.0)
+                    # Skip wait if market has already ended (time is critical)
+                    if not market_ended:
+                        logger.info("⏳ Waiting 3 seconds for cancelled order to settle before placing new limit sell at best bid...")
+                        await asyncio.sleep(3.0)
+                    else:
+                        logger.warning("⚠️ Market has ended - skipping settlement wait and placing new sell immediately!")
+                        await asyncio.sleep(0.5)  # Minimal wait for cancellation to propagate
                     
                     # Place new sell order - only remove from tracking if successful
                     new_sell_placed = await self._place_market_sell_order(trade_id)
@@ -1167,6 +1220,19 @@ class LimitBuyTrader:
                             f"Will retry on next check iteration (minutes_remaining: {minutes_remaining:.2f})"
                         )
                         # Keep in open_sell_orders so it gets checked again
+                else:
+                    # Threshold not reached yet - log for debugging (only log occasionally to avoid spam)
+                    if int(minutes_remaining * 10) % 10 == 0:  # Log every 0.1 minutes (6 seconds)
+                        logger.debug(
+                            f"  ✓ Sell order {sell_order_id[:10]}... not yet at threshold "
+                            f"({minutes_remaining:.2f} > {self.config.cancel_threshold_minutes:.1f} minutes remaining)"
+                        )
+            except Exception as e:
+                logger.error(
+                    f"❌ Error checking sell order {sell_order_id[:10]}... for conversion: {e}",
+                    exc_info=True
+                )
+                # Continue checking other orders even if this one fails
     
     async def _place_market_sell_order(self, trade_id: int) -> bool:
         """Place a limit sell order at best bid minus margin.
