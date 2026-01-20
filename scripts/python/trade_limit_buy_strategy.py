@@ -374,7 +374,7 @@ class LimitBuyTrader:
     async def _resume_monitoring(self):
         """Resume monitoring markets we've bet on (for script restart recovery)."""
         unresolved_trades = self.db.get_unresolved_limit_buy_trades(deployment_id=self.deployment_id)
-        logger.info(f"Found {len(unresolved_trades)} unresolved trades")
+        logger.info(f"Found {len(unresolved_trades)} unresolved trades from current deployment")
         
         # Group trades by market_slug
         trades_by_market: Dict[str, List[RealTradeLimitBuy]] = {}
@@ -406,6 +406,24 @@ class LimitBuyTrader:
                         self.open_sell_orders[trade.sell_order_id] = trade.id
                 
                 logger.info(f"Resuming monitoring for market: {market_slug}")
+        
+        # CRITICAL: Also load ALL open sell orders from database (regardless of deployment)
+        # This ensures sell orders from previous deployments are tracked and converted
+        all_unresolved_trades = self.db.get_unresolved_limit_buy_trades(deployment_id=None)
+        open_sell_count = 0
+        for trade in all_unresolved_trades:
+            if trade.sell_order_id and trade.sell_order_status in ["open", "partial"]:
+                if trade.sell_order_id not in self.open_sell_orders:
+                    self.open_sell_orders[trade.sell_order_id] = trade.id
+                    open_sell_count += 1
+                    logger.info(
+                        f"📋 Loaded open sell order {trade.sell_order_id[:10]}... from previous deployment "
+                        f"(trade_id={trade.id}, market={trade.market_slug})"
+                    )
+        
+        if open_sell_count > 0:
+            logger.info(f"✅ Loaded {open_sell_count} open sell order(s) from previous deployments")
+        logger.info(f"📊 Total open sell orders being tracked: {len(self.open_sell_orders)}")
     
     async def _market_detection_loop(self):
         """Continuously detect new markets."""
@@ -622,8 +640,38 @@ class LimitBuyTrader:
                     market_slug, no_order_id, no_trade_id, "NO", yes_order_id, yes_trade_id
                 )
     
+    def _sync_open_sell_orders_from_db(self):
+        """Sync open_sell_orders with database to ensure all open sell orders are tracked.
+        
+        This catches cases where sell orders were placed but not added to open_sell_orders
+        (e.g., due to order ID extraction failure, exceptions, or script restart).
+        
+        Only syncs orders from current deployment to avoid tracking orders from previous runs.
+        """
+        # Get unresolved trades with open sell orders from CURRENT deployment only
+        unresolved_trades = self.db.get_unresolved_limit_buy_trades(deployment_id=self.deployment_id)
+        synced_count = 0
+        
+        for trade in unresolved_trades:
+            if trade.sell_order_id and trade.sell_order_status in ["open", "partial"]:
+                if trade.sell_order_id not in self.open_sell_orders:
+                    self.open_sell_orders[trade.sell_order_id] = trade.id
+                    synced_count += 1
+                    logger.info(
+                        f"📋 Synced open sell order {trade.sell_order_id[:10]}... from database "
+                        f"(trade_id={trade.id}, market={trade.market_slug})"
+                    )
+        
+        if synced_count > 0:
+            logger.info(f"✅ Synced {synced_count} open sell order(s) from database. Total tracked: {len(self.open_sell_orders)}")
+    
     async def _check_sell_order_statuses(self):
         """Check status of all open sell orders via HTTP polling (backup to WebSocket)."""
+        # CRITICAL: First, sync with database to ensure we're tracking all open sell orders
+        # This catches cases where sell orders were placed but not added to open_sell_orders
+        # (e.g., due to order ID extraction failure or exceptions)
+        self._sync_open_sell_orders_from_db()
+        
         if not self.open_sell_orders:
             logger.debug("No open sell orders to check (open_sell_orders is empty)")
             return
@@ -989,10 +1037,11 @@ class LimitBuyTrader:
                             sell_order_size=sell_size_int,
                             sell_order_status="open",
                         )
+                        # CRITICAL: Add to tracking immediately after database update
                         self.open_sell_orders[sell_order_id] = trade_id
                         logger.info(
-                            f"✅ Sell order placed: {sell_order_id} "
-                            f"(now tracking {len(self.open_sell_orders)} sell order(s) in open_sell_orders)"
+                            f"✅ Sell order placed and tracked: {sell_order_id} "
+                            f"(trade_id={trade_id}, now tracking {len(self.open_sell_orders)} sell order(s) in open_sell_orders)"
                         )
                         return  # Success!
                     else:
@@ -1102,6 +1151,9 @@ class LimitBuyTrader:
     async def _check_sell_orders_for_market_conversion(self):
         """Convert limit sell orders to market orders if cancel_threshold_minutes reached."""
         import time
+        
+        # CRITICAL: Sync with database first to ensure we're tracking all open sell orders
+        self._sync_open_sell_orders_from_db()
         
         if not self.open_sell_orders:
             logger.debug("No open sell orders to check for conversion (open_sell_orders is empty)")
