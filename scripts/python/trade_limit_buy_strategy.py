@@ -640,20 +640,45 @@ class LimitBuyTrader:
                     market_slug, no_order_id, no_trade_id, "NO", yes_order_id, yes_trade_id
                 )
     
-    def _sync_open_sell_orders_from_db(self):
+    def _sync_open_sell_orders_from_db(self, current_market_slug: Optional[str] = None):
         """Sync open_sell_orders with database to ensure all open sell orders are tracked.
         
         This catches cases where sell orders were placed but not added to open_sell_orders
         (e.g., due to order ID extraction failure, exceptions, or script restart).
         
-        Only syncs orders from current deployment to avoid tracking orders from previous runs.
+        Only syncs orders from current deployment AND current market (both conditions must be true).
+        
+        Args:
+            current_market_slug: Optional current market slug. If provided, only syncs orders from this market.
+                               If None, gets the current market automatically.
         """
-        # Get unresolved trades with open sell orders from CURRENT deployment only
+        # Get current market if not provided
+        if current_market_slug is None:
+            if self.config.market_type == "15m":
+                latest_market = get_latest_btc_15m_market_proactive()
+            else:
+                latest_market = get_latest_btc_1h_market_proactive()
+            
+            if latest_market:
+                current_market_slug = latest_market.get("_event_slug", "")
+            else:
+                # No current market - don't sync anything
+                logger.debug("No current market found - skipping sync")
+                return
+        
+        if not current_market_slug:
+            logger.debug("No current market slug - skipping sync")
+            return
+        
+        # Get unresolved trades with open sell orders from CURRENT deployment AND CURRENT market
         unresolved_trades = self.db.get_unresolved_limit_buy_trades(deployment_id=self.deployment_id)
         synced_count = 0
         
         for trade in unresolved_trades:
-            if trade.sell_order_id and trade.sell_order_status in ["open", "partial"]:
+            # BOTH conditions must be true: current deployment AND current market
+            if (trade.sell_order_id and 
+                trade.sell_order_status in ["open", "partial"] and
+                trade.market_slug == current_market_slug):
                 if trade.sell_order_id not in self.open_sell_orders:
                     self.open_sell_orders[trade.sell_order_id] = trade.id
                     synced_count += 1
@@ -663,7 +688,7 @@ class LimitBuyTrader:
                     )
         
         if synced_count > 0:
-            logger.info(f"✅ Synced {synced_count} open sell order(s) from database. Total tracked: {len(self.open_sell_orders)}")
+            logger.info(f"✅ Synced {synced_count} open sell order(s) from database (deployment={self.deployment_id}, market={current_market_slug}). Total tracked: {len(self.open_sell_orders)}")
     
     async def _check_sell_order_statuses(self):
         """Check status of all open sell orders via HTTP polling (backup to WebSocket)."""
