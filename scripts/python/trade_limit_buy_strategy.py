@@ -1255,9 +1255,11 @@ class LimitBuyTrader:
                 # For cancelled orders, we'll still try to place a new sell if threshold reached
                 # (cancellation might have happened externally, but we still hold shares)
                 order_status = self.pm.get_order_status(sell_order_id)
+                order_already_cancelled = False
                 if order_status:
                     status, filled_amount, total_amount = parse_order_status(order_status)
                     is_filled = is_order_filled(status, filled_amount, total_amount)
+                    is_cancelled = is_order_cancelled(status) or "CANCELED" in status.upper() or "CANCELLED" in status.upper()
                     
                     if is_filled:
                         logger.info(
@@ -1266,6 +1268,13 @@ class LimitBuyTrader:
                         )
                         self.open_sell_orders.pop(sell_order_id, None)
                         continue
+                    
+                    if is_cancelled:
+                        logger.info(
+                            f"  ℹ️ Sell order {sell_order_id[:10]}... is already cancelled (status: {status}). "
+                            f"Will still check threshold and place new sell if needed (we may still hold shares)."
+                        )
+                        order_already_cancelled = True
                 
                 logger.debug(f"  📋 Checking sell order {sell_order_id[:10]}... for market {trade.market_slug}")
                 
@@ -1311,23 +1320,39 @@ class LimitBuyTrader:
                 
                 # When cancel threshold is reached (or market has ended), cancel the original high-priced sell
                 # and place a new limit sell at best bid minus margin
-                if minutes_remaining <= self.config.cancel_threshold_minutes or market_ended:
+                threshold_reached = minutes_remaining <= self.config.cancel_threshold_minutes
+                
+                if threshold_reached or market_ended:
+                    # CRITICAL LOG: Sell order did not fill by cancel_threshold_minutes
                     if market_ended:
                         logger.warning(
-                            f"⚠️ Market has ended (minutes_remaining={minutes_remaining:.2f}) but sell order {sell_order_id[:10]}... "
-                            f"has not filled. Converting to lower limit sell immediately!"
+                            f"🚨 SELL ORDER DID NOT FILL BY CANCEL THRESHOLD: "
+                            f"Market has ended (minutes_remaining={minutes_remaining:.2f}) but sell order {sell_order_id[:10]}... "
+                            f"(trade {trade_id}, market {trade.market_slug}) has not filled. "
+                            f"Converting to lower limit sell immediately!"
                         )
                     else:
-                        logger.info(
-                            f"⏰ Cancel threshold reached for sell order {sell_order_id[:10]}... (market {trade.market_slug}): "
-                            f"{minutes_remaining:.2f} minutes <= {self.config.cancel_threshold_minutes:.1f} minutes. "
+                        logger.warning(
+                            f"🚨 SELL ORDER DID NOT FILL BY CANCEL THRESHOLD: "
+                            f"Order {sell_order_id[:10]}... (trade {trade_id}, market {trade.market_slug}) "
+                            f"did not fill by cancel_threshold_minutes ({self.config.cancel_threshold_minutes:.1f} min). "
+                            f"Current minutes_remaining={minutes_remaining:.2f}. "
                             f"Cancelling original sell order and placing new limit sell at best bid minus margin."
                         )
                     
-                    # Cancel the original limit sell order
-                    cancel_response = self.pm.cancel_order(sell_order_id)
+                    # Cancel the original limit sell order (if not already cancelled)
+                    cancel_response = False
+                    if not order_already_cancelled:
+                        logger.info(f"🔄 Attempting to cancel original limit sell order {sell_order_id}...")
+                        cancel_response = self.pm.cancel_order(sell_order_id)
+                    else:
+                        logger.info(
+                            f"⏭️ Skipping cancellation - order {sell_order_id[:10]}... is already cancelled. "
+                            f"Proceeding directly to place new sell order."
+                        )
+                    
                     if cancel_response:
-                        logger.info(f"✅ Cancelled original limit sell order {sell_order_id}")
+                        logger.info(f"✅ Successfully cancelled original limit sell order {sell_order_id}")
                         self.db.update_limit_buy_sell_order(
                             trade_id=trade_id,
                             sell_order_id=sell_order_id,
@@ -1345,18 +1370,6 @@ class LimitBuyTrader:
                         else:
                             logger.warning("⚠️ Market has ended - skipping settlement wait and placing new sell immediately!")
                             await asyncio.sleep(0.5)  # Minimal wait for cancellation to propagate
-                        
-                        # Place new sell order - only remove from tracking if successful
-                        new_sell_placed = await self._place_market_sell_order(trade_id)
-                        if new_sell_placed:
-                            # New sell order successfully placed - remove old order from tracking
-                            self.open_sell_orders.pop(sell_order_id, None)
-                        else:
-                            logger.error(
-                                f"❌ Failed to place new limit sell order after cancelling {sell_order_id}. "
-                                f"Will retry on next check iteration (minutes_remaining: {minutes_remaining:.2f})"
-                            )
-                            # Keep in open_sell_orders so it gets checked again
                     else:
                         logger.warning(
                             f"⚠️ Failed to cancel limit sell order {sell_order_id}. "
@@ -1367,18 +1380,30 @@ class LimitBuyTrader:
                         # If shares are locked, the new sell will fail with balance error and retry
                         logger.info("⏳ Waiting 3 seconds before attempting new limit sell (order may still be settling)...")
                         await asyncio.sleep(3.0)
-                        
-                        # Place new sell order - only remove from tracking if successful
-                        new_sell_placed = await self._place_market_sell_order(trade_id)
-                        if new_sell_placed:
-                            # New sell order successfully placed - remove old order from tracking
-                            self.open_sell_orders.pop(sell_order_id, None)
-                        else:
-                            logger.error(
-                                f"❌ Failed to place new limit sell order. "
-                                f"Will retry on next check iteration (minutes_remaining: {minutes_remaining:.2f})"
-                            )
-                            # Keep in open_sell_orders so it gets checked again
+                    
+                    # Place new sell order - only remove from tracking if successful
+                    logger.info(f"📤 Placing new limit sell order at best bid minus margin for trade {trade_id}...")
+                    new_sell_placed = await self._place_market_sell_order(trade_id)
+                    
+                    if new_sell_placed:
+                        # CRITICAL LOG: New sell order successfully placed
+                        logger.info(
+                            f"✅ NEW SELL ORDER PLACED: Successfully placed new limit sell order at best bid minus margin "
+                            f"for trade {trade_id} (original order {sell_order_id[:10]}...). "
+                            f"Removing original order from tracking."
+                        )
+                        # New sell order successfully placed - remove old order from tracking
+                        self.open_sell_orders.pop(sell_order_id, None)
+                    else:
+                        # CRITICAL LOG: Failed to place new sell order
+                        logger.error(
+                            f"❌ FAILED TO PLACE NEW SELL ORDER: "
+                            f"Could not place new limit sell order for trade {trade_id} "
+                            f"(original order {sell_order_id[:10]}...). "
+                            f"Will retry on next check iteration (minutes_remaining: {minutes_remaining:.2f}). "
+                            f"Original order remains in tracking."
+                        )
+                        # Keep in open_sell_orders so it gets checked again
                 else:
                     # Threshold not reached yet - log for debugging (only log occasionally to avoid spam)
                     if int(minutes_remaining * 10) % 10 == 0:  # Log every 0.1 minutes (6 seconds)
