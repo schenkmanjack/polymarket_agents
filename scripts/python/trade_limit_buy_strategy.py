@@ -1231,6 +1231,8 @@ class LimitBuyTrader:
             logger.debug("No open sell orders to check for conversion (open_sell_orders is empty)")
             return
         
+        # Log that we're checking (this confirms the function is called every iteration)
+        logger.debug(f"🔄 [CONVERSION CHECK] Checking {len(self.open_sell_orders)} sell order(s) for conversion threshold (current market: {current_market_slug})")
         logger.info(f"🔄 Checking {len(self.open_sell_orders)} sell order(s) for conversion threshold (current market: {current_market_slug}): {list(self.open_sell_orders.keys())[:3]}...")
         
         for sell_order_id, trade_id in list(self.open_sell_orders.items()):
@@ -1296,9 +1298,14 @@ class LimitBuyTrader:
                         self.market_cache_timestamps[trade.market_slug] = current_time
                         logger.debug(f"  ✓ Market data fetched and cached")
                     else:
-                        logger.warning(f"  ⚠️ Could not fetch market data for {trade.market_slug}, skipping conversion check")
+                        logger.warning(
+                            f"  ⚠️ Could not fetch market data for {trade.market_slug}, skipping conversion check. "
+                            f"This prevents checking minutes_remaining for sell order {sell_order_id[:10]}..."
+                        )
                         continue
                 
+                # ALWAYS log minutes_remaining when we successfully get market data
+                # This ensures we see it every iteration (every second)
                 minutes_remaining = get_minutes_until_resolution(market)
                 
                 minutes_str = f"{minutes_remaining:.2f}" if minutes_remaining is not None else "None"
@@ -1511,13 +1518,47 @@ class LimitBuyTrader:
                         continue
                     return False
                 
+                # Log orderbook details for debugging
+                bids = orderbook.get("bids", [])
+                asks = orderbook.get("asks", [])
+                logger.info(
+                    f"📊 Orderbook data for token {trade.token_id[:20]}...: "
+                    f"{len(bids)} bids, {len(asks)} asks"
+                )
+                
+                if bids:
+                    # Log top 5 bids for debugging
+                    top_bids = sorted([float(b[0]) for b in bids if isinstance(b, (list, tuple)) and len(b) >= 1], reverse=True)[:5]
+                    logger.info(f"  Top bids: {[f'${b:.4f}' for b in top_bids]}")
+                else:
+                    logger.warning(f"  ⚠️ No bids in orderbook!")
+                
                 best_bid = get_highest_bid(orderbook)
                 if best_bid is None or best_bid <= 0:
-                    logger.error(f"No valid best bid found in orderbook")
+                    logger.error(
+                        f"No valid best bid found in orderbook. "
+                        f"Bids count: {len(bids)}, Token ID: {trade.token_id[:30]}..."
+                    )
+                    # Get market info for context
+                    market = get_market_by_slug(trade.market_slug)
+                    if market:
+                        minutes_remaining = get_minutes_until_resolution(market)
+                        logger.error(f"  Market: {trade.market_slug}, Minutes remaining: {minutes_remaining:.2f}")
                     if attempt < max_retries - 1:
                         await asyncio.sleep(retry_delays[min(attempt, len(retry_delays) - 1)])
                         continue
                     return False
+                
+                # Warn if best bid seems suspiciously low near resolution
+                market = get_market_by_slug(trade.market_slug)
+                if market:
+                    minutes_remaining = get_minutes_until_resolution(market)
+                    if minutes_remaining is not None and minutes_remaining <= 5.0 and best_bid < 0.10:
+                        logger.warning(
+                            f"⚠️ SUSPICIOUS: Best bid (${best_bid:.4f}) is very low with {minutes_remaining:.2f} minutes remaining. "
+                            f"This seems unusual - orderbook may be stale or token ID may be incorrect. "
+                            f"Token ID: {trade.token_id[:30]}..., Market: {trade.market_slug}"
+                        )
                 
                 # Calculate limit sell price: best bid minus margin
                 margin = self.config.best_bid_margin

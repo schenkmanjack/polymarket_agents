@@ -99,16 +99,21 @@ def get_highest_bid(orderbook: Dict) -> Optional[float]:
     """
     Get the highest bid price from orderbook.
     
+    Always takes the MAXIMUM of all bids to ensure we get the true best bid,
+    regardless of how the orderbook is sorted.
+    
     Args:
         orderbook: Dict with 'bids' key (list of [price, size] tuples)
         
     Returns:
-        Highest bid price or None if not found
+        Highest bid price (maximum of all bids) or None if not found
     """
     bids = orderbook.get("bids", [])
     if not bids:
         return None
     
+    # Always iterate through ALL bids to find the maximum
+    # Don't assume orderbook is sorted correctly
     highest_bid = None
     for bid in bids:
         if isinstance(bid, (list, tuple)) and len(bid) >= 1:
