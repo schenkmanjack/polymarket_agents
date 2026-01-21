@@ -1326,10 +1326,36 @@ class OrderManager:
                         )
                         continue
                     
+                    # Order not found after max retries - clear sell_order_id so retry_missing_sell_orders can retry
                     logger.warning(
-                        f"Sell order {sell_order_id} not found in API after {self.max_order_not_found_retries} retries. "
-                        f"Will continue checking via trade records."
+                        f"⚠️⚠️⚠️ Sell order {sell_order_id} (trade {trade_id}) not found in API after {self.max_order_not_found_retries} retries. "
+                        f"Order may never have been placed successfully. Clearing sell_order_id from database to allow retry."
                     )
+                    
+                    # Clear sell_order_id from database
+                    try:
+                        session = self.db.SessionLocal()
+                        try:
+                            trade_obj = session.query(RealTradeThreshold).filter_by(id=trade_id).first()
+                            if trade_obj:
+                                trade_obj.sell_order_id = None
+                                trade_obj.sell_order_status = None
+                                session.commit()
+                                logger.info(
+                                    f"✅ Cleared sell_order_id for trade {trade_id}. "
+                                    f"retry_missing_sell_orders will retry placing the sell order."
+                                )
+                        except Exception as e:
+                            session.rollback()
+                            logger.error(f"Error clearing sell_order_id from database: {e}", exc_info=True)
+                        finally:
+                            session.close()
+                    except Exception as e:
+                        logger.error(f"Error accessing database to clear sell_order_id: {e}", exc_info=True)
+                    
+                    # Remove from tracking
+                    self.open_sell_orders.pop(sell_order_id, None)
+                    self.sell_orders_not_found.pop(sell_order_id, None)
                     continue
                 
                 # Sell order found - clear retry count

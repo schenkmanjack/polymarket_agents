@@ -2,6 +2,7 @@
   "yes_buy_price": 0.12,
   "no_buy_price": 0.12,
   "sell_price": 0.28,
+  "sell_price_lower_bound": 0.06,
   "order_size": 5.4,
   "market_type": "15m",
   "min_minutes_before_resolution": 4.0,

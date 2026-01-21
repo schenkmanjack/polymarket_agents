@@ -111,6 +111,17 @@ class LimitBuyConfig:
         if not (0.01 <= self.config['sell_price'] <= 0.99):
             raise ValueError(f"sell_price must be between 0.01 and 0.99")
         
+        # Validate sell_price_lower_bound if present
+        if 'sell_price_lower_bound' in self.config:
+            lower_bound = self.config['sell_price_lower_bound']
+            if not (0.01 <= lower_bound <= 0.99):
+                raise ValueError(f"sell_price_lower_bound must be between 0.01 and 0.99")
+            if lower_bound > self.config['sell_price']:
+                logger.warning(
+                    f"sell_price_lower_bound ({lower_bound}) is greater than sell_price ({self.config['sell_price']}). "
+                    f"This may prevent selling at the configured sell_price."
+                )
+        
         # Validate order size
         if self.config['order_size'] <= 0:
             raise ValueError(f"order_size must be positive")
@@ -159,6 +170,15 @@ class LimitBuyConfig:
     def best_bid_margin(self) -> float:
         """Margin below best bid for limit sell (e.g., 0.01 = 1 cent below best bid)"""
         return float(self.config.get('best_bid_margin', 0.0))
+    
+    @property
+    def sell_price_lower_bound(self) -> float:
+        """Minimum sell price when placing new sell order after cancel_threshold_minutes reached.
+        
+        Prevents selling too low even if best_bid - margin is very low.
+        Must be between 0.01 and 0.99, and typically should be >= buy_price to avoid losses.
+        """
+        return float(self.config.get('sell_price_lower_bound', 0.10))
     
     @property
     def order_status_check_interval(self) -> float:
@@ -216,6 +236,10 @@ class LimitBuyTrader:
         
         # Track open sell orders: sell_order_id -> trade_id
         self.open_sell_orders: Dict[str, int] = {}
+        
+        # Track sell orders not found (for retry logic)
+        self.sell_orders_not_found: Dict[str, int] = {}  # sell_order_id -> retry_count
+        self.max_order_not_found_retries = 5  # Max retries before clearing sell_order_id
         
         # Track orderbook prices before resolution for markets with open sell orders
         self.last_orderbook_prices: Dict[str, Dict] = {}  # market_slug -> {"yes_highest_bid": float, "no_highest_bid": float}
@@ -604,6 +628,10 @@ class LimitBuyTrader:
                 await self._check_sell_order_statuses()  # Check sell orders via HTTP polling
                 await self._check_cancel_thresholds()
                 await self._check_sell_orders_for_market_conversion()
+                
+                # Retry placing sell orders for trades that need them (every 10 iterations = ~10 seconds)
+                if iteration % 10 == 0:
+                    await self._retry_missing_sell_orders()
             except Exception as e:
                 logger.error(f"Error checking order status: {e}", exc_info=True)
             
@@ -741,8 +769,46 @@ class LimitBuyTrader:
                 logger.debug(f"  🔍 Checking sell order {sell_order_id[:10]}... (trade_id={trade_id})")
                 order_status = self.pm.get_order_status(sell_order_id)
                 if not order_status:
-                    logger.debug(f"  ⚠️ No order status returned for sell order {sell_order_id[:10]}...")
+                    # Order not found - track retry count
+                    retry_count = self.sell_orders_not_found.get(sell_order_id, 0)
+                    
+                    if retry_count < self.max_order_not_found_retries:
+                        self.sell_orders_not_found[sell_order_id] = retry_count + 1
+                        logger.debug(
+                            f"  ⚠️ Sell order {sell_order_id[:10]}... not found in API "
+                            f"(retry {retry_count + 1}/{self.max_order_not_found_retries}) - will retry on next check"
+                        )
+                        continue
+                    
+                    # Order not found after max retries - clear sell_order_id so it can be retried
+                    logger.warning(
+                        f"⚠️⚠️⚠️ Sell order {sell_order_id[:10]}... (trade {trade_id}) not found in API after {self.max_order_not_found_retries} retries. "
+                        f"Order may never have been placed successfully. Clearing sell_order_id from database to allow retry."
+                    )
+                    
+                    # Clear sell_order_id from database
+                    try:
+                        self.db.update_limit_buy_sell_order(
+                            trade_id=trade_id,
+                            sell_order_id=None,
+                            sell_order_price=None,
+                            sell_order_size=None,
+                            sell_order_status=None,
+                        )
+                        logger.info(
+                            f"✅ Cleared sell_order_id for trade {trade_id}. "
+                            f"Will retry placing the sell order."
+                        )
+                    except Exception as e:
+                        logger.error(f"Error clearing sell_order_id from database: {e}", exc_info=True)
+                    
+                    # Remove from tracking
+                    self.open_sell_orders.pop(sell_order_id, None)
+                    self.sell_orders_not_found.pop(sell_order_id, None)
                     continue
+                
+                # Order found - clear retry count
+                self.sell_orders_not_found.pop(sell_order_id, None)
                 
                 status, filled_amount, total_amount = parse_order_status(order_status)
                 is_filled = is_order_filled(status, filled_amount, total_amount)
@@ -1084,6 +1150,31 @@ class LimitBuyTrader:
                 if sell_order_response:
                     sell_order_id = self.pm.extract_order_id(sell_order_response)
                     if sell_order_id:
+                        # CRITICAL: Verify order actually exists before saving to database
+                        # Wait a moment for order to propagate, then verify
+                        logger.info(f"  🔍 Verifying sell order {sell_order_id} exists...")
+                        await asyncio.sleep(2.0)  # Wait for order to propagate
+                        
+                        order_status = self.pm.get_order_status(sell_order_id)
+                        if not order_status:
+                            logger.warning(
+                                f"  ⚠️ Sell order {sell_order_id} not found in API after placement. "
+                                f"This may indicate the order was not actually placed. Will retry..."
+                            )
+                            # Don't save to database - will retry on next attempt
+                            if attempt < max_retries - 1:
+                                delay = retry_delays[min(attempt, len(retry_delays) - 1)]
+                                logger.info(f"  Waiting {delay}s before retry...")
+                                await asyncio.sleep(delay)
+                                continue
+                            else:
+                                logger.error(
+                                    f"  ❌ Order {sell_order_id} not found after {max_retries} attempts. "
+                                    f"Order may not have been placed successfully."
+                                )
+                                return
+                        
+                        # Order verified - save to database
                         self.db.update_limit_buy_sell_order(
                             trade_id=trade_id,
                             sell_order_id=sell_order_id,
@@ -1094,8 +1185,13 @@ class LimitBuyTrader:
                         # CRITICAL: Add to tracking immediately after database update
                         self.open_sell_orders[sell_order_id] = trade_id
                         logger.info(
-                            f"✅ Sell order placed and tracked: {sell_order_id} "
-                            f"(trade_id={trade_id}, now tracking {len(self.open_sell_orders)} sell order(s) in open_sell_orders)"
+                            f"✅✅✅ SELL ORDER PLACED AND VERIFIED ✅✅✅\n"
+                            f"  Sell Order ID: {sell_order_id}\n"
+                            f"  Trade ID: {trade_id}\n"
+                            f"  Price: ${self.config.sell_price:.4f}\n"
+                            f"  Size: {sell_size_int} shares\n"
+                            f"  Status: Verified via API\n"
+                            f"  Now tracking {len(self.open_sell_orders)} sell order(s) in open_sell_orders"
                         )
                         return  # Success!
                     else:
@@ -1425,6 +1521,79 @@ class LimitBuyTrader:
                 )
                 # Continue checking other orders even if this one fails
     
+    async def _retry_missing_sell_orders(self):
+        """Retry placing sell orders for trades with filled buy orders but no sell orders."""
+        try:
+            # Get current market - only retry for current market
+            if self.config.market_type == "15m":
+                latest_market = get_latest_btc_15m_market_proactive()
+            else:
+                latest_market = get_latest_btc_1h_market_proactive()
+            
+            current_market_slug = None
+            if latest_market:
+                current_market_slug = latest_market.get("_event_slug", "")
+            
+            if not current_market_slug:
+                return  # No current market - skip retry
+            
+            # Find trades with filled buy orders but no sell orders (or sell orders that don't exist)
+            session = self.db.SessionLocal()
+            try:
+                # Trades with no sell_order_id
+                trades_needing_sell = session.query(RealTradeLimitBuy).filter(
+                    RealTradeLimitBuy.deployment_id == self.deployment_id,
+                    RealTradeLimitBuy.order_status == "filled",
+                    RealTradeLimitBuy.filled_shares.isnot(None),
+                    RealTradeLimitBuy.filled_shares > 0,
+                    RealTradeLimitBuy.sell_order_id.is_(None),
+                    RealTradeLimitBuy.market_resolved_at.is_(None),
+                    RealTradeLimitBuy.market_slug == current_market_slug,
+                ).all()
+                
+                # Also check trades with sell_order_id that don't actually exist
+                trades_with_invalid_sell = session.query(RealTradeLimitBuy).filter(
+                    RealTradeLimitBuy.deployment_id == self.deployment_id,
+                    RealTradeLimitBuy.order_status == "filled",
+                    RealTradeLimitBuy.filled_shares.isnot(None),
+                    RealTradeLimitBuy.filled_shares > 0,
+                    RealTradeLimitBuy.sell_order_id.isnot(None),
+                    RealTradeLimitBuy.market_resolved_at.is_(None),
+                    RealTradeLimitBuy.market_slug == current_market_slug,
+                ).all()
+                
+                # Verify sell orders actually exist
+                for trade in trades_with_invalid_sell:
+                    if trade.sell_order_id:
+                        order_status = self.pm.get_order_status(trade.sell_order_id)
+                        if not order_status:
+                            # Order doesn't exist - add to retry list
+                            logger.warning(
+                                f"Found trade {trade.id} with sell_order_id {trade.sell_order_id} that doesn't exist. "
+                                f"Will retry placing sell order."
+                            )
+                            trades_needing_sell.append(trade)
+                
+                for trade in trades_needing_sell:
+                    # Only retry if buy order filled more than 30 seconds ago
+                    if trade.order_filled_at:
+                        time_since_fill = datetime.now(timezone.utc) - trade.order_filled_at
+                        if time_since_fill.total_seconds() < 30:
+                            continue
+                    
+                    logger.info(
+                        f"Found trade {trade.id} with filled buy order but no valid sell order. "
+                        f"Retrying sell order placement..."
+                    )
+                    
+                    # Determine side from trade
+                    side = trade.order_side or "yes"  # Default to yes if not set
+                    await self._place_sell_order(trade.id, side)
+            finally:
+                session.close()
+        except Exception as e:
+            logger.debug(f"Error checking for missing sell orders: {e}", exc_info=True)
+    
     async def _place_market_sell_order(self, trade_id: int) -> bool:
         """Place a limit sell order at best bid minus margin.
         
@@ -1564,17 +1733,34 @@ class LimitBuyTrader:
                 margin = self.config.best_bid_margin
                 sell_price = best_bid - margin
                 
+                # Apply lower bound to prevent selling too low
+                lower_bound = self.config.sell_price_lower_bound
+                original_sell_price = sell_price
+                sell_price = max(lower_bound, sell_price)
+                
                 logger.info(
                     f"Calculating limit sell price: best_bid=${best_bid:.4f}, "
-                    f"margin=${margin:.4f}, sell_price=${sell_price:.4f}"
+                    f"margin=${margin:.4f}, calculated=${original_sell_price:.4f}, "
+                    f"lower_bound=${lower_bound:.4f}, final_sell_price=${sell_price:.4f}"
                 )
                 
                 # Ensure price is within Polymarket's valid range [0.01, 0.99]
-                original_sell_price = sell_price
                 sell_price = max(0.01, min(0.99, sell_price))
                 
-                # Check if we're being forced to sell at 0.01 due to low best_bid
-                if sell_price == 0.01 and original_sell_price < 0.01:
+                # Check if lower bound was applied
+                if sell_price == lower_bound and original_sell_price < lower_bound:
+                    # Get minutes remaining for context
+                    market = get_market_by_slug(trade.market_slug)
+                    minutes_remaining = get_minutes_until_resolution(market) if market else None
+                    minutes_str = f"{minutes_remaining:.2f}" if minutes_remaining else "unknown"
+                    logger.warning(
+                        f"⚠️ Lower bound applied: Calculated sell price (${original_sell_price:.4f}) "
+                        f"was below lower_bound (${lower_bound:.4f}), using ${lower_bound:.4f}. "
+                        f"best_bid=${best_bid:.4f}, margin=${margin:.4f}. "
+                        f"Minutes remaining: {minutes_str}. "
+                        f"This may prevent the order from filling if best_bid is too low."
+                    )
+                elif sell_price == 0.01 and original_sell_price < 0.01:
                     # Get minutes remaining for context
                     market = get_market_by_slug(trade.market_slug)
                     minutes_remaining = get_minutes_until_resolution(market) if market else None
