@@ -65,7 +65,7 @@ def main():
         logger.warning("No proxy configured - requests may be blocked by Cloudflare")
     
     # Initialize and start market maker
-    market_maker = MarketMaker(args.config)
+    market_maker = MarketMaker(args.config, proxy_url=proxy_url)
     
     try:
         asyncio.run(market_maker.start())

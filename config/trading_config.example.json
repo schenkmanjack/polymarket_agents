@@ -9,5 +9,12 @@
   "market_type": "15m",
   "initial_principal": 100.0,
   "dollar_bet_limit": 100.0,
-  "always_use_initial_principal": false
+  "always_use_initial_principal": false,
+  "use_websocket_orderbook": true,
+  "websocket_reconnect_delay": 5.0,
+  "websocket_health_check_timeout": 14.0,
+  "order_status_check_interval": 10.0,
+  "use_websocket_order_status": true,
+  "websocket_order_status_reconnect_delay": 5.0,
+  "websocket_order_status_health_check_timeout": 14.0
 }

@@ -12,7 +12,7 @@ from agents.trading.orderbook_helper import (
     get_highest_bid,
     get_lowest_ask,
 )
-from agents.polymarket.btc_market_detector import is_market_active
+from agents.polymarket.btc_market_detector import is_market_active, get_market_by_slug
 from agents.trading.trade_db import RealTradeThreshold
 
 logger = logging.getLogger(__name__)
@@ -39,6 +39,7 @@ class OrderbookMonitor:
         order_placed_callback: Callable[[str, Dict, str, float], Awaitable[bool]],
         place_early_sell_callback: Callable[[RealTradeThreshold, float], Awaitable[None]],
         get_minutes_until_resolution: Callable[[Dict], Optional[float]],
+        websocket_service=None,
     ):
         """
         Initialize orderbook monitor.
@@ -57,6 +58,7 @@ class OrderbookMonitor:
             order_placed_callback: Async function(market_slug, market_info, side, lowest_ask) -> bool
             place_early_sell_callback: Async function(trade, sell_price) -> None
             get_minutes_until_resolution: Callable that takes market dict and returns minutes until resolution
+            websocket_service: Optional WebSocketOrderbookService instance for real-time orderbook updates
         """
         self.config = config
         self.monitored_markets = monitored_markets
@@ -72,6 +74,7 @@ class OrderbookMonitor:
         self.place_early_sell_callback = place_early_sell_callback
         self.get_minutes_until_resolution = get_minutes_until_resolution
         self.orderbook_poll_interval = config.orderbook_poll_interval
+        self.websocket_service = websocket_service
         
         # Price tracking for resolution determination
         # Stores last known orderbook prices for markets near resolution
@@ -181,8 +184,46 @@ class OrderbookMonitor:
         await self.check_early_sell_conditions(list(self.monitored_markets.keys()))
         
         # Don't place new bets if we have open buy orders
+        # BUT: First check if any orders are for expired markets and clean them up
         if self.open_trades:
-            return
+            # Clean up orders for expired markets before checking
+            expired_orders = []
+            
+            for order_id, trade_id in list(self.open_trades.items()):
+                try:
+                    trade = self.db.get_trade_by_id(trade_id)
+                    if trade:
+                        # Try to get market from monitored_markets first, then fallback to API
+                        market = None
+                        if trade.market_slug in self.monitored_markets:
+                            market = self.monitored_markets[trade.market_slug].get("market")
+                        
+                        if not market:
+                            market = get_market_by_slug(trade.market_slug)
+                        
+                        if not market or not is_market_active(market):
+                            logger.info(
+                                f"🧹 Removing order {order_id[:20]}... for expired/resolved market {trade.market_slug}"
+                            )
+                            expired_orders.append(order_id)
+                            # Update trade status
+                            self.db.update_order_status(
+                                trade_id=trade_id,
+                                order_status="cancelled",
+                                order_id=order_id,
+                            )
+                except Exception as e:
+                    logger.debug(f"Error checking market status for order {order_id[:20]}...: {e}")
+            
+            # Remove expired orders from tracking
+            for order_id in expired_orders:
+                self.open_trades.pop(order_id, None)
+            
+            # If all orders were expired, we can continue; otherwise return
+            if expired_orders and len(expired_orders) == len(self.open_trades):
+                logger.info(f"✅ All {len(expired_orders)} open orders were for expired markets - can place new orders")
+            elif self.open_trades:
+                return
         
         # Don't place new bets if we have open sell orders (wait for proceeds to be claimed)
         if self.open_sell_orders:
@@ -241,6 +282,13 @@ class OrderbookMonitor:
             market = market_info["market"]
             if not is_market_active(market):
                 logger.info(f"Market {market_slug} is no longer active, removing from monitoring")
+                # Unsubscribe tokens from WebSocket if service is available
+                if self.websocket_service:
+                    yes_token_id = market_info.get("yes_token_id")
+                    no_token_id = market_info.get("no_token_id")
+                    if yes_token_id or no_token_id:
+                        tokens_to_remove = [t for t in [yes_token_id, no_token_id] if t]
+                        self.websocket_service.unsubscribe_tokens(tokens_to_remove)
                 self.monitored_markets.pop(market_slug, None)
                 continue
             

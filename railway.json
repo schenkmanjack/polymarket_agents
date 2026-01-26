@@ -5,7 +5,7 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "startCommand": "python scripts/python/run_all_services.py --config config/trading_config.json",
+      "startCommand": "python scripts/python/run_all_services.py --config config/limit_buy_config.json --strategy limit_buy",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }

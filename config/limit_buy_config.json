@@ -1,0 +1,18 @@
+{
+  "yes_buy_price": 0.12,
+  "no_buy_price": 0.12,
+  "sell_price": 0.13,
+  "sell_price_lower_bound": 0.01,
+  "order_size": 5.4,
+  "market_type": "15m",
+  "min_minutes_before_resolution": 4,
+  "cancel_threshold_minutes": 3,
+  "best_bid_margin": 0.02,
+  "order_status_check_interval": 1.0,
+  "use_websocket_order_status": true,
+  "websocket_order_status_reconnect_delay": 5.0,
+  "websocket_order_status_health_check_timeout": 14.0,
+  "use_websocket_orderbook": true,
+  "websocket_reconnect_delay": 5.0,
+  "websocket_health_check_timeout": 14.0
+}

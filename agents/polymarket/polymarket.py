@@ -31,6 +31,15 @@ from py_clob_client.clob_types import (
     TradeParams,
 )
 from py_clob_client.order_builder.constants import BUY, SELL
+from dataclasses import dataclass
+from typing import Dict, Any
+
+# PostOrdersArgs doesn't exist in py-clob-client 0.17.5, so we define it ourselves
+@dataclass
+class PostOrdersArgs:
+    """Dataclass for batch order placement (matches py-clob-client API)."""
+    order: Dict[str, Any]
+    orderType: OrderType
 
 from agents.utils.objects import SimpleMarket, SimpleEvent
 
@@ -80,13 +89,17 @@ class Polymarket:
             {"inputs": [{"internalType": "address", "name": "operator", "type": "address"}, {"internalType": "bool", "name": "approved", "type": "bool"}], "name": "setApprovalForAll", "outputs": [], "stateMutability": "nonpayable", "type": "function"}
         ]"""
         
-        # CTF contract ABI with splitPosition function
+        # CTF contract ABI with splitPosition and mergePositions functions
         self.ctf_abi = """[
             {"inputs": [{"internalType": "address", "name": "account", "type": "address"}, {"internalType": "uint256", "name": "id", "type": "uint256"}], "name": "balanceOf", "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
+            {"inputs": [{"internalType": "address", "name": "account", "type": "address"}, {"internalType": "address", "name": "operator", "type": "address"}], "name": "isApprovedForAll", "outputs": [{"internalType": "bool", "name": "", "type": "bool"}], "stateMutability": "view", "type": "function"},
             {"inputs": [{"internalType": "address", "name": "operator", "type": "address"}, {"internalType": "bool", "name": "approved", "type": "bool"}], "name": "setApprovalForAll", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
-            {"inputs": [{"internalType": "address", "name": "collateralToken", "type": "address"}, {"internalType": "bytes32", "name": "parentCollectionId", "type": "bytes32"}, {"internalType": "bytes32", "name": "conditionId", "type": "bytes32"}, {"internalType": "uint256[]", "name": "partition", "type": "uint256[]"}, {"internalType": "uint256", "name": "amount", "type": "uint256"}], "name": "splitPosition", "outputs": [], "stateMutability": "nonpayable", "type": "function"}
+            {"inputs": [{"internalType": "address", "name": "collateralToken", "type": "address"}, {"internalType": "bytes32", "name": "parentCollectionId", "type": "bytes32"}, {"internalType": "bytes32", "name": "conditionId", "type": "bytes32"}, {"internalType": "uint256[]", "name": "partition", "type": "uint256[]"}, {"internalType": "uint256", "name": "amount", "type": "uint256"}], "name": "splitPosition", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+            {"inputs": [{"internalType": "address", "name": "collateralToken", "type": "address"}, {"internalType": "bytes32", "name": "parentCollectionId", "type": "bytes32"}, {"internalType": "bytes32", "name": "conditionId", "type": "bytes32"}, {"internalType": "uint256[]", "name": "partition", "type": "uint256[]"}, {"internalType": "uint256", "name": "amount", "type": "uint256"}], "name": "mergePositions", "outputs": [], "stateMutability": "nonpayable", "type": "function"}
         ]"""
 
+        # USDC.e (bridged USDC) - required by Polymarket CTF contract
+        # Note: CTF splitPosition function requires USDC.e, not Native USDC
         self.usdc_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
         self.ctf_address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 
@@ -128,6 +141,25 @@ class Polymarket:
         
         self.credentials = self.client.create_or_derive_api_creds()
         self.client.set_api_creds(self.credentials)
+        
+        # Create a separate client for direct wallet orders (used when selling conditional tokens)
+        # Conditional tokens from split are in direct wallet, so we need to use direct wallet for sell orders
+        self.direct_wallet_client = None
+        if self.private_key:
+            try:
+                self.direct_wallet_client = ClobClient(
+                    host=self.clob_url,
+                    key=self.private_key,
+                    chain_id=self.chain_id
+                    # No funder parameter = uses direct wallet (signature_type=0)
+                )
+                # Create separate API credentials for direct wallet (credentials are wallet-specific)
+                direct_wallet_credentials = self.direct_wallet_client.create_or_derive_api_creds()
+                self.direct_wallet_client.set_api_creds(direct_wallet_credentials)
+                logger.info("✓ Direct wallet CLOB client initialized (for conditional token sell orders)")
+                logger.info(f"  Direct wallet address: {self.get_address_for_private_key()}")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not initialize direct wallet client: {e}")
         # print(self.credentials)
 
     def _init_approvals(self, run: bool = False) -> None:
@@ -386,6 +418,83 @@ class Polymarket:
         order = builder.build_signed_order(order_data)
         return order
 
+    def _get_client_for_order(self, side: str, token_id: str) -> Optional[ClobClient]:
+        """
+        Get the appropriate CLOB client for placing an order.
+        
+        For SELL orders of conditional tokens:
+        - If shares are in direct wallet (from split), use direct wallet client
+        - If shares are in proxy wallet (from CLOB buy), use proxy wallet client
+        - By default, check both wallets and use the one with shares
+        
+        For other orders, use proxy wallet client if available (gasless trading).
+        
+        Args:
+            side: "BUY" or "SELL"
+            token_id: Token ID (conditional tokens are very long numeric strings)
+        
+        Returns:
+            ClobClient instance to use for this order
+        """
+        # For SELL orders of conditional tokens, check where shares actually are
+        if side == "SELL" and token_id and len(token_id) > 30:  # Conditional tokens have long numeric IDs
+            # Check both wallets to see where shares are
+            # Use retry_on_rate_limit=False to avoid long delays during order placement
+            # If rate limited, we'll default based on which wallet typically has shares
+            direct_wallet = self.get_address_for_private_key()
+            direct_balance = None
+            proxy_balance = None
+            
+            try:
+                # Try direct wallet first (no retries to avoid delay)
+                direct_balance = self.get_conditional_token_balance(
+                    token_id, 
+                    wallet_address=direct_wallet,
+                    retry_on_rate_limit=False  # Don't retry here - too slow for order placement
+                )
+            except Exception as e:
+                logger.debug(f"Could not check direct wallet balance: {e}")
+                direct_balance = None
+            
+            if self.proxy_wallet_address:
+                try:
+                    # Try proxy wallet (no retries to avoid delay)
+                    proxy_balance = self.get_conditional_token_balance(
+                        token_id, 
+                        wallet_address=self.proxy_wallet_address,
+                        retry_on_rate_limit=False  # Don't retry here - too slow for order placement
+                    )
+                except Exception as e:
+                    logger.debug(f"Could not check proxy wallet balance: {e}")
+                    proxy_balance = None
+            
+            # Use the wallet that has shares (prefer direct wallet if both have shares)
+            if direct_balance and direct_balance > 0:
+                if self.direct_wallet_client:
+                    logger.info(f"Using direct wallet client for SELL order (shares in direct wallet: {direct_balance:.6f})")
+                    return self.direct_wallet_client
+            elif proxy_balance and proxy_balance > 0:
+                logger.info(f"Using proxy wallet client for SELL order (shares in proxy wallet: {proxy_balance:.6f})")
+                return self.client  # Proxy wallet client
+            
+            # If both checks failed (rate limited or no shares), default to proxy wallet client
+            # because CLOB buy orders typically put shares in proxy wallet
+            # (This is safer than defaulting to direct wallet when we're not sure)
+            if self.proxy_wallet_address:
+                logger.warning(
+                    f"Could not determine wallet with shares (rate limited or no shares). "
+                    f"Defaulting to proxy wallet client (typical for CLOB buy orders)."
+                )
+                return self.client  # Proxy wallet client
+            
+            # Fallback to direct wallet if no proxy wallet
+            if self.direct_wallet_client:
+                logger.warning(f"Using direct wallet client for SELL order (fallback, no proxy wallet)")
+                return self.direct_wallet_client
+        
+        # For all other orders, use the default client (proxy wallet if available)
+        return self.client
+    
     def execute_order(self, price, size, side, token_id, fee_rate_bps: Optional[int] = None, auto_detect_fee: bool = True, order_type: OrderType = OrderType.GTC) -> Dict:
         """
         Place a limit order.
@@ -414,6 +523,18 @@ class Polymarket:
             f"fee_rate_bps={fee_rate_bps}, order_type={order_type}"
         )
         
+        # Get appropriate client (direct wallet for conditional token SELL orders)
+        client_to_use = self._get_client_for_order(side, token_id)
+        if not client_to_use:
+            raise ValueError("No CLOB client available for placing order")
+        
+        if client_to_use == self.direct_wallet_client:
+            logger.info(f"  Using DIRECT WALLET client (shares are in direct wallet)")
+        elif client_to_use == self.client and self.proxy_wallet_address:
+            logger.info(f"  Using PROXY WALLET client (gasless trading)")
+        else:
+            logger.info(f"  Using standard client")
+        
         # If fee_rate_bps not specified, try with default (0) and auto-detect from error
         if fee_rate_bps is None:
             if auto_detect_fee:
@@ -423,9 +544,9 @@ class Polymarket:
                     order_args = OrderArgs(price=price, size=size, side=side, token_id=token_id, fee_rate_bps=0)
                     logger.debug(f"  OrderArgs created: {order_args}")
                     logger.debug(f"  Calling client.create_order()...")
-                    signed_order = self.client.create_order(order_args)
+                    signed_order = client_to_use.create_order(order_args)
                     logger.debug(f"  Signed order created, calling client.post_order() with order_type={order_type}...")
-                    response = self.client.post_order(signed_order, order_type)
+                    response = client_to_use.post_order(signed_order, order_type)
                     logger.info(f"  ✅ Order posted successfully, response: {response}")
                     return response
                 except PolyApiException as e:
@@ -459,8 +580,8 @@ class Polymarket:
                                 # Retry with detected fee rate
                                 logger.debug(f"  Retrying with fee_rate_bps={detected_fee}...")
                                 order_args = OrderArgs(price=price, size=size, side=side, token_id=token_id, fee_rate_bps=detected_fee)
-                                signed_order = self.client.create_order(order_args)
-                                response = self.client.post_order(signed_order, order_type)
+                                signed_order = client_to_use.create_order(order_args)
+                                response = client_to_use.post_order(signed_order, order_type)
                                 logger.info(f"  ✅ Order posted successfully after fee detection, response: {response}")
                                 return response
                     # If we can't parse the error, re-raise it
@@ -478,9 +599,9 @@ class Polymarket:
         order_args = OrderArgs(price=price, size=size, side=side, token_id=token_id, fee_rate_bps=fee_rate_bps)
         logger.debug(f"  OrderArgs created: {order_args}")
         logger.debug(f"  Calling client.create_order()...")
-        signed_order = self.client.create_order(order_args)
+        signed_order = client_to_use.create_order(order_args)
         logger.debug(f"  Signed order created, calling client.post_order() with order_type={order_type}...")
-        response = self.client.post_order(signed_order, order_type)
+        response = client_to_use.post_order(signed_order, order_type)
         logger.info(f"  ✅ Order posted successfully, response: {response}")
         return response
     
@@ -630,13 +751,186 @@ class Polymarket:
         except Exception as e:
             logger.error(f"Error canceling order {order_id}: {e}")
             return None
+    
+    def cancel_orders_batch(self, order_ids: List[str]) -> Optional[Dict]:
+        """
+        Cancel multiple orders in a single batch request.
+        
+        Args:
+            order_ids: List of order IDs to cancel
+            
+        Returns:
+            Batch cancellation response dict, or None if error occurred
+        """
+        if not self.client:
+            logger.error("CLOB client not initialized - cannot cancel orders")
+            return None
+        
+        if not order_ids:
+            logger.warning("No order IDs provided for batch cancel")
+            return None
+        
+        try:
+            if hasattr(self.client, 'cancel_orders'):
+                logger.info(f"Batch cancelling {len(order_ids)} orders...")
+                result = self.client.cancel_orders(order_ids)
+                if result is None:
+                    logger.warning("⚠️ Batch cancel returned None - batch operation may have failed")
+                return result
+            else:
+                logger.warning("⚠️ CLOB client does not have cancel_orders method, falling back to individual cancels")
+                # Fallback to individual cancels
+                results = []
+                for order_id in order_ids:
+                    result = self.cancel_order(order_id)
+                    if result:
+                        results.append(result)
+                if results:
+                    logger.info(f"✅ Fallback: Successfully cancelled {len(results)}/{len(order_ids)} orders individually")
+                    return {"results": results}
+                else:
+                    logger.error(f"❌ Fallback: Failed to cancel any of {len(order_ids)} orders")
+                    return None
+        except Exception as e:
+            logger.error(f"❌ Error batch canceling orders: {e}", exc_info=True)
+            logger.warning("⚠️ Batch cancel failed with exception, returning None")
+            return None
+    
+    def place_orders_batch(self, orders: List[Dict]) -> Optional[Dict]:
+        """
+        Place multiple orders in a single batch request using post_orders.
+        
+        Args:
+            orders: List of order dicts, each with:
+                - price: float
+                - size: float
+                - side: "BUY" or "SELL"
+                - token_id: str
+                - fee_rate_bps: Optional[int] (default: None, auto-detect)
+                - order_type: OrderType (default: OrderType.GTC)
+        
+        Returns:
+            Batch placement response dict, or None if error occurred
+        """
+        if not self.client:
+            logger.error("CLOB client not initialized - cannot place orders")
+            return None
+        
+        if not orders:
+            logger.warning("No orders provided for batch placement")
+            return None
+        
+        try:
+            if hasattr(self.client, 'post_orders'):
+                logger.info(f"Batch placing {len(orders)} orders...")
+                
+                # Convert order dicts to PostOrdersArgs (matching Gemini's pattern)
+                post_orders_args = []
+                for order_dict in orders:
+                    price = order_dict['price']
+                    size = order_dict['size']
+                    side = order_dict['side']
+                    token_id = order_dict['token_id']
+                    fee_rate_bps = order_dict.get('fee_rate_bps')
+                    order_type = order_dict.get('order_type', OrderType.GTC)
+                    
+                    # Create order using client.create_order
+                    order_args = OrderArgs(
+                        price=price,
+                        size=size,
+                        side=side,
+                        token_id=token_id,
+                        fee_rate_bps=fee_rate_bps,
+                    )
+                    
+                    # Get appropriate client for this order (direct wallet for conditional token SELL orders)
+                    client_to_use = self._get_client_for_order(side, token_id)
+                    if not client_to_use:
+                        logger.error(f"No CLOB client available for order")
+                        continue
+                    
+                    signed_order = client_to_use.create_order(order_args)
+                    
+                    # Create PostOrdersArgs instance
+                    post_orders_args.append(
+                        PostOrdersArgs(
+                            order=signed_order,
+                            orderType=order_type,
+                        )
+                    )
+                
+                # Determine which client to use for batch placement
+                # If all orders are SELL orders of conditional tokens, use direct wallet client
+                all_conditional_sells = all(
+                    order_dict.get('side') == 'SELL' and 
+                    order_dict.get('token_id') and 
+                    len(str(order_dict.get('token_id'))) > 30
+                    for order_dict in orders
+                )
+                
+                client_to_use = self.direct_wallet_client if (all_conditional_sells and self.direct_wallet_client) else self.client
+                if client_to_use == self.direct_wallet_client:
+                    logger.info(f"  Using DIRECT WALLET client for batch (conditional token SELL orders)")
+                elif client_to_use == self.client and self.proxy_wallet_address:
+                    logger.info(f"  Using PROXY WALLET client for batch (gasless trading)")
+                
+                # Place orders in batch
+                result = client_to_use.post_orders(post_orders_args)
+                if result is None:
+                    logger.warning("⚠️ Batch place returned None - batch operation may have failed")
+                return result
+            else:
+                logger.warning("⚠️ CLOB client does not have post_orders method, falling back to parallel individual placements")
+                # Fallback: Use ThreadPoolExecutor to place orders in parallel (non-blocking)
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                
+                def place_single_order(order_dict):
+                    """Place a single order."""
+                    try:
+                        return self.execute_order(
+                            price=order_dict['price'],
+                            size=order_dict['size'],
+                            side=order_dict['side'],
+                            token_id=order_dict['token_id'],
+                            fee_rate_bps=order_dict.get('fee_rate_bps'),
+                            order_type=order_dict.get('order_type', OrderType.GTC),
+                        )
+                    except Exception as e:
+                        logger.error(f"Error placing order in fallback: {e}")
+                        return None
+                
+                # Place all orders in parallel using thread pool
+                results = []
+                with ThreadPoolExecutor(max_workers=len(orders)) as executor:
+                    future_to_order = {
+                        executor.submit(place_single_order, order_dict): order_dict
+                        for order_dict in orders
+                    }
+                    
+                    for future in as_completed(future_to_order):
+                        result = future.result()
+                        if result:
+                            results.append(result)
+                
+                if results:
+                    logger.info(f"✅ Fallback: Successfully placed {len(results)}/{len(orders)} orders in parallel")
+                    return {"results": results}
+                else:
+                    logger.error(f"❌ Fallback: Failed to place any of {len(orders)} orders")
+                    return None
+        except Exception as e:
+            logger.error(f"❌ Error batch placing orders: {e}", exc_info=True)
+            logger.warning("⚠️ Batch place failed with exception, returning None")
+            return None
 
     def get_usdc_balance(self) -> float:
         """Get USDC balance from your Polygon wallet (direct wallet)."""
-        balance_res = self.usdc.functions.balanceOf(
-            self.get_address_for_private_key()
-        ).call()
-        return float(balance_res / 10e5)
+        wallet_address = self.get_address_for_private_key()
+        balance_res = self.usdc.functions.balanceOf(wallet_address).call()
+        # USDC has 6 decimals, so divide by 1e6 (1,000,000)
+        balance_float = float(balance_res) / 1e6
+        logger.debug(f"USDC balance check: raw={balance_res}, wallet={wallet_address[:10]}...{wallet_address[-8:]}, balance=${balance_float:.2f}")
+        return balance_float
     
     def get_polymarket_balance(self, proxy_wallet_address: Optional[str] = None) -> Optional[float]:
         """
@@ -716,56 +1010,148 @@ class Polymarket:
         except Exception as e:
             return None
     
-    def get_conditional_token_balance(self, token_id: str, wallet_address: Optional[str] = None) -> Optional[float]:
+    def approve_usdc_for_ctf(self, amount_usdc: Optional[float] = None) -> Optional[Dict]:
+        """
+        Approve USDC for CTF contract to enable split_position.
+        
+        Args:
+            amount_usdc: Amount to approve (None = approve max uint256)
+            
+        Returns:
+            Transaction receipt dict, or None if error
+        """
+        try:
+            wallet_address = self.get_address_for_private_key()
+            
+            if amount_usdc is None:
+                # Approve max amount (2^256 - 1)
+                from decimal import Decimal
+                MAX_UINT256 = Decimal(2**256 - 1)
+                amount_raw = int(MAX_UINT256)
+                logger.info(f"Approving unlimited USDC for CTF contract...")
+            else:
+                amount_raw = int(amount_usdc * 1e6)
+                logger.info(f"Approving ${amount_usdc:.2f} USDC for CTF contract...")
+            
+            # Build approval transaction
+            nonce = self.web3.eth.get_transaction_count(wallet_address)
+            
+            approve_txn = self.usdc.functions.approve(
+                self.ctf_address,
+                amount_raw
+            ).build_transaction({
+                "chainId": self.chain_id,
+                "from": wallet_address,
+                "nonce": nonce,
+                "gas": 100000,  # Standard gas limit for approve
+                "gasPrice": self.web3.eth.gas_price
+            })
+            
+            # Sign and send transaction
+            signed_txn = self.web3.eth.account.sign_transaction(
+                approve_txn, private_key=self.private_key
+            )
+            
+            tx_hash = self.web3.eth.send_raw_transaction(signed_txn.raw_transaction)
+            logger.info(f"⏳ Approval transaction sent: {tx_hash.hex()}")
+            
+            # Wait for transaction receipt
+            receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+            
+            if receipt.status == 1:
+                logger.info(f"✅ USDC approval successful! Transaction: {tx_hash.hex()}")
+                return {
+                    "transaction_hash": tx_hash.hex(),
+                    "receipt": receipt
+                }
+            else:
+                logger.error(f"❌ USDC approval transaction failed: {tx_hash.hex()}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error approving USDC for CTF contract: {e}", exc_info=True)
+            return None
+    
+    def get_conditional_token_balance(self, token_id: str, wallet_address: Optional[str] = None, retry_on_rate_limit: bool = True) -> Optional[float]:
         """
         Get balance of conditional tokens (ERC1155) for a specific token_id.
         
         Args:
             token_id: CLOB token ID (uint256)
             wallet_address: Optional wallet address. If not provided, uses proxy wallet or direct wallet.
+            retry_on_rate_limit: If True, retry with exponential backoff on rate limit errors (default: True)
         
         Returns:
             Balance as float (number of shares), or None if unavailable
         """
-        try:
-            # Determine which address to check
-            if wallet_address:
-                address_to_check = wallet_address
-            elif self.proxy_wallet_address:
-                address_to_check = self.proxy_wallet_address
-            else:
-                address_to_check = self.get_address_for_private_key()
-            
-            logger.debug(
-                f"🔍 Checking conditional token balance: token_id={token_id[:20]}..., "
-                f"wallet={address_to_check[:10]}...{address_to_check[-8:]}, "
-                f"ctf_contract={self.ctf_address[:10]}...{self.ctf_address[-8:]}"
-            )
-            
-            # Convert token_id to int (it's a uint256)
-            token_id_int = int(token_id)
-            
-            # Call balanceOf(address, uint256) on ERC1155 contract
-            balance_raw = self.ctf.functions.balanceOf(address_to_check, token_id_int).call()
-            
-            logger.debug(f"  Raw balance from contract: {balance_raw} (uint256)")
-            
-            # ERC1155 conditional tokens on Polymarket use 1e6 (6 decimals), not 1e18
-            # Example: raw balance 1978900 = 1.9789 shares (with 6 decimals)
-            # This is different from ERC20 tokens which typically use 1e18
-            balance_float = float(balance_raw) / 1e6
-            
-            logger.info(
-                f"  ✓ Conditional token balance: {balance_float:.6f} shares "
-                f"(raw: {balance_raw}, token_id: {token_id[:20]}...)"
-            )
-            
-            return balance_float
-        except Exception as e:
-            logger.error(
-                f"❌ Error checking conditional token balance for token_id {token_id}: {e}",
-                exc_info=True
-            )
+        import time
+        
+        max_retries = 3 if retry_on_rate_limit else 1
+        retry_delays = [10.0, 20.0, 30.0]  # Wait times for rate limit retries
+        
+        for attempt in range(max_retries):
+            try:
+                # Determine which address to check
+                if wallet_address:
+                    address_to_check = wallet_address
+                elif self.proxy_wallet_address:
+                    address_to_check = self.proxy_wallet_address
+                else:
+                    address_to_check = self.get_address_for_private_key()
+                
+                logger.debug(
+                    f"🔍 Checking conditional token balance (attempt {attempt + 1}/{max_retries}): "
+                    f"token_id={token_id[:20]}..., "
+                    f"wallet={address_to_check[:10]}...{address_to_check[-8:]}, "
+                    f"ctf_contract={self.ctf_address[:10]}...{self.ctf_address[-8:]}"
+                )
+                
+                # Convert token_id to int (it's a uint256)
+                token_id_int = int(token_id)
+                
+                # Call balanceOf(address, uint256) on ERC1155 contract
+                balance_raw = self.ctf.functions.balanceOf(address_to_check, token_id_int).call()
+                
+                logger.debug(f"  Raw balance from contract: {balance_raw} (uint256)")
+                
+                # ERC1155 conditional tokens on Polymarket use 1e6 (6 decimals), not 1e18
+                # Example: raw balance 1978900 = 1.9789 shares (with 6 decimals)
+                # This is different from ERC20 tokens which typically use 1e18
+                balance_float = float(balance_raw) / 1e6
+                
+                logger.info(
+                    f"  ✓ Conditional token balance: {balance_float:.6f} shares "
+                    f"(raw: {balance_raw}, token_id: {token_id[:20]}...)"
+                )
+                
+                return balance_float
+            except ValueError as e:
+                error_str = str(e)
+                # Check if it's a rate limit error
+                if 'rate limit' in error_str.lower() or '-32090' in error_str:
+                    if attempt < max_retries - 1:
+                        delay = retry_delays[min(attempt, len(retry_delays) - 1)]
+                        logger.warning(
+                            f"  ⚠️ Rate limit error checking balance (attempt {attempt + 1}/{max_retries}). "
+                            f"Waiting {delay}s before retry..."
+                        )
+                        time.sleep(delay)
+                        continue
+                    else:
+                        logger.error(
+                            f"❌ Rate limit error checking conditional token balance after {max_retries} attempts: {e}"
+                        )
+                        return None
+                else:
+                    # Not a rate limit error, re-raise
+                    raise
+            except Exception as e:
+                logger.error(
+                    f"❌ Error checking conditional token balance for token_id {token_id}: {e}",
+                    exc_info=True
+                )
+                return None
+        
             return None
     
     def check_conditional_token_allowance(self, exchange_address: str, wallet_address: Optional[str] = None) -> Optional[bool]:
@@ -813,7 +1199,7 @@ class Polymarket:
             )
             return None
     
-    def ensure_conditional_token_allowances(self) -> bool:
+    def ensure_conditional_token_allowances(self, wallet_address: Optional[str] = None) -> bool:
         """
         Ensure conditional token allowances are set for all required exchange contracts.
         This is critical for selling shares - the exchange contracts need permission to transfer your conditional tokens.
@@ -823,14 +1209,22 @@ class Polymarket:
         - 0xC5d563A36AE78145C45a50134d48A1215220f80a (Neg risk markets)
         - 0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296 (Neg risk adapter)
         
+        Args:
+            wallet_address: Optional wallet address to check. If None, uses direct wallet (where shares are).
+                          IMPORTANT: Shares from split are in direct wallet, so we must check direct wallet allowances.
+        
         Returns:
             True if all allowances are set (or if using proxy wallet where this may not be needed),
             False if allowances need to be set but couldn't be set
         """
         try:
-            # If using proxy wallet (signature_type=2), allowances may be handled differently
-            # For now, we'll check and log, but not fail if using proxy wallet
-            wallet_address = self.proxy_wallet_address or self.get_address_for_private_key()
+            # IMPORTANT: Shares from split are in DIRECT wallet, so we must check direct wallet allowances
+            # Even if using proxy wallet for trading, the shares are in direct wallet
+            if wallet_address:
+                address_to_check = wallet_address
+            else:
+                # Default to direct wallet (where shares are)
+                address_to_check = self.get_address_for_private_key()
             
             exchange_addresses = [
                 ("0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E", "Main exchange"),
@@ -840,7 +1234,7 @@ class Polymarket:
             
             logger.info(
                 f"🔍 Checking conditional token allowances for wallet "
-                f"{wallet_address[:10]}...{wallet_address[-8:]} "
+                f"{address_to_check[:10]}...{address_to_check[-8:]} "
                 f"(proxy_wallet={self.proxy_wallet_address is not None}, "
                 f"signature_type={getattr(self.client, 'signature_type', 'unknown')})"
             )
@@ -849,7 +1243,7 @@ class Polymarket:
             approval_results = []
             
             for exchange_addr, exchange_name in exchange_addresses:
-                is_approved = self.check_conditional_token_allowance(exchange_addr, wallet_address)
+                is_approved = self.check_conditional_token_allowance(exchange_addr, address_to_check)
                 if is_approved is None:
                     logger.warning(f"  ⚠️ Could not check allowance for {exchange_name} ({exchange_addr[:10]}...)")
                     approval_results.append((exchange_name, exchange_addr, None))
@@ -874,15 +1268,184 @@ class Polymarket:
                 logger.info("✅ All conditional token allowances are set - ready for selling")
             else:
                 missing = [name for name, addr, approved in approval_results if approved is False]
-                logger.warning(
-                    f"⚠️ Conditional token allowances NOT set for: {', '.join(missing)}. "
-                    f"This may cause 'not enough balance / allowance' errors when selling. "
-                    f"Consider running _init_approvals(run=True) to set them."
-                )
+                missing_addresses = [addr for name, addr, approved in approval_results if approved is False]
+                
+                # Try to set approvals automatically for the wallet where shares are (direct wallet)
+                # Even if using proxy wallet for trading, shares are in direct wallet, so we need direct wallet allowances
+                if missing_addresses:
+                    # Check if we're checking direct wallet or proxy wallet
+                    is_direct_wallet = (address_to_check == self.get_address_for_private_key())
+                    if is_direct_wallet or not self.proxy_wallet_address:
+                        logger.info(
+                            f"🔧 Attempting to set conditional token allowances for: {', '.join(missing)} "
+                            f"(wallet: {address_to_check[:10]}...{address_to_check[-8:]})"
+                        )
+                        all_set_successfully = True
+                        import time
+                        for idx, (exchange_addr, exchange_name) in enumerate(exchange_addresses):
+                            if exchange_addr in missing_addresses:
+                                # Small delay between approval transactions to allow previous one to propagate
+                                if idx > 0:
+                                    logger.info(f"⏳ Waiting 3 seconds before next approval transaction (to allow previous to propagate)...")
+                                    time.sleep(3)
+                                
+                                logger.info(f"🔧 Setting approval for {exchange_name}...")
+                                approval_result = self._set_conditional_token_approval(exchange_addr, exchange_name, wallet_address=address_to_check)
+                                if approval_result:
+                                    logger.info(f"✅ Successfully set approval for {exchange_name}")
+                                    # Small delay after successful approval to allow blockchain state to update
+                                    if idx < len([a for a in exchange_addresses if a[0] in missing_addresses]) - 1:
+                                        logger.info(f"⏳ Waiting 2 seconds for blockchain state to update...")
+                                        time.sleep(2)
+                                else:
+                                    logger.error(f"❌ Failed to set approval for {exchange_name}")
+                                    logger.error(f"   This approval is required for placing sell orders. Please check the transaction above.")
+                                    all_set_successfully = False
+                                    # Continue trying other approvals even if one fails
+                        
+                        # Re-check approvals after setting them (with a small delay to allow blockchain to update)
+                        if all_set_successfully:
+                            logger.info("⏳ Waiting 3 seconds for approvals to propagate on blockchain...")
+                            import time
+                            time.sleep(3)
+                            
+                            logger.info("🔄 Re-checking conditional token allowances after setting them...")
+                            all_approved = True
+                            for exchange_addr, exchange_name in exchange_addresses:
+                                is_approved = self.check_conditional_token_allowance(exchange_addr, address_to_check)
+                                if is_approved is False:
+                                    all_approved = False
+                                    logger.warning(f"  ⚠️ Approval still not set for {exchange_name} - transaction may still be pending")
+                                elif is_approved is True:
+                                    logger.info(f"  ✓ Approval confirmed for {exchange_name}")
+                    else:
+                        logger.warning(
+                            f"⚠️ Cannot auto-set allowances for proxy wallet. "
+                            f"Shares are in direct wallet ({self.get_address_for_private_key()[:10]}...), "
+                            f"but checking proxy wallet ({address_to_check[:10]}...). "
+                            f"Please set allowances manually for direct wallet."
+                        )
+                
+                if all_approved:
+                    logger.info("✅ All conditional token allowances are set - ready for selling")
+                else:
+                    logger.warning(
+                        f"⚠️ Conditional token allowances NOT set for: {', '.join(missing)}. "
+                        f"This may cause 'not enough balance / allowance' errors when selling. "
+                        f"Consider running _init_approvals(run=True) to set them."
+                    )
             
             return all_approved
         except Exception as e:
             logger.error(f"❌ Error ensuring conditional token allowances: {e}", exc_info=True)
+            return False
+    
+    def _set_conditional_token_approval(self, exchange_address: str, exchange_name: str, wallet_address: Optional[str] = None) -> bool:
+        """
+        Set conditional token approval for a specific exchange contract.
+        
+        Args:
+            exchange_address: Exchange contract address to approve
+            exchange_name: Human-readable name for logging
+            wallet_address: Optional wallet address to set approval for. If None, uses direct wallet.
+        
+        Returns:
+            True if approval was set successfully, False otherwise
+        """
+        try:
+            if not self.private_key:
+                logger.error("Cannot set approval: no private key available")
+                return False
+            
+            # Use provided wallet address or default to direct wallet
+            if wallet_address is None:
+                wallet_address = self.get_address_for_private_key()
+            
+            # We can only sign transactions with the direct wallet's private key
+            signer_address = self.get_address_for_private_key()
+            if wallet_address != signer_address:
+                logger.warning(
+                    f"⚠️ Cannot set approval for {wallet_address[:10]}... using different private key. "
+                    f"Only can set approval for direct wallet {signer_address[:10]}..."
+                )
+                return False
+            
+            logger.info(
+                f"🔧 Setting conditional token approval for {exchange_name} "
+                f"({exchange_address[:10]}...{exchange_address[-8:]}) "
+                f"for wallet {wallet_address[:10]}...{wallet_address[-8:]}"
+            )
+            
+            # Build transaction
+            # Get nonce with 'pending' to include pending transactions
+            nonce = self.web3.eth.get_transaction_count(wallet_address, 'pending')
+            logger.debug(f"   Using nonce: {nonce} for approval transaction")
+            
+            approval_txn = self.ctf.functions.setApprovalForAll(
+                exchange_address, True
+            ).build_transaction({
+                "chainId": self.chain_id,
+                "from": wallet_address,
+                "nonce": nonce,
+                "gas": 100000,  # Reasonable gas limit for setApprovalForAll
+                "gasPrice": self.web3.eth.gas_price
+            })
+            
+            # Sign transaction
+            signed_txn = self.web3.eth.account.sign_transaction(
+                approval_txn, private_key=self.private_key
+            )
+            
+            # Send transaction
+            raw_tx = getattr(signed_txn, 'raw_transaction', None) or getattr(signed_txn, 'rawTransaction', None)
+            if not raw_tx:
+                raise ValueError("Could not extract raw transaction from signed transaction")
+            tx_hash = self.web3.eth.send_raw_transaction(raw_tx)
+            logger.info(f"Transaction sent: {tx_hash.hex()}")
+            logger.info(f"Polygonscan: https://polygonscan.com/tx/{tx_hash.hex()}")
+            
+            # Wait for receipt
+            logger.info(f"⏳ Waiting for transaction receipt (timeout: 300s)...")
+            try:
+                receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+                logger.info(f"✅ Transaction receipt received! Status: {receipt.status}")
+            except Exception as e:
+                logger.warning(f"⚠️ Timeout waiting for receipt, trying direct fetch: {e}")
+                try:
+                    receipt = self.web3.eth.get_transaction_receipt(tx_hash)
+                    logger.info(f"✅ Retrieved receipt directly! Status: {receipt.status}")
+                except Exception as get_error:
+                    logger.error(
+                        f"❌ Could not retrieve transaction receipt: {get_error}. "
+                        f"Transaction may still be pending. Check Polygonscan: https://polygonscan.com/tx/{tx_hash.hex()}"
+                    )
+                    return False
+            
+            if receipt.status == 1:
+                logger.info(
+                    f"✅✅✅ Successfully set conditional token approval for {exchange_name}! ✅✅✅"
+                )
+                logger.info(f"   Transaction: {tx_hash.hex()}")
+                logger.info(f"   Block: {receipt.blockNumber}, Gas used: {receipt.gasUsed}")
+                return True
+            else:
+                logger.error(
+                    f"❌ Failed to set conditional token approval for {exchange_name}. "
+                    f"Transaction status: {receipt.status} (0 = failed, 1 = success)"
+                )
+                logger.error(f"   Transaction: {tx_hash.hex()}")
+                logger.error(f"   Polygonscan: https://polygonscan.com/tx/{tx_hash.hex()}")
+                return False
+                
+        except Exception as e:
+            logger.error(
+                f"❌ Error setting conditional token approval for {exchange_name}: {e}",
+                exc_info=True
+            )
+            logger.error(
+                f"❌ Error setting conditional token approval for {exchange_name}: {e}",
+                exc_info=True
+            )
             return False
     
     def split_position(
@@ -906,6 +1469,10 @@ class Polymarket:
         """
         try:
             wallet_address = self.get_address_for_private_key()
+            logger.info(
+                f"🔧 Splitting position: wallet={wallet_address[:10]}...{wallet_address[-8:]}, "
+                f"amount=${amount_usdc:.2f}, condition_id={condition_id[:20]}..."
+            )
             
             # Convert condition_id to bytes32
             # Condition ID from API can be:
@@ -943,14 +1510,24 @@ class Polymarket:
             amount_raw = int(amount_usdc * 1e6)
             
             # Check USDC balance
+            logger.info(f"Checking USDC balance for wallet: {wallet_address}")
+            logger.info(f"  USDC contract: {self.usdc_address}")
+            logger.info(f"  CTF contract: {self.ctf_address}")
+            
             usdc_balance = self.usdc.functions.balanceOf(wallet_address).call()
             usdc_balance_float = float(usdc_balance) / 1e6
-            logger.info(f"USDC balance: ${usdc_balance_float:.2f} (need ${amount_usdc:.2f})")
+            logger.info(f"USDC balance: ${usdc_balance_float:.2f} (raw: {usdc_balance}, need ${amount_usdc:.2f})")
             
             if usdc_balance < amount_raw:
                 logger.error(
                     f"Insufficient USDC balance: have ${usdc_balance_float:.2f}, "
                     f"need ${amount_usdc:.2f}"
+                )
+                logger.error(
+                    f"💡 Make sure you sent USDC to this wallet address on Polygon network: {wallet_address}"
+                )
+                logger.error(
+                    f"💡 Check your balance on Polygonscan: https://polygonscan.com/address/{wallet_address}"
                 )
                 return None
             
@@ -965,8 +1542,22 @@ class Polymarket:
                 if allowance < amount_raw:
                     logger.warning(
                         f"USDC allowance insufficient: ${allowance_float:.2f} < ${amount_usdc:.2f}. "
-                        f"Transaction may fail. Consider approving USDC for CTF contract."
+                        f"Attempting to approve USDC for CTF contract..."
                     )
+                    # Try to approve automatically
+                    approve_result = self.approve_usdc_for_ctf(amount_usdc=None)  # Approve unlimited
+                    if approve_result:
+                        logger.info("✅ USDC approval successful, proceeding with split...")
+                        # Re-check allowance after approval
+                        allowance = self.usdc.functions.allowance(wallet_address, self.ctf_address).call()
+                        allowance_float = float(allowance) / 1e6
+                        logger.info(f"New USDC allowance: ${allowance_float:.2f}")
+                    else:
+                        logger.error(
+                            f"Failed to approve USDC. Transaction will likely fail. "
+                            f"Please approve USDC manually for CTF contract: {self.ctf_address}"
+                        )
+                        return None
             
             # Build splitPosition transaction
             # Parameters:
@@ -985,7 +1576,14 @@ class Polymarket:
             )
             
             # Build transaction
-            nonce = self.web3.eth.get_transaction_count(wallet_address)
+            # Use 'pending' nonce to include pending transactions and avoid nonce conflicts
+            nonce = self.web3.eth.get_transaction_count(wallet_address, 'pending')
+            logger.debug(f"Using nonce: {nonce} (includes pending transactions)")
+            
+            # Use current gas price (Polygon is usually fast enough)
+            # Note: Polygon blocks are ~2 seconds, so transactions confirm quickly
+            gas_price = self.web3.eth.gas_price
+            logger.debug(f"Gas price: {gas_price / 1e9:.2f} gwei")
             
             split_txn = self.ctf.functions.splitPosition(
                 self.usdc_address,
@@ -998,7 +1596,7 @@ class Polymarket:
                 "from": wallet_address,
                 "nonce": nonce,
                 "gas": 500000,  # Reasonable gas limit for splitPosition
-                "gasPrice": self.web3.eth.gas_price
+                "gasPrice": gas_price
             })
             
             # Sign transaction
@@ -1008,16 +1606,136 @@ class Polymarket:
             
             # Send transaction
             logger.info("Sending splitPosition transaction...")
-            tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
-            logger.info(f"Transaction sent: {tx_hash.hex()}")
+            # Handle both old (rawTransaction) and new (raw_transaction) web3.py versions
+            raw_tx = getattr(signed_txn, 'raw_transaction', None) or getattr(signed_txn, 'rawTransaction', None)
+            if not raw_tx:
+                raise ValueError("Could not extract raw transaction from signed transaction")
+            
+            try:
+                tx_hash = self.web3.eth.send_raw_transaction(raw_tx)
+                logger.info(f"Transaction sent: {tx_hash.hex()}")
+            except Exception as send_error:
+                logger.error(f"❌ Error sending transaction: {send_error}")
+                logger.error(f"   This usually means the transaction was rejected before being broadcast")
+                logger.error(f"   Common causes: nonce too high, gas price too low, or network issue")
+                # Check current nonce
+                try:
+                    current_nonce = self.web3.eth.get_transaction_count(wallet_address, 'pending')
+                    logger.info(f"   Current pending nonce: {current_nonce}, used nonce: {nonce}")
+                    if nonce > current_nonce:
+                        logger.warning(f"   ⚠️ Nonce {nonce} is higher than pending nonce {current_nonce} - transaction may be rejected")
+                except Exception:
+                    pass
+                raise
+            
+            # Verify transaction was actually broadcast (check mempool)
+            logger.info(f"Verifying transaction was broadcast to network...")
+            try:
+                # Wait a moment for transaction to propagate
+                time.sleep(2)
+                tx_check = self.web3.eth.get_transaction(tx_hash)
+                if tx_check:
+                    logger.info(f"✅ Transaction confirmed in mempool/blockchain")
+                    logger.info(f"   From: {tx_check.get('from', 'unknown')}")
+                    logger.info(f"   To: {tx_check.get('to', 'unknown')}")
+                    logger.info(f"   Nonce: {tx_check.get('nonce', 'unknown')}")
+                    logger.info(f"   Gas price: {tx_check.get('gasPrice', 'unknown')}")
+                    block_num = tx_check.get('blockNumber')
+                    if block_num:
+                        logger.info(f"   Block: {block_num} (already mined!)")
+                    else:
+                        logger.info(f"   Status: Pending in mempool")
+                else:
+                    logger.warning(f"⚠️ Transaction hash returned but transaction not found in mempool")
+                    logger.warning(f"   This may indicate a network connectivity issue")
+            except Exception as verify_error:
+                logger.warning(f"⚠️ Could not verify transaction broadcast: {verify_error}")
+                logger.warning(f"   Transaction hash: {tx_hash.hex()}")
+                logger.warning(f"   Will proceed to wait for receipt anyway...")
             
             # Wait for receipt
-            logger.info("Waiting for transaction receipt...")
-            receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+            logger.info(f"Waiting for transaction receipt (timeout: 300s)...")
+            logger.info(f"Transaction hash: {tx_hash.hex()}")
+            logger.info(f"Polygonscan: https://polygonscan.com/tx/{tx_hash.hex()}")
+            
+            receipt = None
+            max_wait_time = 300  # seconds
+            # Use faster polling: 1s for first 30s, then 2s after that
+            start_time = time.time()
+            
+            try:
+                logger.info(f"⏳ Polling for transaction receipt (checking every 1-2s, max {max_wait_time}s)...")
+                # Poll manually with periodic status updates
+                while (time.time() - start_time) < max_wait_time:
+                    elapsed = time.time() - start_time
+                    
+                    # Use faster polling interval initially (1s), then slower (2s) after 30s
+                    poll_interval = 1.0 if elapsed < 30 else 2.0
+                    
+                    try:
+                        receipt = self.web3.eth.get_transaction_receipt(tx_hash)
+                        if receipt is not None:
+                            logger.info(f"✅ Transaction receipt received! Status: {receipt.status} (after {elapsed:.1f}s)")
+                            break
+                    except Exception:
+                        # Receipt not available yet, continue polling
+                        pass
+                    
+                    # Log progress more frequently initially
+                    if elapsed < 30:
+                        if int(elapsed) % 5 == 0:  # Every 5 seconds for first 30s
+                            logger.info(f"⏳ Still waiting for receipt... ({int(elapsed)}s elapsed)")
+                    elif int(elapsed) % 15 == 0:  # Every 15 seconds after 30s
+                        logger.info(f"⏳ Still waiting for receipt... ({int(elapsed)}s elapsed)")
+                    
+                    time.sleep(poll_interval)
+                
+                # If we still don't have a receipt, try wait_for_transaction_receipt as fallback
+                if receipt is None:
+                    logger.warning(f"⚠️ Manual polling didn't find receipt, trying wait_for_transaction_receipt...")
+                    try:
+                        receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+                        logger.info(f"✅ Transaction receipt received via wait_for_transaction_receipt! Status: {receipt.status}")
+                    except Exception as wait_error:
+                        logger.warning(f"⚠️ wait_for_transaction_receipt also failed: {wait_error}")
+                        
+            except Exception as receipt_error:
+                logger.warning(f"⚠️ Error waiting for transaction receipt: {receipt_error}")
+                logger.info(f"⚠️ Attempting to check transaction status directly...")
+            
+            # Final attempt to get receipt directly
+            if receipt is None:
+                try:
+                    receipt = self.web3.eth.get_transaction_receipt(tx_hash)
+                    logger.info(f"✅ Retrieved receipt directly! Status: {receipt.status}")
+                except Exception as get_error:
+                    logger.error(f"❌ Could not retrieve receipt: {get_error}")
+                    # Check if transaction is pending
+                    try:
+                        tx = self.web3.eth.get_transaction(tx_hash)
+                        if tx is None:
+                            logger.error(f"❌ Transaction not found in mempool or blockchain")
+                        else:
+                            block_num = tx.get('blockNumber')
+                            if block_num:
+                                logger.warning(f"⚠️ Transaction found in block {block_num} but receipt not available yet")
+                            else:
+                                logger.warning(f"⚠️ Transaction found but still pending in mempool")
+                    except Exception as tx_error:
+                        logger.error(f"❌ Could not check transaction status: {tx_error}")
+                    logger.error(f"❌ Split transaction may have failed or is still pending")
+                    logger.info(f"💡 Check transaction status manually: https://polygonscan.com/tx/{tx_hash.hex()}")
+                    return None
+            
+            if receipt is None:
+                logger.error(f"❌ No receipt available for transaction {tx_hash.hex()}")
+                return None
             
             if receipt.status == 1:
-                logger.info(f"✅ Split position successful! Transaction: {tx_hash.hex()}")
+                logger.info(f"✅✅✅ Split position successful! ✅✅✅")
+                logger.info(f"   Transaction: {tx_hash.hex()}")
                 logger.info(f"   Split ${amount_usdc:.2f} USDC → {amount_usdc:.2f} YES + {amount_usdc:.2f} NO shares")
+                logger.info(f"   Block: {receipt.blockNumber}, Gas used: {receipt.gasUsed}")
                 return {
                     "transaction_hash": tx_hash.hex(),
                     "receipt": receipt,
@@ -1026,11 +1744,147 @@ class Polymarket:
                     "shares_per_side": amount_usdc
                 }
             else:
-                logger.error(f"❌ Split position failed! Transaction: {tx_hash.hex()}")
+                logger.error(f"❌❌❌ Split position failed! ❌❌❌")
+                logger.error(f"   Transaction: {tx_hash.hex()}")
+                logger.error(f"   Receipt status: {receipt.status} (0 = failed, 1 = success)")
+                logger.error(f"   Check transaction: https://polygonscan.com/tx/{tx_hash.hex()}")
                 return None
                 
         except Exception as e:
-            logger.error(f"❌ Error splitting position: {e}", exc_info=True)
+            logger.error(f"❌❌❌ Error splitting position: {e}", exc_info=True)
+            logger.error(f"   Full exception details logged above")
+            return None
+    
+    def merge_positions(
+        self,
+        condition_id: str,
+        amount_usdc: float
+    ) -> Optional[Dict]:
+        """
+        Merge equal amounts of YES + NO shares back into USDC using CTF contract's mergePositions function.
+        
+        This atomically converts X YES + X NO shares back into $X USDC in one transaction.
+        Requires equal amounts of YES and NO shares.
+        
+        Args:
+            condition_id: Condition ID (bytes32) from market data (market.conditionId)
+            amount_usdc: Amount of shares to merge (will convert X YES + X NO → $X USDC)
+            
+        Returns:
+            Transaction receipt dict, or None if error
+        """
+        try:
+            wallet_address = self.get_address_for_private_key()
+            logger.info(
+                f"🔧 Merging positions: wallet={wallet_address[:10]}...{wallet_address[-8:]}, "
+                f"amount=${amount_usdc:.2f} (will merge {amount_usdc:.2f} YES + {amount_usdc:.2f} NO → ${amount_usdc:.2f} USDC), "
+                f"condition_id={condition_id[:20]}..."
+            )
+            
+            # Convert condition_id to bytes32 (same logic as split_position)
+            if isinstance(condition_id, str):
+                condition_id_str = condition_id.strip()
+                if condition_id_str.startswith('0x'):
+                    hex_str = condition_id_str[2:]
+                    hex_str = hex_str.zfill(64)
+                    condition_id_bytes32 = bytes.fromhex(hex_str)
+                elif all(c in '0123456789abcdefABCDEF' for c in condition_id_str):
+                    hex_str = condition_id_str.zfill(64)
+                    condition_id_bytes32 = bytes.fromhex(hex_str)
+                else:
+                    condition_id_int = int(condition_id_str)
+                    condition_id_bytes32 = condition_id_int.to_bytes(32, byteorder='big')
+            else:
+                condition_id_int = int(condition_id)
+                condition_id_bytes32 = condition_id_int.to_bytes(32, byteorder='big')
+            
+            # Ensure it's exactly 32 bytes
+            if len(condition_id_bytes32) < 32:
+                condition_id_bytes32 = condition_id_bytes32.rjust(32, b'\x00')
+            elif len(condition_id_bytes32) > 32:
+                condition_id_bytes32 = condition_id_bytes32[-32:]
+            
+            # Convert amount to 6 decimals (USDC uses 6 decimals)
+            amount_raw = int(amount_usdc * 1e6)
+            
+            # Build mergePositions transaction
+            # Parameters same as splitPosition:
+            # - collateralToken: USDC address
+            # - parentCollectionId: bytes32(0) for Polymarket
+            # - conditionId: bytes32 condition ID
+            # - partition: [1, 2] for binary YES/NO markets
+            # - amount: amount in USDC (6 decimals)
+            
+            parent_collection_id = b'\x00' * 32  # bytes32(0) for Polymarket
+            partition = [1, 2]  # Binary market: YES (1) and NO (2)
+            
+            logger.info(
+                f"Merging {amount_usdc:.2f} YES + {amount_usdc:.2f} NO shares back to ${amount_usdc:.2f} USDC "
+                f"(condition_id: {condition_id[:20]}...)"
+            )
+            
+            # Build transaction
+            nonce = self.web3.eth.get_transaction_count(wallet_address)
+            
+            merge_txn = self.ctf.functions.mergePositions(
+                self.usdc_address,
+                parent_collection_id,
+                condition_id_bytes32,
+                partition,
+                amount_raw
+            ).build_transaction({
+                "chainId": self.chain_id,
+                "from": wallet_address,
+                "nonce": nonce,
+                "gas": 500000,  # Reasonable gas limit for mergePositions
+                "gasPrice": self.web3.eth.gas_price
+            })
+            
+            # Sign transaction
+            signed_txn = self.web3.eth.account.sign_transaction(
+                merge_txn, private_key=self.private_key
+            )
+            
+            # Send transaction
+            logger.info("Sending mergePositions transaction...")
+            raw_tx = getattr(signed_txn, 'raw_transaction', None) or getattr(signed_txn, 'rawTransaction', None)
+            if not raw_tx:
+                raise ValueError("Could not extract raw transaction from signed transaction")
+            tx_hash = self.web3.eth.send_raw_transaction(raw_tx)
+            logger.info(f"Transaction sent: {tx_hash.hex()}")
+            
+            # Wait for receipt
+            logger.info(f"Waiting for transaction receipt (timeout: 300s)...")
+            logger.info(f"Transaction hash: {tx_hash.hex()}")
+            logger.info(f"Polygonscan: https://polygonscan.com/tx/{tx_hash.hex()}")
+            
+            try:
+                receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+            except Exception as e:
+                logger.warning(f"Timeout waiting for receipt, trying direct fetch: {e}")
+                receipt = self.web3.eth.get_transaction_receipt(tx_hash)
+            
+            if receipt.status == 1:
+                logger.info(f"✅✅✅ Merge positions successful! ✅✅✅")
+                logger.info(f"   Transaction: {tx_hash.hex()}")
+                logger.info(f"   Merged {amount_usdc:.2f} YES + {amount_usdc:.2f} NO → ${amount_usdc:.2f} USDC")
+                logger.info(f"   Block: {receipt.blockNumber}, Gas used: {receipt.gasUsed}")
+                return {
+                    "transaction_hash": tx_hash.hex(),
+                    "receipt": receipt,
+                    "status": "success",
+                    "amount_usdc": amount_usdc
+                }
+            else:
+                logger.error(f"❌❌❌ Merge positions failed! ❌❌❌")
+                logger.error(f"   Transaction: {tx_hash.hex()}")
+                logger.error(f"   Receipt status: {receipt.status} (0 = failed, 1 = success)")
+                logger.error(f"   Check transaction: https://polygonscan.com/tx/{tx_hash.hex()}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌❌❌ Error merging positions: {e}", exc_info=True)
+            logger.error(f"   Full exception details logged above")
             return None
     
     def get_notifications(self) -> Optional[List[Dict]]:
