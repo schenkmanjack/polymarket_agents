@@ -179,6 +179,85 @@ class GammaMarketClient:
         print(url)
         response = httpx.get(url)
         return response.json()
+    
+    def get_live_sports_markets(
+        self,
+        topics: list = None,
+        min_liquidity: float = 0.0,
+        max_liquidity: float = None,
+        limit: int = 100,
+        parse_pydantic: bool = False,
+        max_hours_ahead: float = 6.0
+    ) -> list:
+        """
+        Get live sports markets filtered by liquidity and time.
+        
+        This method accesses markets similar to what appears in Polymarket's
+        "live tab" for sports, with liquidity and time filtering applied at the API level.
+        
+        Args:
+            topics: List of sports topics (e.g., ["nfl", "nba", "nhl", "soccer"])
+                   If None, queries all sports markets
+            min_liquidity: Minimum liquidity threshold (default: 0.0)
+            max_liquidity: Maximum liquidity threshold (optional)
+            limit: Maximum number of markets to return per topic
+            parse_pydantic: Whether to parse results as Pydantic models
+            max_hours_ahead: Maximum hours ahead to consider "live" (default: 6.0)
+            
+        Returns:
+            List of market dictionaries (or Market objects if parse_pydantic=True)
+        """
+        from datetime import datetime, timezone, timedelta
+        
+        if topics is None:
+            topics = ["nfl", "nba", "nhl", "soccer", "sports", "esports"]
+        
+        all_markets = []
+        seen_ids = set()
+        
+        # Filter for markets ending within max_hours_ahead
+        now_utc = datetime.now(timezone.utc)
+        max_end_time = now_utc + timedelta(hours=max_hours_ahead)
+        end_date_min = now_utc.isoformat()
+        end_date_max = max_end_time.isoformat()
+        
+        for topic in topics:
+            params = {
+                "topic": topic,
+                "active": True,
+                "closed": False,
+                "archived": False,
+                "limit": limit,
+                "enableOrderBook": True,  # Only markets with orderbooks
+                "end_date_min": end_date_min,  # Markets ending after now
+                "end_date_max": end_date_max,  # Markets ending within max_hours_ahead
+            }
+            
+            # Add liquidity filtering if specified
+            if min_liquidity > 0.0:
+                params["liquidity_num_min"] = min_liquidity
+            
+            if max_liquidity is not None and max_liquidity > 0.0:
+                params["liquidity_num_max"] = max_liquidity
+            
+            try:
+                markets = self.get_markets(
+                    querystring_params=params,
+                    parse_pydantic=parse_pydantic
+                )
+                
+                # Deduplicate markets (same market might appear in multiple topics)
+                for market in markets:
+                    market_id = market.get("id") if isinstance(market, dict) else market.id
+                    if market_id and market_id not in seen_ids:
+                        seen_ids.add(market_id)
+                        all_markets.append(market)
+            except Exception as e:
+                # Log but continue with other topics
+                print(f"Error fetching {topic} markets: {e}")
+                continue
+        
+        return all_markets
 
 
 if __name__ == "__main__":

@@ -1639,14 +1639,72 @@ class MarketMaker:
             
             # Calculate sell prices
             # Strategy: Sell at midpoint + offset, but ensure we're competitive
-            base_sell_price = midpoint + self.config.offset_above_midpoint
+            # For binary markets: YES + NO should always = 1.0
+            # So we calculate YES price, then NO price = 1 - YES_price
+            base_yes_sell_price = midpoint + self.config.offset_above_midpoint
             
-            # If best bid exists and our price is above it, consider matching best bid for immediate fill
-            # But for market making, we want to sell above market, so we'll use the calculated price
-            sell_price = base_sell_price
+            # Cap YES at 0.99 (max sell price)
+            yes_sell_price = min(base_yes_sell_price, 0.99)
             
-            # Cap at 0.99 (max sell price)
-            sell_price = min(sell_price, 0.99)
+            # Calculate NO price to ensure YES + NO > 1.0 (for profit after fees)
+            # Market midpoints sum to 1.0, but our sell prices should be above midpoints
+            # So YES_sell + NO_sell = YES_mid + NO_mid + 2*offset = 1.0 + 2*offset > 1.0
+            # Fetch NO orderbook to get NO midpoint for proper calculation
+            no_orderbook = fetch_orderbook(position.no_token_id)
+            if no_orderbook:
+                no_midpoint = calculate_midpoint(
+                    no_orderbook,
+                    weighted=self.config.use_weighted_midpoint,
+                    depth_levels=self.config.midpoint_depth_levels
+                )
+                if no_midpoint is not None:
+                    # Calculate NO price from NO midpoint + offset
+                    base_no_sell_price = no_midpoint + self.config.offset_above_midpoint
+                    no_sell_price = min(base_no_sell_price, 0.99)
+                    
+                    # Verify YES + NO > 1.0 (should be ~1.0 + 2*offset)
+                    price_sum = yes_sell_price + no_sell_price
+                    expected_sum = 1.0 + (2 * self.config.offset_above_midpoint)
+                    
+                    if price_sum < 1.0:
+                        # This shouldn't happen, but if it does, adjust to ensure profit
+                        logger.warning(
+                            f"   ⚠️ Price sum ({price_sum:.4f}) < 1.0 - adjusting NO to ensure profit"
+                        )
+                        # Set NO to ensure YES + NO > 1.0 (with small margin)
+                        no_sell_price = max(0.01, min(0.99, 1.01 - yes_sell_price))
+                        price_sum = yes_sell_price + no_sell_price
+                        logger.info(f"   Adjusted NO price to {no_sell_price:.4f}, new sum: {price_sum:.4f}")
+                    elif price_sum < expected_sum - 0.01:
+                        logger.info(
+                            f"   Price sum ({price_sum:.4f}) is lower than expected ({expected_sum:.4f}), "
+                            f"but still > 1.0 - acceptable"
+                        )
+                    else:
+                        logger.info(
+                            f"   ✓ Price sum ({price_sum:.4f}) > 1.0, expected ~{expected_sum:.4f} "
+                            f"(1.0 + 2*offset={2*self.config.offset_above_midpoint:.4f})"
+                        )
+                else:
+                    # Fallback: calculate NO to ensure YES + NO > 1.0
+                    # Use midpoint relationship: if YES_mid = X, then NO_mid = 1-X
+                    # YES_sell = X + offset, so NO_sell should be (1-X) + offset = 1 - X + offset
+                    # But we know YES_sell, so NO_sell = 1 - YES_mid + offset
+                    # Since YES_sell = YES_mid + offset, YES_mid = YES_sell - offset
+                    # So NO_sell = 1 - (YES_sell - offset) + offset = 1 - YES_sell + 2*offset
+                    no_sell_price = max(0.01, min(0.99, 1.0 - yes_sell_price + (2 * self.config.offset_above_midpoint)))
+                    logger.info(
+                        f"   Could not calculate NO midpoint, using NO = 1 - YES + 2*offset = {no_sell_price:.4f}"
+                    )
+            else:
+                # Fallback: calculate NO to ensure YES + NO > 1.0
+                no_sell_price = max(0.01, min(0.99, 1.0 - yes_sell_price + (2 * self.config.offset_above_midpoint)))
+                logger.info(
+                    f"   Could not fetch NO orderbook, using NO = 1 - YES + 2*offset = {no_sell_price:.4f}"
+                )
+            
+            # Use YES price for YES order, NO price for NO order
+            sell_price = yes_sell_price  # Keep for backward compatibility in logging
             
             # Warn if price is uncompetitive
             if best_bid and sell_price > best_bid + 0.01:  # More than 1% above best bid
@@ -1660,8 +1718,10 @@ class MarketMaker:
             logger.info(f"📊 MARKET ANALYSIS for {position.market_slug}:")
             logger.info(f"   Best BID (highest buyer): ${best_bid:.4f}" if best_bid else "   Best BID: None")
             logger.info(f"   Best ASK (lowest seller): ${best_ask:.4f}" if best_ask else "   Best ASK: None")
-            logger.info(f"   {midpoint_type.upper()} Midpoint: ${midpoint:.4f}")
-            logger.info(f"   Our SELL price: ${sell_price:.4f} (midpoint + {self.config.offset_above_midpoint:.4f})")
+            logger.info(f"   {midpoint_type.upper()} Midpoint (YES): ${midpoint:.4f}")
+            logger.info(f"   Our YES SELL price: ${yes_sell_price:.4f} (midpoint + {self.config.offset_above_midpoint:.4f})")
+            logger.info(f"   Our NO SELL price: ${no_sell_price:.4f}")
+            logger.info(f"   Price sum (YES + NO): ${yes_sell_price + no_sell_price:.4f}")
             
             # Check if our price is competitive
             if best_ask is not None:
@@ -1696,13 +1756,13 @@ class MarketMaker:
             
             orders_to_place = [
                 {
-                    "price": sell_price,
+                    "price": yes_sell_price,
                     "size": position.yes_shares,
                     "side": "SELL",
                     "token_id": position.yes_token_id,
                 },
                 {
-                    "price": sell_price,
+                    "price": no_sell_price,
                     "size": position.no_shares,
                     "side": "SELL",
                     "token_id": position.no_token_id,
@@ -1727,8 +1787,8 @@ class MarketMaker:
                         
                         if yes_order_id:
                             position.yes_order_id = yes_order_id
-                            position.yes_order_price = sell_price
-                            logger.info(f"✅ Placed YES sell order: {yes_order_id}")
+                            position.yes_order_price = yes_sell_price
+                            logger.info(f"✅ Placed YES sell order: {yes_order_id} @ ${yes_sell_price:.4f}")
                             
                             # Verify order status immediately
                             await asyncio.sleep(1.0)  # Brief wait for order to propagate
@@ -1742,8 +1802,8 @@ class MarketMaker:
                         
                         if no_order_id:
                             position.no_order_id = no_order_id
-                            position.no_order_price = sell_price
-                            logger.info(f"✅ Placed NO sell order: {no_order_id}")
+                            position.no_order_price = no_sell_price
+                            logger.info(f"✅ Placed NO sell order: {no_order_id} @ ${no_sell_price:.4f}")
                             
                             # Verify order status immediately
                             await asyncio.sleep(1.0)  # Brief wait for order to propagate
@@ -2391,15 +2451,90 @@ class MarketMaker:
             logger.error(f"Error checking resplit ready: {e}", exc_info=True)
     
     async def _adjust_both_prices(self, position: MarketMakerPosition):
-        """Cancel both orders and place new ones at lower prices (both reduced by price_step) using batch operations."""
+        """Cancel both orders and recalculate prices from current orderbook midpoint."""
         try:
             if not position.yes_order_id or not position.no_order_id:
                 logger.warning(f"Cannot adjust both prices: missing order IDs for {position.market_slug}")
                 return
             
-            # Calculate new prices (both reduced by price_step)
-            new_yes_price = max(0.01, (position.yes_order_price or 0.0) - self.config.price_step)
-            new_no_price = max(0.01, (position.no_order_price or 0.0) - self.config.price_step)
+            # Recalculate midpoint from current orderbook (market may have moved)
+            logger.info(f"📊 Recalculating midpoint from current orderbook for {position.market_slug}...")
+            yes_orderbook = fetch_orderbook(position.yes_token_id)
+            
+            if not yes_orderbook:
+                logger.warning(f"⚠️ Could not fetch orderbook - falling back to price_step reduction")
+                # Fallback: reduce by price_step if orderbook unavailable
+                new_yes_price = max(0.01, (position.yes_order_price or 0.0) - self.config.price_step)
+                new_no_price = max(0.01, (position.no_order_price or 0.0) - self.config.price_step)
+            else:
+                # Calculate current midpoint (weighted or simple)
+                midpoint = calculate_midpoint(
+                    yes_orderbook,
+                    weighted=self.config.use_weighted_midpoint,
+                    depth_levels=self.config.midpoint_depth_levels
+                )
+                
+                if midpoint is None:
+                    logger.warning(f"⚠️ Could not calculate midpoint - falling back to price_step reduction")
+                    # Fallback: reduce by price_step
+                    new_yes_price = max(0.01, (position.yes_order_price or 0.0) - self.config.price_step)
+                    new_no_price = max(0.01, (position.no_order_price or 0.0) - self.config.price_step)
+                else:
+                    # Calculate new YES price based on current midpoint + offset
+                    # But ensure we're lower than current price (to be more competitive)
+                    base_yes_sell_price = midpoint + self.config.offset_above_midpoint
+                    current_yes_price = position.yes_order_price or 0.0
+                    
+                    # Use the lower of: (midpoint + offset) or (current - price_step)
+                    new_yes_price = min(base_yes_sell_price, max(0.01, current_yes_price - self.config.price_step))
+                    new_yes_price = min(new_yes_price, 0.99)
+                    
+                    # Calculate NO price to maintain YES + NO = 1.0
+                    # Fetch NO orderbook for proper calculation
+                    no_orderbook = fetch_orderbook(position.no_token_id)
+                    if no_orderbook:
+                        no_midpoint = calculate_midpoint(
+                            no_orderbook,
+                            weighted=self.config.use_weighted_midpoint,
+                            depth_levels=self.config.midpoint_depth_levels
+                        )
+                        if no_midpoint is not None:
+                            base_no_sell_price = no_midpoint + self.config.offset_above_midpoint
+                            current_no_price = position.no_order_price or 0.0
+                            new_no_price_candidate = min(base_no_sell_price, max(0.01, current_no_price - self.config.price_step))
+                            new_no_price_candidate = min(new_no_price_candidate, 0.99)
+                            
+                            # Ensure YES + NO > 1.0 (for profit after fees)
+                            price_sum = new_yes_price + new_no_price_candidate
+                            expected_sum = 1.0 + (2 * self.config.offset_above_midpoint)
+                            
+                            if price_sum < 1.0:
+                                # Adjust NO to ensure YES + NO > 1.0 (with small margin)
+                                new_no_price = max(0.01, min(0.99, 1.01 - new_yes_price))
+                                logger.info(
+                                    f"   ⚠️ Price sum ({price_sum:.4f}) < 1.0. "
+                                    f"Adjusting NO to ensure profit: NO = {new_no_price:.4f}, new sum = {new_yes_price + new_no_price:.4f}"
+                                )
+                            elif price_sum < expected_sum - 0.01:
+                                # Sum is acceptable but lower than ideal
+                                new_no_price = new_no_price_candidate
+                                logger.info(
+                                    f"   Price sum ({price_sum:.4f}) is acceptable (expected ~{expected_sum:.4f})"
+                                )
+                            else:
+                                new_no_price = new_no_price_candidate
+                        else:
+                            # Fallback: calculate NO from YES to maintain sum = 1.0
+                            new_no_price = max(0.01, min(0.99, 1.0 - new_yes_price))
+                    else:
+                        # Fallback: calculate NO from YES to maintain sum = 1.0
+                        new_no_price = max(0.01, min(0.99, 1.0 - new_yes_price))
+                    
+                    logger.info(
+                        f"📊 Market midpoint (YES): ${midpoint:.4f}, "
+                        f"base_yes_sell_price (midpoint + offset): ${base_yes_sell_price:.4f}, "
+                        f"price sum (YES + NO): ${new_yes_price + new_no_price:.4f}"
+                    )
             
             logger.info(
                 f"Adjusting both prices for {position.market_slug}: "
@@ -2571,15 +2706,15 @@ class MarketMaker:
             logger.error(f"Error adjusting both prices: {e}", exc_info=True)
     
     async def _merge_and_wait_resplit(self, position: MarketMakerPosition):
-        """Cancel both orders and set merged state to wait for re-split using batch cancel."""
+        """Cancel both orders, merge shares back to USDC, then wait for re-split."""
         try:
             if not position.yes_order_id or not position.no_order_id:
                 logger.warning(f"Cannot merge: missing order IDs for {position.market_slug}")
                 return
             
-            logger.info(f"Merging orders for {position.market_slug} (batch cancelling both orders)")
+            logger.info(f"Merging positions for {position.market_slug} (cancelling orders first, then merging shares)")
             
-            # Batch cancel both orders
+            # Step 1: Cancel both orders (required before merging shares)
             loop = asyncio.get_event_loop()
             cancel_result = await loop.run_in_executor(
                 None,
@@ -2591,7 +2726,68 @@ class MarketMaker:
                 logger.info(f"✅ Batch cancelled both orders for {position.market_slug}")
             else:
                 logger.error(f"❌ Batch cancel failed during merge for {position.market_slug} - cancel_result is None or empty")
-                logger.warning(f"⚠️ Orders may still be active - merge state may be inconsistent")
+                logger.warning(f"⚠️ Orders may still be active - cannot merge shares until orders are cancelled")
+                return  # Cannot proceed without cancelling orders
+            
+            # Step 2: Wait a moment for orders to be confirmed cancelled
+            logger.info("⏳ Waiting 3 seconds for order cancellations to be confirmed...")
+            await asyncio.sleep(3.0)
+            
+            # Step 3: Verify orders are cancelled before merging
+            yes_status = self.pm.get_order_status(position.yes_order_id) if position.yes_order_id else None
+            no_status = self.pm.get_order_status(position.no_order_id) if position.no_order_id else None
+            
+            yes_cancelled = False
+            no_cancelled = False
+            
+            if yes_status:
+                yes_status_str, _, _ = parse_order_status(yes_status)
+                yes_cancelled = is_order_cancelled(yes_status_str)
+            
+            if no_status:
+                no_status_str, _, _ = parse_order_status(no_status)
+                no_cancelled = is_order_cancelled(no_status_str)
+            
+            if not yes_cancelled or not no_cancelled:
+                logger.warning(
+                    f"⚠️ Orders not fully cancelled yet (YES: {yes_cancelled}, NO: {no_cancelled}). "
+                    f"Waiting 2 more seconds..."
+                )
+                await asyncio.sleep(2.0)
+                # Re-check - if still not cancelled, proceed anyway (might be a status check issue)
+            
+            # Step 4: Merge shares back to USDC (requires orders to be cancelled)
+            # Calculate how much we can merge (minimum of YES and NO shares remaining)
+            yes_shares_remaining = position.yes_shares if not position.yes_filled else 0.0
+            no_shares_remaining = position.no_shares if not position.no_filled else 0.0
+            merge_amount = min(yes_shares_remaining, no_shares_remaining)
+            
+            if merge_amount > 0.01:  # Only merge if we have meaningful amounts
+                logger.info(
+                    f"🔄 Merging {merge_amount:.2f} YES + {merge_amount:.2f} NO shares back to ${merge_amount:.2f} USDC..."
+                )
+                
+                merge_result = await loop.run_in_executor(
+                    None,
+                    self.pm.merge_positions,
+                    position.condition_id,
+                    merge_amount
+                )
+                
+                if merge_result:
+                    logger.info(
+                        f"✅✅✅ Successfully merged {merge_amount:.2f} YES + NO → ${merge_amount:.2f} USDC ✅✅✅"
+                    )
+                    logger.info(f"   Transaction: {merge_result.get('transaction_hash', 'N/A')}")
+                    
+                    # Update shares remaining
+                    position.yes_shares -= merge_amount
+                    position.no_shares -= merge_amount
+                else:
+                    logger.error(f"❌ Failed to merge positions - shares may still be locked in orders")
+                    # Continue anyway - will try to re-split with remaining shares
+            else:
+                logger.info(f"⚠️ Insufficient shares to merge (YES: {yes_shares_remaining:.2f}, NO: {no_shares_remaining:.2f})")
             
             # Clear order IDs and prices
             position.yes_order_id = None
@@ -2604,7 +2800,7 @@ class MarketMaker:
             position.merged_at = datetime.now(timezone.utc)
             
             logger.info(
-                f"✅ Merged orders for {position.market_slug}. "
+                f"✅ Merge complete for {position.market_slug}. "
                 f"Will re-split after {self.config.wait_before_resplit:.1f} seconds."
             )
             
@@ -2612,7 +2808,7 @@ class MarketMaker:
             self._update_position_in_db(position)
             
         except Exception as e:
-            logger.error(f"Error merging orders: {e}", exc_info=True)
+            logger.error(f"Error merging positions: {e}", exc_info=True)
     
     async def _adjust_unfilled_side(self, position: MarketMakerPosition, side: str):
         """Cancel unfilled order and place new order at lower price."""
