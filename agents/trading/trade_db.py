@@ -407,14 +407,18 @@ class TradeDatabase:
             existing_columns = [col['name'] for col in inspector.get_columns(table_name)]
             columns_to_add = []
             
-            # Check which fill timing columns are missing
-            fill_timing_columns = {
+            # Check which columns are missing (fill timing + adjustment tracking)
+            missing_columns = {
                 'time_between_fills_seconds': 'FLOAT',
                 'first_fill_side': 'VARCHAR',
                 'second_fill_side': 'VARCHAR',
+                'yes_adjustment_count': 'INTEGER',
+                'no_adjustment_count': 'INTEGER',
+                'max_adjustments': 'INTEGER',
+                'adjustment_count': 'INTEGER',  # Legacy field
             }
             
-            for col_name, col_type in fill_timing_columns.items():
+            for col_name, col_type in missing_columns.items():
                 if col_name not in existing_columns:
                     columns_to_add.append((col_name, col_type))
             
@@ -433,24 +437,44 @@ class TradeDatabase:
                                     sql_type = 'VARCHAR'
                                 elif col_type == 'FLOAT':
                                     sql_type = 'DOUBLE PRECISION'
+                                elif col_type == 'INTEGER':
+                                    sql_type = 'INTEGER'
                                 elif col_type == 'TIMESTAMP':
                                     sql_type = 'TIMESTAMP'
                                 else:
                                     sql_type = 'VARCHAR'
                                 
-                                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {sql_type}"))
+                                # Add default value for INTEGER columns
+                                if col_type == 'INTEGER':
+                                    if col_name in ['yes_adjustment_count', 'no_adjustment_count', 'max_adjustments']:
+                                        default_value = '0' if col_name != 'max_adjustments' else '10'
+                                        conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {sql_type} DEFAULT {default_value} NOT NULL"))
+                                    else:
+                                        conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {sql_type}"))
+                                else:
+                                    conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {sql_type}"))
                             else:
                                 # SQLite
                                 if col_type == 'VARCHAR':
                                     sql_type = 'TEXT'
                                 elif col_type == 'FLOAT':
                                     sql_type = 'REAL'
+                                elif col_type == 'INTEGER':
+                                    sql_type = 'INTEGER'
                                 elif col_type == 'TIMESTAMP':
                                     sql_type = 'TIMESTAMP'
                                 else:
                                     sql_type = 'TEXT'
                                 
-                                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {sql_type}"))
+                                # Add default value for INTEGER columns
+                                if col_type == 'INTEGER':
+                                    if col_name in ['yes_adjustment_count', 'no_adjustment_count', 'max_adjustments']:
+                                        default_value = '0' if col_name != 'max_adjustments' else '10'
+                                        conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {sql_type} DEFAULT {default_value} NOT NULL"))
+                                    else:
+                                        conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {sql_type}"))
+                                else:
+                                    conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {sql_type}"))
                             
                             logger.info(f"  ✓ Added column {col_name}")
                         except Exception as e:
