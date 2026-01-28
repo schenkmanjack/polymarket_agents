@@ -2156,9 +2156,13 @@ class MarketMaker:
                         # Extract fill price if available (YES is a sell order)
                         yes_fill_price = self._extract_fill_price(yes_status, position.yes_order_price, is_sell_order=True)
                         
+                        # Log best bid when order fills
+                        yes_orderbook = fetch_orderbook(position.yes_token_id)
+                        yes_best_bid = get_highest_bid(yes_orderbook) if yes_orderbook else None
                         logger.info(
                             f"✅ YES order filled for {market_slug}: "
-                            f"{yes_filled_amount:.2f}/{yes_total_amount:.2f} shares @ ${yes_fill_price:.4f}"
+                            f"{yes_filled_amount:.2f}/{yes_total_amount:.2f} shares @ ${yes_fill_price:.4f} "
+                            f"(Best BID at fill: ${yes_best_bid:.4f})" if yes_best_bid else f"✅ YES order filled for {market_slug}: {yes_filled_amount:.2f}/{yes_total_amount:.2f} shares @ ${yes_fill_price:.4f} (Best BID at fill: None)"
                         )
                         
                         # Track which side filled first (if this is the first fill)
@@ -2193,9 +2197,13 @@ class MarketMaker:
                         # Extract fill price if available (NO is a sell order)
                         no_fill_price = self._extract_fill_price(no_status, position.no_order_price, is_sell_order=True)
                         
+                        # Log best bid when order fills
+                        no_orderbook = fetch_orderbook(position.no_token_id)
+                        no_best_bid = get_highest_bid(no_orderbook) if no_orderbook else None
                         logger.info(
                             f"✅ NO order filled for {market_slug}: "
-                            f"{no_filled_amount:.2f}/{no_total_amount:.2f} shares @ ${no_fill_price:.4f}"
+                            f"{no_filled_amount:.2f}/{no_total_amount:.2f} shares @ ${no_fill_price:.4f} "
+                            f"(Best BID at fill: ${no_best_bid:.4f})" if no_best_bid else f"✅ NO order filled for {market_slug}: {no_filled_amount:.2f}/{no_total_amount:.2f} shares @ ${no_fill_price:.4f} (Best BID at fill: None)"
                         )
                         
                         # Track which side filled first (if this is the first fill)
@@ -2316,12 +2324,29 @@ class MarketMaker:
                 
                 # Other side still didn't fill - adjust price
                 side_adjustment_count = position.yes_adjustment_count if unfilled_side == "YES" else position.no_adjustment_count
+                
+                # Log current best bids before adjusting
+                token_id = position.yes_token_id if unfilled_side == "YES" else position.no_token_id
+                orderbook = fetch_orderbook(token_id)
+                best_bid = get_highest_bid(orderbook) if orderbook else None
+                current_order_price = position.yes_order_price if unfilled_side == "YES" else position.no_order_price
+                
                 logger.info(
                     f"{unfilled_side} side did not fill after {time_since_reference:.1f}s "
                     f"(exponential wait={exponential_wait_time:.1f}s, base={self.config.wait_after_fill:.1f}s, "
-                    f"{unfilled_side.lower()}_adjustment_count={side_adjustment_count}, multiplier={backoff_multiplier:.2f}), "
-                    f"adjusting price by -{self.config.price_step:.4f}"
+                    f"{unfilled_side.lower()}_adjustment_count={side_adjustment_count}, multiplier={backoff_multiplier:.2f})"
                 )
+                logger.info(
+                    f"   📊 Current {unfilled_side} order price: ${current_order_price:.4f}, "
+                    f"Best BID: ${best_bid:.4f}" if best_bid else f"   📊 Current {unfilled_side} order price: ${current_order_price:.4f}, Best BID: None"
+                )
+                if best_bid and current_order_price:
+                    price_diff = current_order_price - best_bid
+                    logger.info(
+                        f"   📉 Price gap: ${price_diff:.4f} above best bid "
+                        f"({'⚠️ Too high - unlikely to fill' if price_diff > 0.01 else '✅ Competitive'})"
+                    )
+                logger.info(f"   Adjusting price by -{self.config.price_step:.4f}")
                 
                 await self._adjust_unfilled_side(position, unfilled_side)
             
@@ -2671,14 +2696,26 @@ class MarketMaker:
                         if yes_order_id:
                             position.yes_order_id = yes_order_id
                             position.yes_order_price = new_yes_price
-                            logger.info(f"✅ Placed adjusted YES sell order: {yes_order_id} @ ${new_yes_price:.4f}")
+                            # Log best bid after placing adjusted order
+                            yes_orderbook = fetch_orderbook(position.yes_token_id)
+                            yes_best_bid = get_highest_bid(yes_orderbook) if yes_orderbook else None
+                            logger.info(
+                                f"✅ Placed adjusted YES sell order: {yes_order_id} @ ${new_yes_price:.4f} "
+                                f"(Best BID: ${yes_best_bid:.4f})" if yes_best_bid else f"✅ Placed adjusted YES sell order: {yes_order_id} @ ${new_yes_price:.4f} (Best BID: None)"
+                            )
                         else:
                             logger.warning(f"⚠️ Could not extract YES order ID from batch response: {results[0]}")
                         
                         if no_order_id:
                             position.no_order_id = no_order_id
                             position.no_order_price = new_no_price
-                            logger.info(f"✅ Placed adjusted NO sell order: {no_order_id} @ ${new_no_price:.4f}")
+                            # Log best bid after placing adjusted order
+                            no_orderbook = fetch_orderbook(position.no_token_id)
+                            no_best_bid = get_highest_bid(no_orderbook) if no_orderbook else None
+                            logger.info(
+                                f"✅ Placed adjusted NO sell order: {no_order_id} @ ${new_no_price:.4f} "
+                                f"(Best BID: ${no_best_bid:.4f})" if no_best_bid else f"✅ Placed adjusted NO sell order: {no_order_id} @ ${new_no_price:.4f} (Best BID: None)"
+                            )
                         else:
                             logger.warning(f"⚠️ Could not extract NO order ID from batch response: {results[1]}")
                     else:
@@ -2938,11 +2975,40 @@ class MarketMaker:
                         logger.warning(f"⚠️ Could not verify cancel status after {max_verify_attempts} attempts - proceeding anyway")
                         break
             
-            # Calculate new price
-            new_price = current_price - self.config.price_step
+            # Recalculate midpoint from current orderbook and use midpoint + offset for new price
+            # This ensures we adjust based on current market conditions
+            orderbook = fetch_orderbook(token_id)
+            best_bid = get_highest_bid(orderbook) if orderbook else None
             
-            # Ensure price is valid (between 0.01 and 0.99)
-            new_price = max(0.01, min(new_price, 0.99))
+            if orderbook:
+                # Calculate current midpoint (weighted or simple)
+                midpoint = calculate_midpoint(
+                    orderbook,
+                    weighted=self.config.use_weighted_midpoint,
+                    depth_levels=self.config.midpoint_depth_levels
+                )
+                
+                if midpoint is not None:
+                    # Simply use midpoint + offset for new price
+                    # But ensure we don't raise the price (only lower it to be more competitive)
+                    new_price = midpoint + self.config.offset_above_midpoint
+                    new_price = min(new_price, current_price)  # Don't raise price, only lower
+                    new_price = max(0.01, min(new_price, 0.99))  # Ensure valid range
+                    
+                    logger.info(
+                        f"   📊 Market-based adjustment: midpoint=${midpoint:.4f}, "
+                        f"best_bid=${best_bid:.4f if best_bid else 'None'}, "
+                        f"midpoint+offset=${midpoint + self.config.offset_above_midpoint:.4f}, "
+                        f"new_price=${new_price:.4f} (capped at current=${current_price:.4f})"
+                    )
+                else:
+                    # Fallback: reduce by price_step if midpoint calculation fails
+                    new_price = max(0.01, current_price - self.config.price_step)
+                    logger.info(f"   ⚠️ Could not calculate midpoint - using fixed step reduction")
+            else:
+                # Fallback: reduce by price_step if orderbook unavailable
+                new_price = max(0.01, current_price - self.config.price_step)
+                logger.info(f"   ⚠️ Could not fetch orderbook - using fixed step reduction")
             
             # Check actual wallet balance before placing new order
             # Use direct wallet address (where shares are)
@@ -2990,8 +3056,20 @@ class MarketMaker:
                 )
                 return
             
+            # Get best bid before placing new order
+            orderbook = fetch_orderbook(token_id)
+            best_bid = get_highest_bid(orderbook) if orderbook else None
+            
             logger.info(f"Placing new {side} sell order at {new_price:.4f} (was {current_price:.4f})")
             logger.info(f"  Order size: {shares:.2f} shares (remaining balance: {actual_balance:.2f})")
+            if best_bid:
+                price_diff = new_price - best_bid
+                logger.info(
+                    f"  📊 New {side} order price: ${new_price:.4f}, Best BID: ${best_bid:.4f}, "
+                    f"Gap: ${price_diff:.4f} {'⚠️ Still above best bid' if price_diff > 0 else '✅ At or below best bid'}"
+                )
+            else:
+                logger.info(f"  📊 New {side} order price: ${new_price:.4f}, Best BID: None")
             
             # Place new order
             order_response = self.pm.execute_order(

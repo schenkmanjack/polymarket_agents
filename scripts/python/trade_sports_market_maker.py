@@ -39,6 +39,8 @@ logging.getLogger("agents").setLevel(logging.INFO)
 logging.getLogger("agents.polymarket").setLevel(logging.INFO)
 logging.getLogger("agents.polymarket.polymarket").setLevel(logging.INFO)
 logging.getLogger("agents.trading").setLevel(logging.INFO)
+# Suppress httpx INFO level HTTP request logs (too verbose)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 # Ensure logs go to stdout
 logging.getLogger().handlers[0].stream = sys.stdout
 # Force flush after each log
