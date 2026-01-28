@@ -29,120 +29,70 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def get_sports_markets(limit: int = 50, active_only: bool = True) -> List[Dict]:
+def get_sports_markets(limit: int = 50, active_only: bool = True, min_liquidity: float = 0.0) -> List[Dict]:
     """
-    Fetch live sports markets from Polymarket.
+    Fetch live sports markets from Polymarket with liquidity filtering.
+    
+    This accesses markets similar to what appears in Polymarket's "live tab" for sports,
+    with optional liquidity filtering applied at the API level.
     
     Args:
-        limit: Maximum number of markets to fetch
+        limit: Maximum number of markets to fetch per topic
         active_only: Only return active markets
+        min_liquidity: Minimum liquidity threshold (default: 0.0, no filter)
         
     Returns:
         List of market dictionaries
     """
     gamma = GammaMarketClient()
-    proxies = get_proxy_dict()
     
-    params = {
-        "active": active_only,
-        "closed": False,
-        "archived": False,
-        "limit": limit,
-        "enableOrderBook": True,  # Only markets with orderbooks (tradable)
-    }
-    
-    # Try filtering by topic/category - Polymarket API may support these
-    # Common topics: "sports", "nfl", "nba", "nhl", "crypto", "politics", etc.
-    # Note: These parameters may vary - checking what works
-    
-    print(f"🔍 Fetching sports markets with params: {params}")
-    
+    # Use the new helper method that filters by liquidity at API level
     try:
-        markets = gamma.get_markets(querystring_params=params, parse_pydantic=False)
-        print(f"✓ Retrieved {len(markets)} markets")
-        
-        # Filter for sports-related markets by checking tags, category, or question text
-        sports_markets = []
-        for market in markets:
-            # Check various fields that might indicate sports
-            question = market.get("question", "").lower()
-            description = market.get("description", "").lower()
-            tags = market.get("tags", [])
-            category = market.get("category", "").lower()
-            
-            # Keywords that suggest sports markets
-            sports_keywords = [
-                "nfl", "nba", "nhl", "mlb", "ncaa", "cbb", "cbb", "cfb",
-                "soccer", "football", "basketball", "hockey", "baseball",
-                "tennis", "golf", "ufc", "boxing", "cricket", "rugby",
-                "score", "points", "win", "lose", "game", "match", "playoff",
-                "championship", "super bowl", "world cup", "stanley cup"
-            ]
-            
-            is_sports = False
-            # Check if any sports keywords appear in question or description
-            for keyword in sports_keywords:
-                if keyword in question or keyword in description:
-                    is_sports = True
-                    break
-            
-            # Check tags
-            if tags:
-                tag_names = [tag.get("name", "").lower() if isinstance(tag, dict) else str(tag).lower() for tag in tags]
-                for tag_name in tag_names:
-                    if any(keyword in tag_name for keyword in sports_keywords):
-                        is_sports = True
-                        break
-            
-            # Check category
-            if "sport" in category:
-                is_sports = True
-            
-            if is_sports:
-                sports_markets.append(market)
-        
-        print(f"✓ Found {len(sports_markets)} sports-related markets")
-        return sports_markets
+        markets = gamma.get_live_sports_markets(
+            topics=["nfl", "nba", "nhl", "soccer", "sports"],
+            min_liquidity=min_liquidity,
+            limit=limit,
+            parse_pydantic=False
+        )
+        print(f"✓ Retrieved {len(markets)} live sports markets")
+        if min_liquidity > 0:
+            print(f"  (filtered by min liquidity: ${min_liquidity:,.2f})")
+        return markets
         
     except Exception as e:
         logger.error(f"Error fetching markets: {e}", exc_info=True)
         return []
 
 
-def get_markets_by_topic(topic: str, limit: int = 50) -> List[Dict]:
+def get_markets_by_topic(topic: str, limit: int = 50, min_liquidity: float = 0.0) -> List[Dict]:
     """
-    Try to fetch markets filtered by topic (if API supports it).
+    Fetch markets filtered by topic with optional liquidity filtering.
     
     Args:
-        topic: Topic name (e.g., "sports", "nfl", "nba")
+        topic: Topic name (e.g., "sports", "nfl", "nba", "nhl", "soccer")
         limit: Maximum number of markets
+        min_liquidity: Minimum liquidity threshold (default: 0.0, no filter)
         
     Returns:
         List of market dictionaries
     """
     gamma = GammaMarketClient()
-    proxies = get_proxy_dict()
     
-    # Try different parameter names that might work
-    param_variations = [
-        {"topic": topic, "active": True, "limit": limit, "enableOrderBook": True},
-        {"category": topic, "active": True, "limit": limit, "enableOrderBook": True},
-        {"tags": topic, "active": True, "limit": limit, "enableOrderBook": True},
-    ]
-    
-    for params in param_variations:
-        try:
-            print(f"🔍 Trying params: {params}")
-            markets = gamma.get_markets(querystring_params=params, parse_pydantic=False)
-            if markets:
-                print(f"✓ Found {len(markets)} markets with topic={topic}")
-                return markets
-        except Exception as e:
-            logger.debug(f"Params {params} didn't work: {e}")
-            continue
-    
-    print(f"⚠️ Could not filter by topic '{topic}' - API may not support this parameter")
-    return []
+    # Use the new helper method with liquidity filtering
+    try:
+        markets = gamma.get_live_sports_markets(
+            topics=[topic],
+            min_liquidity=min_liquidity,
+            limit=limit,
+            parse_pydantic=False
+        )
+        print(f"✓ Found {len(markets)} markets for topic '{topic}'")
+        if min_liquidity > 0:
+            print(f"  (filtered by min liquidity: ${min_liquidity:,.2f})")
+        return markets
+    except Exception as e:
+        logger.error(f"Error fetching {topic} markets: {e}", exc_info=True)
+        return []
 
 
 def get_all_live_markets(limit: int = 200) -> List[Dict]:
