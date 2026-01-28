@@ -175,6 +175,15 @@ class SportsMarketMaker(MarketMaker):
             except Exception as e:
                 logger.error(f"Failed to start WebSocket order status service: {e}", exc_info=True)
         
+        # Merge most recent positions to free up capital (one-time on startup)
+        # This checks the most recent N splits in the database and merges them if they have equal YES/NO shares
+        logger.info("Merging recent positions to free up USDC capital (past 20)...")
+        try:
+            await self._merge_resolved_positions_for_capital(limit=20)
+        except Exception as e:
+            logger.error(f"Error merging positions for capital: {e}", exc_info=True)
+        logger.info("")
+        
         # Resume monitoring existing positions (reuse parent logic)
         await self._resume_positions()
         
