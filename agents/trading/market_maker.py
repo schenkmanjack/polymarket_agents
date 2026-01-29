@@ -3069,10 +3069,12 @@ class MarketMaker:
                     new_price = min(new_price, current_price)  # Don't raise price, only lower
                     new_price = max(0.01, min(new_price, 0.99))  # Ensure valid range
                     
+                    best_bid_str = f"${best_bid:.4f}" if best_bid is not None else "None"
+                    midpoint_offset = midpoint + self.config.offset_above_midpoint
                     logger.info(
                         f"   📊 Market-based adjustment: midpoint=${midpoint:.4f}, "
-                        f"best_bid=${best_bid:.4f if best_bid else 'None'}, "
-                        f"midpoint+offset=${midpoint + self.config.offset_above_midpoint:.4f}, "
+                        f"best_bid={best_bid_str}, "
+                        f"midpoint+offset=${midpoint_offset:.4f}, "
                         f"new_price=${new_price:.4f} (capped at current=${current_price:.4f})"
                     )
                 else:
