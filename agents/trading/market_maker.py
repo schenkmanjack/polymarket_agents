@@ -2444,43 +2444,43 @@ class MarketMaker:
             
             # Check if exponential wait time has passed
             if time_since_reference >= exponential_wait_time:
-            # Check current prices
-            yes_price = position.yes_order_price or 0.0
-            no_price = position.no_order_price or 0.0
-            price_sum = yes_price + no_price
-            
-            logger.info(
-                f"🔍 Neither fills check for {position.market_slug}: "
-                f"YES price={yes_price:.4f}, NO price={no_price:.4f}, "
-                f"sum={price_sum:.4f}, threshold={self.config.merge_threshold:.4f}"
-            )
-            
-            # Check if orders were never placed (both prices are 0)
-            if yes_price == 0.0 and no_price == 0.0:
-                logger.warning(
-                    f"⚠️ Both order prices are 0.0 for {position.market_slug} - orders were never placed or were cancelled. "
-                    f"Closing position."
-                )
-                await self._close_position(position, reason="orders_not_placed")
-                return
-            
-            # Check if we should merge (price sum <= threshold)
-            if price_sum <= self.config.merge_threshold:
-                # Only merge if we have order IDs (orders exist to cancel)
-                if not position.yes_order_id or not position.no_order_id:
-                    logger.warning(
-                        f"⚠️ Cannot merge {position.market_slug}: missing order IDs "
-                        f"(YES: {position.yes_order_id is not None}, NO: {position.no_order_id is not None}). "
-                        f"Orders may have been cancelled or never placed. Closing position."
-                    )
-                    await self._close_position(position, reason="missing_order_ids")
-                    return
+                # Check current prices
+                yes_price = position.yes_order_price or 0.0
+                no_price = position.no_order_price or 0.0
+                price_sum = yes_price + no_price
                 
                 logger.info(
-                    f"Price sum ({price_sum:.4f}) <= merge_threshold ({self.config.merge_threshold:.4f}) "
-                    f"for {position.market_slug}. Merging orders and will re-split."
+                    f"🔍 Neither fills check for {position.market_slug}: "
+                    f"YES price={yes_price:.4f}, NO price={no_price:.4f}, "
+                    f"sum={price_sum:.4f}, threshold={self.config.merge_threshold:.4f}"
                 )
-                await self._merge_and_wait_resplit(position)
+                
+                # Check if orders were never placed (both prices are 0)
+                if yes_price == 0.0 and no_price == 0.0:
+                    logger.warning(
+                        f"⚠️ Both order prices are 0.0 for {position.market_slug} - orders were never placed or were cancelled. "
+                        f"Closing position."
+                    )
+                    await self._close_position(position, reason="orders_not_placed")
+                    return
+                
+                # Check if we should merge (price sum <= threshold)
+                if price_sum <= self.config.merge_threshold:
+                    # Only merge if we have order IDs (orders exist to cancel)
+                    if not position.yes_order_id or not position.no_order_id:
+                        logger.warning(
+                            f"⚠️ Cannot merge {position.market_slug}: missing order IDs "
+                            f"(YES: {position.yes_order_id is not None}, NO: {position.no_order_id is not None}). "
+                            f"Orders may have been cancelled or never placed. Closing position."
+                        )
+                        await self._close_position(position, reason="missing_order_ids")
+                        return
+                    
+                    logger.info(
+                        f"Price sum ({price_sum:.4f}) <= merge_threshold ({self.config.merge_threshold:.4f}) "
+                        f"for {position.market_slug}. Merging orders and will re-split."
+                    )
+                    await self._merge_and_wait_resplit(position)
                 else:
                     # Adjust both prices down by price_step
                     logger.info(
