@@ -1637,6 +1637,21 @@ class MarketMaker:
                 logger.error("Could not calculate midpoint from orderbook")
                 return
             
+            # Validate midpoint is reasonable (should be between best_bid and best_ask)
+            # If weighted midpoint is way off, fall back to simple midpoint
+            if best_bid is not None and best_ask is not None:
+                simple_midpoint = (best_bid + best_ask) / 2.0
+                midpoint_range_low = min(best_bid, simple_midpoint - 0.05)  # Allow 5% below simple midpoint
+                midpoint_range_high = max(best_ask, simple_midpoint + 0.05)  # Allow 5% above simple midpoint
+                
+                if midpoint < midpoint_range_low or midpoint > midpoint_range_high:
+                    logger.warning(
+                        f"   ⚠️ Weighted midpoint (${midpoint:.4f}) is outside reasonable range "
+                        f"(${midpoint_range_low:.4f} - ${midpoint_range_high:.4f}). "
+                        f"Falling back to simple midpoint (${simple_midpoint:.4f})"
+                    )
+                    midpoint = simple_midpoint
+            
             # Calculate sell prices
             # Strategy: Sell at midpoint + offset, but ensure we're competitive
             # For binary markets: YES + NO should always = 1.0
@@ -1714,11 +1729,26 @@ class MarketMaker:
                 )
             
             midpoint_type = "weighted" if self.config.use_weighted_midpoint else "simple"
+            
+            # Calculate simple midpoint for comparison
+            simple_midpoint = None
+            if best_bid is not None and best_ask is not None:
+                simple_midpoint = (best_bid + best_ask) / 2.0
+            
             logger.info("=" * 80)
             logger.info(f"📊 MARKET ANALYSIS for {position.market_slug}:")
             logger.info(f"   Best BID (highest buyer): ${best_bid:.4f}" if best_bid else "   Best BID: None")
             logger.info(f"   Best ASK (lowest seller): ${best_ask:.4f}" if best_ask else "   Best ASK: None")
+            if simple_midpoint is not None:
+                logger.info(f"   Simple Midpoint (best_bid + best_ask) / 2: ${simple_midpoint:.4f}")
             logger.info(f"   {midpoint_type.upper()} Midpoint (YES): ${midpoint:.4f}")
+            if simple_midpoint is not None and midpoint is not None:
+                diff = abs(midpoint - simple_midpoint)
+                if diff > 0.01:
+                    logger.warning(
+                        f"   ⚠️ Weighted midpoint (${midpoint:.4f}) differs significantly from simple midpoint (${simple_midpoint:.4f}), "
+                        f"diff: ${diff:.4f}"
+                    )
             logger.info(f"   Our YES SELL price: ${yes_sell_price:.4f} (midpoint + {self.config.offset_above_midpoint:.4f})")
             logger.info(f"   Our NO SELL price: ${no_sell_price:.4f}")
             logger.info(f"   Price sum (YES + NO): ${yes_sell_price + no_sell_price:.4f}")
