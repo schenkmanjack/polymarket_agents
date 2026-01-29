@@ -1199,6 +1199,22 @@ class MarketMaker:
                 
                 if not market:
                     logger.warning(f"Could not find market for slug: {market_slug}")
+                    # Mark position as closed since market not found
+                    db_pos.position_status = 'closed'
+                    session.commit()
+                    continue
+                
+                # Check if position has valid orders (order IDs and prices)
+                # If orders were never placed, close the position
+                if (not db_pos.yes_order_id and not db_pos.no_order_id) or \
+                   (db_pos.yes_order_price is None and db_pos.no_order_price is None) or \
+                   (db_pos.yes_order_price == 0.0 and db_pos.no_order_price == 0.0):
+                    logger.warning(
+                        f"⚠️ Position {market_slug} has no valid orders (order IDs or prices missing). "
+                        f"Orders were likely never placed. Closing position."
+                    )
+                    db_pos.position_status = 'closed'
+                    session.commit()
                     continue
                 
                 # Recreate position object
@@ -1222,6 +1238,11 @@ class MarketMaker:
                     no_adjustment_count=db_pos.no_adjustment_count or 0,
                     db_position_id=db_pos.id,
                 )
+                
+                # Set orders_placed_time if we have order IDs (orders were placed)
+                if position.yes_order_id or position.no_order_id:
+                    # Try to get orders_placed_time from database, or use created_at as fallback
+                    position.orders_placed_time = db_pos.created_at
                 
                 self.active_positions[market_slug] = position
                 self.monitored_markets.add(market_slug)
@@ -1441,6 +1462,10 @@ class MarketMaker:
             # Verify orders were placed
             if not position.yes_order_id and not position.no_order_id:
                 logger.error(f"❌ Failed to place sell orders for {market_slug} - no order IDs")
+                # Mark position as failed in database since orders couldn't be placed
+                if position.db_position_id:
+                    self._update_split_status_in_db(position.db_position_id, position.split_transaction_hash, "failed")
+                    logger.warning(f"⚠️ Marked position {position.db_position_id} as 'failed' due to order placement failure")
                 return False
             
             # Track position
@@ -2419,24 +2444,43 @@ class MarketMaker:
             
             # Check if exponential wait time has passed
             if time_since_reference >= exponential_wait_time:
-                # Check current prices
-                yes_price = position.yes_order_price or 0.0
-                no_price = position.no_order_price or 0.0
-                price_sum = yes_price + no_price
+            # Check current prices
+            yes_price = position.yes_order_price or 0.0
+            no_price = position.no_order_price or 0.0
+            price_sum = yes_price + no_price
+            
+            logger.info(
+                f"🔍 Neither fills check for {position.market_slug}: "
+                f"YES price={yes_price:.4f}, NO price={no_price:.4f}, "
+                f"sum={price_sum:.4f}, threshold={self.config.merge_threshold:.4f}"
+            )
+            
+            # Check if orders were never placed (both prices are 0)
+            if yes_price == 0.0 and no_price == 0.0:
+                logger.warning(
+                    f"⚠️ Both order prices are 0.0 for {position.market_slug} - orders were never placed or were cancelled. "
+                    f"Closing position."
+                )
+                await self._close_position(position, reason="orders_not_placed")
+                return
+            
+            # Check if we should merge (price sum <= threshold)
+            if price_sum <= self.config.merge_threshold:
+                # Only merge if we have order IDs (orders exist to cancel)
+                if not position.yes_order_id or not position.no_order_id:
+                    logger.warning(
+                        f"⚠️ Cannot merge {position.market_slug}: missing order IDs "
+                        f"(YES: {position.yes_order_id is not None}, NO: {position.no_order_id is not None}). "
+                        f"Orders may have been cancelled or never placed. Closing position."
+                    )
+                    await self._close_position(position, reason="missing_order_ids")
+                    return
                 
                 logger.info(
-                    f"🔍 Neither fills check for {position.market_slug}: "
-                    f"YES price={yes_price:.4f}, NO price={no_price:.4f}, "
-                    f"sum={price_sum:.4f}, threshold={self.config.merge_threshold:.4f}"
+                    f"Price sum ({price_sum:.4f}) <= merge_threshold ({self.config.merge_threshold:.4f}) "
+                    f"for {position.market_slug}. Merging orders and will re-split."
                 )
-                
-                # Check if we should merge (price sum <= threshold)
-                if price_sum <= self.config.merge_threshold:
-                    logger.info(
-                        f"Price sum ({price_sum:.4f}) <= merge_threshold ({self.config.merge_threshold:.4f}) "
-                        f"for {position.market_slug}. Merging orders and will re-split."
-                    )
-                    await self._merge_and_wait_resplit(position)
+                await self._merge_and_wait_resplit(position)
                 else:
                     # Adjust both prices down by price_step
                     logger.info(
